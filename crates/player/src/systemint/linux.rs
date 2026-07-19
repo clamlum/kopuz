@@ -43,6 +43,7 @@ pub enum SystemEvent {
     Seek(f64),
     SetShuffle(bool),
     SetRepeat(RepeatMode),
+    SetVolume(f64),
 }
 
 /// MPRIS SetPosition requires a `mpris:trackid`; we expose a constant one
@@ -55,6 +56,7 @@ struct MprisState {
     position: Time,
     shuffle: bool,
     repeat: RepeatMode,
+    volume: f64,
 }
 
 static TX: OnceLock<Sender<SystemEvent>> = OnceLock::new();
@@ -80,6 +82,7 @@ fn state() -> Arc<Mutex<MprisState>> {
                 position: Time::ZERO,
                 shuffle: false,
                 repeat: RepeatMode::Off,
+                volume: 1.0
             }))
         })
         .clone()
@@ -222,9 +225,18 @@ impl PlayerInterface for P {
             .unwrap_or_default())
     }
     async fn volume(&self) -> fdo::Result<f64> {
-        Ok(1.0)
+        let s = self.0.lock().unwrap();
+        Ok(s.volume)
     }
-    async fn set_volume(&self, _: f64) -> mpris_server::zbus::Result<()> {
+    async fn set_volume(&self, value: f64) -> mpris_server::zbus::Result<()> {
+        let v = if value.is_finite() { value.clamp(0.0, 1.0) } else { 1.0 };
+
+        if let Ok(mut s) = self.0.lock() {
+            s.volume = v;
+        }
+        notify();
+
+        let _ = self.1.send(SystemEvent::SetVolume(v));
         Ok(())
     }
     async fn position(&self) -> fdo::Result<Time> {
@@ -379,4 +391,19 @@ pub fn update_now_playing(
         s.position = Time::from_micros((position * 1e6) as i64);
     }
     NOTIFY.get().map(|tx| tx.send(true));
+}
+
+pub fn update_volume(volume: f64) {
+    let v = if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
+    if let Ok(mut s) = state().lock() {
+        if (s.volume - v).abs() > f64::EPSILON {
+            s.volume = v;
+            notify();
+        }
+    }
 }

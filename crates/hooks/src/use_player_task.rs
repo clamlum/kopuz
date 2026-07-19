@@ -163,8 +163,15 @@ pub fn use_player_task(ctrl: PlayerController) {
                             RepeatMode::Playlist => LoopMode::Queue,
                             RepeatMode::Track => LoopMode::Track,
                         }),
+                        SystemEvent::SetVolume(v) => {
+                            ctrl.volume.set(v as f32);
+                            ctrl.player.write().set_volume(v as f32);
+                        }
                     }
                 }
+                let vol_0_1 = *ctrl.volume.read();
+                player::systemint::update_volume(vol_0_1 as f64);
+
                 if !processed {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }

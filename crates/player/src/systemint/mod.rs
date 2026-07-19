@@ -12,7 +12,7 @@ mod linux;
 
 #[cfg(target_os = "linux")]
 pub use linux::{
-    RepeatMode, SystemEvent, poll_event, update_modes, update_now_playing, update_position,
+    RepeatMode, SystemEvent, poll_event, update_modes, update_now_playing, update_position, update_volume,
 };
 
 #[cfg(target_os = "windows")]
