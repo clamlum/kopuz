@@ -38,6 +38,13 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.14.0" date="2026-08-04">
+      <description>
+        <p>
+          Playlists gain radio: YouTube Music can start a mix from a playlist, and the button shows up wherever a source supports it, with YouTube liked music now listed as a playlist of its own. Matugen and pywal palettes can drive the theme live, the settings screen is reorganized with a choice of layouts, and Spotify playback works in Helium. Album lists show real metadata track numbers, favorites can be filtered by search, the fullscreen player gets favorite and track actions, and releases now ship AppImage, DEB, RPM, DMG, EXE and MSI packages from one workflow.
+        </p>
+      </description>
+    </release>
     <release version="0.13.0" date="2026-07-28">
       <description>
         <p>
