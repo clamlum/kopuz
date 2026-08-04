@@ -284,6 +284,7 @@ pub fn ThemeSelector(current_theme: String, on_change: EventHandler<String>) -> 
     let mut options = vec![
         ("album-art".into(), i18n::t("album_art_gradient")),
         ("default".into(), i18n::t("default_theme")),
+        (utils::live_theme::THEME_ID.into(), i18n::t("live_theme")),
         ("gruvbox".into(), i18n::t("gruvbox_material")),
         ("gruvbox-classic".into(), i18n::t("gruvbox_classic")),
         ("gruvbox-dark-soft".into(), i18n::t("gruvbox_dark_soft")),
@@ -308,6 +309,11 @@ pub fn ThemeSelector(current_theme: String, on_change: EventHandler<String>) -> 
         ("one-light".into(), i18n::t("one_light")),
         ("gruvbox-light".into(), i18n::t("gruvbox_light_soft")),
     ];
+    // Android has no palette control, since choosing one opens a native file
+    // dialog, so don't offer a theme it can't point at anything.
+    if cfg!(target_os = "android") {
+        options.retain(|(id, _)| id != utils::live_theme::THEME_ID);
+    }
     options.extend(custom);
 
     rsx! {

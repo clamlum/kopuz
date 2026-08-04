@@ -56,6 +56,11 @@ const TOOLBAR_ICONS: Asset = asset!("../assets/toolbar_icons", AssetOptions::fol
 /// save per settle+cooldown window instead of one per mutation.
 const STORE_SAVE_SETTLE_MS: u64 = 600;
 const STORE_SAVE_COOLDOWN_MS: u64 = 2500;
+/// How often the matugen/pywal palette is stat'd. The active rate is what a
+/// wallpaper change costs before the colours follow; the idle one only exists to
+/// notice the theme being switched on.
+const LIVE_THEME_POLL_MS: u64 = 400;
+const LIVE_THEME_IDLE_POLL_MS: u64 = 2000;
 
 fn configured_local_sources(config: &config::AppConfig) -> Vec<(config::Source, Vec<PathBuf>)> {
     std::iter::once((config::Source::Local, config.music_directory.clone()))
@@ -1680,6 +1685,52 @@ fn App() -> Element {
         ));
     });
 
+    // matugen and pywal rewrite their output on every wallpaper change, so the
+    // palette is polled rather than read once: picking a new wallpaper recolours
+    // Kopuz in place. Only while the theme is selected, otherwise this is a timer
+    // nobody asked for.
+    let mut live_theme_css = use_signal(String::new);
+    use_future(move || async move {
+        let mut last: Option<(PathBuf, String)> = None;
+        loop {
+            if config.peek().theme != utils::live_theme::THEME_ID {
+                if last.take().is_some() {
+                    live_theme_css.set(String::new());
+                }
+                utils::sleep(std::time::Duration::from_millis(LIVE_THEME_IDLE_POLL_MS)).await;
+                continue;
+            }
+            let path = utils::live_theme::resolve_path(&config.peek().live_theme_path);
+            let probe = path.clone();
+            let raw = tokio::task::spawn_blocking(move || utils::live_theme::read(&probe))
+                .await
+                .unwrap_or_default();
+            let current = raw.map(|raw| (path, raw));
+            if current != last {
+                last = current;
+                let css = last
+                    .as_ref()
+                    .and_then(|(path, raw)| utils::live_theme::parse(raw, path))
+                    .map(|vars| utils::live_theme::to_css(&vars))
+                    .unwrap_or_default();
+                live_theme_css.set(css);
+            }
+            utils::sleep(std::time::Duration::from_millis(LIVE_THEME_POLL_MS)).await;
+        }
+    });
+
+    use_effect(move || {
+        let css = live_theme_css.read().clone();
+        let css_json = serde_json::to_string(&css).unwrap_or_else(|_| "\"\"".to_string());
+        let _ = dioxus::document::eval(&format!(
+            r#"(function(){{
+                let el = document.getElementById('live-theme-style');
+                if (!el) {{ el = document.createElement('style'); el.id = 'live-theme-style'; document.head.appendChild(el); }}
+                el.textContent = {css_json};
+            }})()"#
+        ));
+    });
+
     // Inject a user-picked UI font reactively, mirroring the custom-themes path
     // above: read the file, inline it as a data: URI, and swap the <style>'s text.
     let custom_font_path = use_memo(move || config.read().custom_font_path.clone());
@@ -1705,10 +1756,16 @@ fn App() -> Element {
     });
 
     let theme_class = use_memo(move || {
-        if config.read().theme == "album-art" {
+        let theme = config.read().theme.clone();
+        if theme == "album-art" {
             "theme-default".to_string()
+        } else if theme == utils::live_theme::THEME_ID {
+            // A palette can be partial, or not written yet, so the default sits
+            // underneath to keep every var resolving. The injected `.theme-live`
+            // block lands later in <head>, so it still wins.
+            format!("theme-default theme-{theme}")
         } else {
-            format!("theme-{}", config.read().theme)
+            format!("theme-{theme}")
         }
     });
 

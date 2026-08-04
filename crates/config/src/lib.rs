@@ -567,6 +567,13 @@ pub enum UiStyle {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum SettingsLayout {
+    #[default]
+    Cd,
+    TopBar,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum ListenNowStyle {
     #[default]
     List,
@@ -634,6 +641,10 @@ pub struct AppConfig {
     pub music_directory: Vec<PathBuf>,
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Palette file matugen or pywal writes, polled for changes while the live
+    /// theme is active. Empty means whichever default location exists.
+    #[serde(default)]
+    pub live_theme_path: String,
     #[serde(default = "default_device_id")]
     pub device_id: String,
     #[serde(default = "default_discord_presence")]
@@ -759,6 +770,8 @@ pub struct AppConfig {
     pub player_bar_position: PlayerBarPosition,
     #[serde(default)]
     pub ui_style: UiStyle,
+    #[serde(default)]
+    pub settings_layout: SettingsLayout,
     #[serde(default = "default_hero_height")]
     pub hero_height: u32,
     #[serde(default = "default_home_sections")]
@@ -903,6 +916,7 @@ impl Default for AppConfig {
             spotify_prefer_active_device: true,
             music_directory: vec![music_directory],
             theme: default_theme(),
+            live_theme_path: String::new(),
             device_id: default_device_id(),
             discord_presence: Some(true),
             discord_presence_paused: Some(true),
@@ -956,6 +970,7 @@ impl Default for AppConfig {
             offline_tracks: HashMap::new(),
             player_bar_position: PlayerBarPosition::Bottom,
             ui_style: UiStyle::Normal,
+            settings_layout: SettingsLayout::Cd,
             hero_height: default_hero_height(),
             home_sections: default_home_sections(),
             listen_now_style: ListenNowStyle::default(),
@@ -1115,7 +1130,10 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, BackBehavior, Browser, EqualizerSettings, MusicServer, ServerAuth};
+    use super::{
+        AppConfig, BackBehavior, Browser, EqualizerSettings, MusicServer, ServerAuth,
+        SettingsLayout,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -1173,6 +1191,16 @@ mod tests {
             config.music_directory,
             vec![PathBuf::from("/music"), PathBuf::from("/archive")]
         );
+    }
+
+    #[test]
+    fn settings_layout_is_backward_compatible_and_deserializes_top_bar() {
+        let default_config: AppConfig = serde_json::from_str("{}").unwrap();
+        let top_bar_config: AppConfig =
+            serde_json::from_str(r#"{"settings_layout":"TopBar"}"#).unwrap();
+
+        assert_eq!(default_config.settings_layout, SettingsLayout::Cd);
+        assert_eq!(top_bar_config.settings_layout, SettingsLayout::TopBar);
     }
 
     #[test]

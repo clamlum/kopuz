@@ -6,6 +6,7 @@ pub mod color;
 pub mod db_cache;
 pub mod hls_source;
 pub mod icy;
+pub mod live_theme;
 pub mod logs;
 pub mod lyrics;
 pub mod musicbrainz;

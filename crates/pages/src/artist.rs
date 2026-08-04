@@ -715,8 +715,8 @@ pub fn Artist(
                                             rsx! {
                                                 div {
                                                     key: "{album.id}",
-                                                    class: "vcard group relative p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-colors",
-                                                    style: "content-visibility: auto;",
+                                                    class: if is_open { "vcard group relative z-50 p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-colors" } else { "vcard group relative p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-colors" },
+                                                    style: if is_open { "content-visibility: visible; contain: none;" } else { "content-visibility: auto;" },
                                                     onclick: move |_| on_navigate.call(id_for_navigate.clone()),
                                                     oncontextmenu: {
                                                         let id = id_for_menu.clone();

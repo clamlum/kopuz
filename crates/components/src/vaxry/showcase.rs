@@ -308,7 +308,11 @@ pub fn ShowcaseVaxry(props: ShowcaseProps) -> Element {
                                                 is_downloading,
                                                 is_currently_playing,
                                                 selected_queue_tracks: (*selected_queue_tracks_arc).clone(),
-                                                row_num: Some(display_idx + 1 - last_disc_size),
+                                                row_num: Some(showcase::track_row_number(
+                                                    track.track_number,
+                                                    display_idx + 1 - last_disc_size,
+                                                    props.is_album,
+                                                )),
                                                 on_select: move |selected| {
                                                     if let Some(handler) = &props.on_select {
                                                         handler.call((idx, selected));
