@@ -69,8 +69,8 @@ jobs:
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
           cp target/dx/kopuz/release/linux/app/kopuz AppDir/usr/bin/kopuz
-          cp data/com.temidaradev.kopuz.desktop AppDir/usr/share/applications/
-          cp crates/kopuz/assets/logo.png AppDir/usr/share/icons/hicolor/256x256/apps/com.temidaradev.kopuz.png
+          cp data/moe.kopuz.kopuz.desktop AppDir/usr/share/applications/
+          cp crates/kopuz/assets/logo.png AppDir/usr/share/icons/hicolor/256x256/apps/moe.kopuz.kopuz.png
 
       - name: Download linuxdeploy
         run: |
@@ -146,7 +146,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@30b5ca8b54e1dcffd9548bc87ede1531310fdc67 # v1.20.0
+        uses: cargo-bins/cargo-binstall@main
 
       - name: Install dioxus-cli
         run: cargo binstall dioxus-cli@0.7.9 -y --force --disable-strategies compile
@@ -228,7 +228,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@30b5ca8b54e1dcffd9548bc87ede1531310fdc67 # v1.20.0
+        uses: cargo-bins/cargo-binstall@main
 
       - name: Install dioxus-cli
         run: cargo binstall dioxus-cli@0.7.9 -y --force --disable-strategies compile
