@@ -1817,6 +1817,41 @@ fn App() -> Element {
         }
     });
 
+    use_effect(move || {
+        let mut ctrl = ctrl;
+        spawn(async move {
+            let mut eval = dioxus::document::eval(
+                r#"(function(){
+                    if (window.__kopuzSpaceHandler) {
+                        document.removeEventListener('keydown', window.__kopuzSpaceHandler, true);
+                    }
+                    const isTextEntry = (el) => {
+                        if (!el) return false;
+                        if (el.isContentEditable) return true;
+                        const tag = el.tagName;
+                        return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+                    };
+                    const handler = (e) => {
+                        if (e.key !== ' ' && e.code !== 'Space') return;
+                        if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
+                        if (isTextEntry(e.target) || isTextEntry(document.activeElement)) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (e.repeat) return;
+                        dioxus.send('toggle-play');
+                    };
+                    window.__kopuzSpaceHandler = handler;
+                    document.addEventListener('keydown', handler, true);
+                })()"#,
+            );
+            while let Ok(v) = eval.recv::<serde_json::Value>().await {
+                if v.as_str() == Some("toggle-play") {
+                    ctrl.toggle();
+                }
+            }
+        });
+    });
+
     rsx! {
         // we use this component here to prevent re-diffing to prevent warns in console
         StaticHeadAssets {}
@@ -1851,9 +1886,6 @@ fn App() -> Element {
                 {
                     let c = *show_quick_search.read();
                     show_quick_search.set(!c);
-                    evt.prevent_default();
-                } else if key == Key::Character(" ".into()) {
-                    ctrl.toggle();
                     evt.prevent_default();
                 }
             },
