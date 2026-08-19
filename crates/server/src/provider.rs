@@ -63,6 +63,11 @@ impl ProviderClient {
                  instead of username/password login"
                     .to_string(),
             ),
+            MusicService::AppleMusic => Err(
+                "Apple Music uses browser sign-in or manual media-user-token; \
+                 use the sign-in flow instead of username/password login"
+                    .to_string(),
+            ),
             MusicService::Spotify => Err(
                 "Spotify uses OAuth browser sign-in; call spotify::auth::launch_signin_and_extract() \
                  instead of username/password login"

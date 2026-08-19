@@ -450,6 +450,8 @@ mod tests {
             token: "password".to_string(),
             user_id: "user".to_string(),
             device_id: "test".to_string(),
+            apple_music_storefront: String::new(),
+            apple_music_language: String::new(),
         };
         let src = SubsonicSource::new(db, Source::Server("test".to_string()), &conn);
 

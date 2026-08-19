@@ -33,6 +33,8 @@ const FULLSCREEN_OPPOSITE_LYRIC_CLASS: &str = "text-white/40 text-2xl italic fon
 const FULLSCREEN_ACTIVE_OPPOSITE_LYRIC_CLASS: &str = "text-white text-2xl italic font-semibold transition-colors duration-300 whitespace-pre-wrap text-right w-full";
 const RIGHTBAR_OPPOSITE_LYRIC_CLASS: &str = "text-white/40 text-lg italic font-semibold transition-colors duration-300 hover:text-white/60 cursor-pointer whitespace-pre-wrap text-right w-full";
 const RIGHTBAR_ACTIVE_OPPOSITE_LYRIC_CLASS: &str = "text-white text-lg italic font-semibold transition-colors duration-300 whitespace-pre-wrap text-right w-full";
+const LYRIC_COMFORT_OFFSET_PERCENT: u32 = 42;
+const LYRIC_TAIL_SPACER_PERCENT: u32 = 100 - LYRIC_COMFORT_OFFSET_PERCENT;
 const LYRIC_SEAMLESS_GAP_SECONDS: f64 = 3.0;
 const LYRIC_CHUNK_FALLBACK_SECONDS: f64 = 0.35;
 pub use crate::shared::LayoutMode;
@@ -270,23 +272,36 @@ pub fn LyricsView(
     // Clear functions when the component is dropped
     use_drop(move || {
         let _cleanup = eval(&format!(
-            "for (const key of ['updateLyrics', 'resetLyrics', 'setAutoSync', 'autoSync', 'programmaticScroll']) delete window[`__{layout}_${{key}}`];"
+            "for (const key of ['updateLyrics', 'resetLyrics', 'setAutoSync', 'autoSync']) delete window[`__{layout}_${{key}}`];"
         ));
     });
 
-    // Hand scroll control back to the user the moment they scroll the lyrics
-    // themselves; the sync button re-arms auto-scroll.
+    // Take over on real input, not on scroll events: line growth and the browser's
+    // own scroll anchoring move scrollTop on their own. The sync button re-arms.
     use_future(move || async move {
         let mut listener = eval(&format!(
             r#"
                 const attach = () => {{
                     const container = document.getElementById('{layout}-lyrics-content');
                     if (!container) {{ requestAnimationFrame(attach); return; }}
-                    container.addEventListener('scroll', () => {{
-                        if (window.__{layout}_programmaticScroll) return;
+                    const scrollKeys = new Set(
+                        ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']
+                    );
+                    const takeOver = () => {{
                         if (window.__{layout}_autoSync === false) return;
                         window.__{layout}_autoSync = false;
                         dioxus.send('user_scroll');
+                    }};
+                    container.addEventListener('wheel', takeOver, {{ passive: true }});
+                    container.addEventListener('touchmove', takeOver, {{ passive: true }});
+                    container.addEventListener('keydown', (e) => {{
+                        if (scrollKeys.has(e.key)) takeOver();
+                    }});
+                    // Scrollbar gutter only; a press on a line is a seek.
+                    container.addEventListener('pointerdown', (e) => {{
+                        if (e.target === container && e.offsetX >= container.clientWidth) {{
+                            takeOver();
+                        }}
                     }});
                 }};
                 attach();
@@ -314,7 +329,6 @@ pub fn LyricsView(
                 let activeClass = "{active_class}";
                 let inactiveClass = "{inactive_class}";
                 window.__{layout}_autoSync = true;
-                window.__{layout}_programmaticScroll = false;
 
                 const UNSUNG_ALPHA = 0.45;
                 const GLOW_DECAY_SECONDS = 0.6;
@@ -325,10 +339,12 @@ pub fn LyricsView(
                 const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
 
                 // Playback time only arrives every ~16-50ms; extrapolate between
-                // updates so the wipe runs at frame rate instead of stepping.
+                // updates so the wipe runs at frame rate, capped so a stalled feed
+                // can't run away.
                 const clock = {{ time: 0, at: 0, playing: false }};
+                const MAX_EXTRAPOLATION_SECONDS = 0.1;
                 const nowSeconds = () => clock.playing
-                    ? clock.time + (performance.now() - clock.at) / 1000
+                    ? clock.time + Math.min((performance.now() - clock.at) / 1000, MAX_EXTRAPOLATION_SECONDS)
                     : clock.time;
 
                 const chunkAlpha = (lineEl) => lineEl.dataset.backgroundLine === 'true' ? 0.7 : 1;
@@ -460,16 +476,21 @@ pub fn LyricsView(
                     }}
                 }};
 
+                const comfortScrollTop = (container, lineEl) => {{
+                    const currentOffset = lineEl.getBoundingClientRect().top
+                        - container.getBoundingClientRect().top;
+                    const targetOffset = container.clientHeight * {LYRIC_COMFORT_OFFSET_PERCENT} / 100;
+                    const furthest = Math.max(0, container.scrollHeight - container.clientHeight);
+                    const top = container.scrollTop + currentOffset - targetOffset;
+                    return Math.min(furthest, Math.max(0, top));
+                }};
+
                 const scrollLineIntoComfortView = (lineEl) => {{
                     if (!window.__{layout}_autoSync) return;
                     const container = document.getElementById('{layout}-lyrics-content');
                     if (!container || !lineEl) return;
 
-                    const containerRect = container.getBoundingClientRect();
-                    const lineRect = lineEl.getBoundingClientRect();
-                    const currentOffset = lineRect.top - containerRect.top;
-                    const targetOffset = container.clientHeight * 0.42;
-                    const nextTop = container.scrollTop + currentOffset - targetOffset;
+                    const nextTop = comfortScrollTop(container, lineEl);
 
                     if (scrollAnimationFrame) {{
                         cancelAnimationFrame(scrollAnimationFrame);
@@ -481,7 +502,6 @@ pub fn LyricsView(
                     const startedAt = performance.now();
                     const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 
-                    window.__{layout}_programmaticScroll = true;
                     const step = (now) => {{
                         const progress = Math.min(1, (now - startedAt) / durationMs);
                         container.scrollTop = startTop + distance * easeOutCubic(progress);
@@ -489,11 +509,21 @@ pub fn LyricsView(
                             scrollAnimationFrame = requestAnimationFrame(step);
                         }} else {{
                             scrollAnimationFrame = null;
-                            setTimeout(() => {{ window.__{layout}_programmaticScroll = false; }}, 80);
                         }}
                     }};
 
                     scrollAnimationFrame = requestAnimationFrame(step);
+                }};
+
+                // A remount measures the list before layout settles and a resize moves
+                // it under us; re-park rather than wait for the next line.
+                const realignIfDrifted = (lineEl) => {{
+                    if (!window.__{layout}_autoSync || scrollAnimationFrame) return;
+                    const container = document.getElementById('{layout}-lyrics-content');
+                    if (!container || !lineEl) return;
+                    if (Math.abs(comfortScrollTop(container, lineEl) - container.scrollTop) > 24) {{
+                        scrollLineIntoComfortView(lineEl);
+                    }}
                 }};
 
                 const fadeLineIn = (lineEl) => {{
@@ -555,6 +585,7 @@ pub fn LyricsView(
 
                     if (nextEl) {{
                         activateLine(nextEl);
+                        realignIfDrifted(nextEl);
                     }}
 
                     for (const idx of nextSecondary) {{
@@ -583,12 +614,13 @@ pub fn LyricsView(
                         cancelAnimationFrame(paintFrame);
                         paintFrame = null;
                     }}
-                    document
-                        .getElementById('{layout}-lyrics-content')
+                    const container = document.getElementById('{layout}-lyrics-content');
+                    container
                         ?.querySelectorAll('[data-lyric-line]')
                         .forEach((lineEl) => deactivateLine(lineEl));
                     currEl = null;
                     activeSecondaryEls = new Set();
+                    container?.scrollTo({{ top: 0, left: 0 }});
                 }}
             "#,
         ));
@@ -600,9 +632,8 @@ pub fn LyricsView(
         // a fresh track re-arms auto-scroll
         auto_sync.set(true);
 
-        // scroll to top on lyrics change
-        let _scroll_to_top = eval(&format!(
-            "if (window.__{layout}_autoSync !== undefined) window.__{layout}_autoSync = true; window.__{layout}_resetLyrics?.(); document.getElementById('{layout}-lyrics-content')?.scrollTo({{ top: 0, left: 0 }});"
+        let _reset = eval(&format!(
+            "if (window.__{layout}_autoSync !== undefined) window.__{layout}_autoSync = true; window.__{layout}_resetLyrics?.();"
         ));
 
         async move {
@@ -612,7 +643,16 @@ pub fn LyricsView(
                 let main_line_indices = main_line_indices(&lines);
 
                 loop {
-                    let current_time = ctrl.displayed_progress_secs_f64();
+                    // The clock runs ahead of the speakers; hold the lyrics back.
+                    let offset_secs = {
+                        let cfg = config.peek();
+                        if cfg.lyrics_offset_auto {
+                            ctrl.output_latency_secs()
+                        } else {
+                            f64::from(cfg.lyrics_offset_ms) / 1000.0
+                        }
+                    };
+                    let current_time = ctrl.displayed_progress_secs_f64() - offset_secs;
                     let playing = *ctrl.is_playing.peek();
                     if let Some(current_line_index) =
                         active_main_line_index(&lines, &main_line_indices, current_time)
@@ -660,20 +700,25 @@ pub fn LyricsView(
         }
     });
 
-    let show_sync_button = !auto_sync()
-        && matches!(
-            &*lyrics.read(),
-            Some(Some(utils::lyrics::Lyrics::Synced(_)))
-        );
+    let has_synced_lyrics = matches!(
+        &*lyrics.read(),
+        Some(Some(utils::lyrics::Lyrics::Synced(_)))
+    );
+    let show_sync_button = !auto_sync() && has_synced_lyrics;
 
     rsx! {
         div { class: "relative flex flex-col flex-1 min-h-0",
         div {
             id: "{layout}-lyrics-content",
+            tabindex: "0",
             class: match layout {
                 LayoutMode::Fullscreen => "flex-1 overflow-y-auto overflow-x-hidden px-4 py-2 space-y-1",
                 LayoutMode::Rightbar => "flex-1 overflow-y-auto overflow-x-hidden px-2 py-2 space-y-1",
             },
+
+            if has_synced_lyrics {
+                div { "aria-hidden": "true", style: "height: {LYRIC_COMFORT_OFFSET_PERCENT}%" }
+            }
 
             div {
                 class: match layout {
@@ -729,6 +774,10 @@ pub fn LyricsView(
                     Some(None) => rsx! { "" },
                     None => rsx! { "{i18n::t(\"loading_lyrics\")}" },
                 }
+            }
+
+            if has_synced_lyrics {
+                div { "aria-hidden": "true", style: "height: {LYRIC_TAIL_SPACER_PERCENT}%" }
             }
         }
 

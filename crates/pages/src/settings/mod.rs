@@ -77,6 +77,10 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
             .unwrap_or(config::Browser::Chrome)
     });
     let yt_anonymous = use_signal(|| false);
+    let apple_music_storefront = use_signal(|| "us".to_string());
+    let apple_music_language = use_signal(|| "en".to_string());
+    let apple_music_manual_token = use_signal(String::new);
+    let apple_music_use_manual = use_signal(|| false);
 
     let mut username = use_signal(String::new);
     let mut password = use_signal(String::new);
@@ -123,6 +127,15 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
         crate::settings_actions::ytmusic_auto_login(config, yt_browser, error, ctrl.playback_error);
     };
 
+    let applemusic_auto_login = move || {
+        crate::settings_actions::applemusic_auto_login(
+            config,
+            yt_browser,
+            error,
+            ctrl.playback_error,
+        );
+    };
+
     let handle_add_server = move |_| {
         crate::settings_actions::add_server(
             config,
@@ -135,6 +148,10 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
             show_add_server,
             show_login,
             ctrl.playback_error,
+            apple_music_storefront,
+            apple_music_language,
+            apple_music_manual_token,
+            apple_music_use_manual,
         );
     };
 
@@ -174,7 +191,7 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
     };
 
     rsx! {
-        div { class: if cfg!(target_os = "android") { "px-3 pt-2 pb-28 w-full max-w-7xl mx-auto" } else if config.read().settings_layout == config::SettingsLayout::TopBar { "settings-page settings-layout-topbar px-6 py-7 w-full max-w-7xl mx-auto" } else { "settings-page settings-layout-cd px-6 py-7 w-full max-w-7xl mx-auto" },
+        div { class: if cfg!(target_os = "android") { "px-3 pt-2 pb-6 w-full max-w-7xl mx-auto" } else if config.read().settings_layout == config::SettingsLayout::TopBar { "settings-page settings-layout-topbar px-6 py-7 w-full max-w-7xl mx-auto" } else { "settings-page settings-layout-cd px-6 py-7 w-full max-w-7xl mx-auto" },
             if !cfg!(target_os = "android") {
                 h1 { class: "text-2xl font-semibold tracking-tight text-white mb-5 px-1", "{i18n::t(\"settings\")}" }
             }
@@ -540,16 +557,18 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
                                         on_delete: handle_delete_saved,
                                         on_switch: handle_switch_server,
                                         on_login: move |_| {
-                                            let is_ytmusic = config
-                                                .read()
-                                                .server
-                                                .as_ref()
-                                                .map(|s| s.service == MusicService::YtMusic)
-                                                .unwrap_or(false);
-                                            if is_ytmusic {
-                                                ytmusic_auto_login();
-                                            } else {
-                                                show_login.set(true);
+                                            let service =
+                                                config.read().server.as_ref().map(|s| s.service);
+                                            match service {
+                                                Some(MusicService::YtMusic) => {
+                                                    ytmusic_auto_login();
+                                                }
+                                                Some(MusicService::AppleMusic) => {
+                                                    applemusic_auto_login();
+                                                }
+                                                _ => {
+                                                    show_login.set(true);
+                                                }
                                             }
                                         },
                                         spotify_browsers: spotify_browsers.clone(),
@@ -780,6 +799,10 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
                     server_service,
                     yt_browser,
                     yt_anonymous,
+                    apple_music_storefront,
+                    apple_music_language,
+                    apple_music_manual_token,
+                    apple_music_use_manual,
                     host_access,
                     error,
                     on_close: move |_| show_add_server.set(false),

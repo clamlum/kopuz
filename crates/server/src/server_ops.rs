@@ -15,6 +15,8 @@ pub struct ServerConn {
     pub token: String,
     pub user_id: String,
     pub device_id: String,
+    pub apple_music_storefront: String,
+    pub apple_music_language: String,
 }
 
 impl ServerConn {
@@ -29,7 +31,7 @@ impl ServerConn {
         let server = config.server.as_ref()?;
         let token = server.access_token.clone()?;
         let user_id = match server.service {
-            MusicService::YtMusic | MusicService::Spotify => {
+            MusicService::YtMusic | MusicService::AppleMusic | MusicService::Spotify => {
                 server.user_id.clone().unwrap_or_default()
             }
             _ => server.user_id.clone()?,
@@ -40,6 +42,8 @@ impl ServerConn {
             token,
             user_id,
             device_id: config.device_id.clone(),
+            apple_music_storefront: server.apple_music_storefront.clone(),
+            apple_music_language: server.apple_music_language.clone(),
         })
     }
 }

@@ -3,7 +3,7 @@ use components::settings_items::{
     DiscordPresenceSettings, EqualizerPanel, LastFmSettings, LibreFmSettings, MusicBrainzSettings,
     SampleRateModeSelector, SettingItem, SettingsSection, ToggleSetting,
 };
-use config::{AppConfig, FetchStrategy, OfflineQuality};
+use config::{AppConfig, FetchStrategy, LYRICS_OFFSET_LIMIT_MS, OfflineQuality};
 use dioxus::prelude::*;
 use hooks::use_player_controller::PlayerController;
 
@@ -123,6 +123,25 @@ pub(super) fn DownloadsSection(mut config: Signal<AppConfig>) -> Element {
 
 #[component]
 pub(super) fn MetadataSection(mut config: Signal<AppConfig>) -> Element {
+    let ctrl = use_context::<PlayerController>();
+    let lyrics_offset = config.read().lyrics_offset_ms;
+    let lyrics_offset_auto = config.read().lyrics_offset_auto;
+    let lyrics_offset_label = if lyrics_offset_auto {
+        format!(
+            "{} ms",
+            (ctrl.output_latency_secs() * 1000.0).round() as i32
+        )
+    } else if lyrics_offset == 0 {
+        "0 ms".to_string()
+    } else {
+        format!("{lyrics_offset:+} ms")
+    };
+    let lyrics_offset_class = if lyrics_offset_auto {
+        "flex items-center gap-3 min-w-[220px] opacity-40"
+    } else {
+        "flex items-center gap-3 min-w-[220px]"
+    };
+
     rsx! {
         SettingsSection { title: i18n::t("metadata").to_string(),
             SettingItem {
@@ -152,6 +171,44 @@ pub(super) fn MetadataSection(mut config: Signal<AppConfig>) -> Element {
                     ToggleSetting {
                         enabled: config.read().enable_musixmatch_lyrics,
                         on_change: move |val| config.write().enable_musixmatch_lyrics = val,
+                    }
+                }
+            }
+            SettingItem {
+                title: i18n::t("lyrics_offset_auto").to_string(),
+                config_key: "lyrics_offset_auto",
+                control: rsx! {
+                    ToggleSetting {
+                        enabled: lyrics_offset_auto,
+                        on_change: move |val| config.write().lyrics_offset_auto = val,
+                    }
+                }
+            }
+            SettingItem {
+                title: i18n::t("lyrics_offset").to_string(),
+                config_key: "lyrics_offset_ms",
+                control: rsx! {
+                    div { class: "{lyrics_offset_class}",
+                        input {
+                            r#type: "range",
+                            min: "{-LYRICS_OFFSET_LIMIT_MS}",
+                            max: "{LYRICS_OFFSET_LIMIT_MS}",
+                            step: "50",
+                            value: "{lyrics_offset}",
+                            disabled: lyrics_offset_auto,
+                            class: "w-40",
+                            style: "accent-color: var(--color-indigo-500);",
+                            oninput: move |evt| {
+                                if let Ok(value) = evt.value().parse::<i32>() {
+                                    config.write().lyrics_offset_ms = value
+                                        .clamp(-LYRICS_OFFSET_LIMIT_MS, LYRICS_OFFSET_LIMIT_MS);
+                                }
+                            }
+                        }
+                        span {
+                            class: "text-xs font-mono text-white/80 w-20 text-right",
+                            "{lyrics_offset_label}"
+                        }
                     }
                 }
             }
