@@ -4334,7 +4334,7 @@ dependencies = [
 name = "kopuz-hooks"
 version = "0.15.1"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "dioxus",
  "kopuz-config",
  "kopuz-db",

@@ -25,7 +25,8 @@
         "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      pkgsForEach = system: nixpkgs.legacyPackages.${system}.extend rust-overlay.overlays.default;
+      pkgsForEach = system:
+      (nixpkgs.legacyPackages.${system}.extend rust-overlay.overlays.default).extend(import ./packaging/nix/yt-dlp.nix);
       mkCraneLib =
         pkgs:
         (crane.mkLib pkgs).overrideToolchain (
