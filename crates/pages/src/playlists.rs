@@ -620,7 +620,7 @@ fn PlaylistsGrid(
     let is_yt = caps().albums == ::server::source::AlbumType::YtMusic;
     // The flat remote card has no overflow menu of its own, so radio is its one
     // entry — no kind-tagged action list needed here (unlike the folder card).
-    let can_radio = caps().radio;
+    let can_radio = caps().radio.playlist;
     let radio_text = components::radio_actions::radio_label();
     let radio_actions = vec![MenuAction::new(
         radio_text.as_str(),
@@ -843,7 +843,8 @@ fn folders_layout(ctx: FoldersCtx<'_>) -> Element {
     let can_radio = consume_context::<Signal<::server::source::ActiveSource>>()
         .read()
         .capabilities()
-        .radio;
+        .radio
+        .playlist;
 
     let build_playlist_actions = |in_folder: bool| -> (Vec<MenuAction>, Vec<PlaylistCardAction>) {
         let mut entries = vec![(

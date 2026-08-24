@@ -263,6 +263,7 @@ fn parse_line_timed_impl(ttml: &str) -> Vec<LyricLine> {
     let mut lines = Vec::new();
     let mut in_p = false;
     let mut p_begin: Option<String> = None;
+    let mut p_end: Option<String> = None;
     let mut current_text = String::new();
     let mut buf = Vec::new();
 
@@ -271,6 +272,7 @@ fn parse_line_timed_impl(ttml: &str) -> Vec<LyricLine> {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) if qname_local_eq(e.name(), b"p") => {
                 in_p = true;
                 p_begin = get_attr_value(e, b"begin");
+                p_end = get_attr_value(e, b"end");
                 current_text.clear();
             }
             Ok(Event::Text(ref e)) if in_p => {
@@ -286,7 +288,7 @@ fn parse_line_timed_impl(ttml: &str) -> Vec<LyricLine> {
                 {
                     lines.push(LyricLine {
                         start_time,
-                        end_time: None,
+                        end_time: p_end.as_deref().and_then(parse_am_time),
                         text,
                         chunks: Vec::new(),
                         parent_line_index: None,
@@ -296,6 +298,7 @@ fn parse_line_timed_impl(ttml: &str) -> Vec<LyricLine> {
                 }
                 in_p = false;
                 p_begin = None;
+                p_end = None;
             }
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -322,6 +325,7 @@ fn parse_word_timed_impl(ttml: &str) -> Vec<LyricLine> {
 
     let mut in_p = false;
     let mut in_span = false;
+    let mut p_end: Option<f64> = None;
     let mut span_begin: Option<String> = None;
     let mut span_end: Option<String> = None;
     let mut current_text = String::new();
@@ -335,6 +339,7 @@ fn parse_word_timed_impl(ttml: &str) -> Vec<LyricLine> {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 if qname_local_eq(e.name(), b"p") {
                     in_p = true;
+                    p_end = get_attr_value(e, b"end").as_deref().and_then(parse_am_time);
                     line_words.clear();
                     line_text_parts.clear();
                     pending_space = false;
@@ -365,9 +370,12 @@ fn parse_word_timed_impl(ttml: &str) -> Vec<LyricLine> {
                 if qname_local_eq(e.name(), b"span") && in_span {
                     let text = current_text.trim().to_string();
                     if !text.is_empty()
-                        && let (Some(begin), Some(_end)) = (&span_begin, &span_end)
+                        && let (Some(begin), Some(end)) = (&span_begin, &span_end)
                         && let Some(start) = parse_am_time(begin)
                     {
+                        if let Some(end) = parse_am_time(end) {
+                            p_end = Some(p_end.map_or(end, |prev: f64| prev.max(end)));
+                        }
                         // The separator leads the word it precedes, so a chunk
                         // highlighted mid-line carries its own leading space.
                         let text = if pending_space && !line_words.is_empty() {
@@ -395,7 +403,7 @@ fn parse_word_timed_impl(ttml: &str) -> Vec<LyricLine> {
                             .collect();
                         lines.push(LyricLine {
                             start_time,
-                            end_time: None,
+                            end_time: p_end,
                             text: line_text,
                             chunks,
                             parent_line_index: None,
@@ -561,6 +569,7 @@ mod tests {
                 assert_eq!(lines.len(), 2);
                 // Line 1: "You feel it"
                 assert!((lines[0].start_time - 33.848).abs() < 0.001);
+                assert!((lines[0].end_time.unwrap() - 35.283).abs() < 0.001);
                 assert_eq!(lines[0].text, "You feel it");
                 assert_eq!(lines[0].chunks.len(), 3);
                 assert_eq!(lines[0].chunks[0].text, "You");

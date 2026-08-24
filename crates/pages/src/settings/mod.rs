@@ -13,6 +13,7 @@ use components::settings_items::{
 use components::settings_popups::{
     AddLocalSourcePopup, AddRegistryPopup, AddServerPopup, LoginPopup,
 };
+use components::settings_remote_folders::{RemoteCreds, RemoteFolderSettings};
 use config::{AppConfig, MusicService};
 use dioxus::prelude::*;
 use hooks::use_player_controller::PlayerController;
@@ -434,6 +435,44 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
                                     }
                                 }
                         }
+                        SettingItem {
+                            title: i18n::t("lyrics_depth_blur").to_string(),
+                            config_key: "lyrics_depth_blur",
+                            control: rsx! {
+                                ToggleSetting {
+                                    enabled: config.read().lyrics_depth_blur,
+                                    on_change: move |val| config.write().lyrics_depth_blur = val,
+                                }
+                            }
+                        }
+                        if config.read().lyrics_depth_blur {
+                            SettingItem {
+                                title: i18n::t("lyrics_depth_blur_strength").to_string(),
+                                config_key: "lyrics_depth_blur_strength",
+                                control: rsx! {
+                                    div { class: "flex items-center gap-3 min-w-[220px]",
+                                        input {
+                                            r#type: "range",
+                                            min: "10",
+                                            max: "200",
+                                            step: "10",
+                                            value: format!("{}", config.read().lyrics_depth_blur_strength),
+                                            class: "w-40",
+                                            style: "accent-color: var(--color-indigo-500);",
+                                            oninput: move |evt| {
+                                                if let Ok(value) = evt.value().parse::<u8>() {
+                                                    config.write().lyrics_depth_blur_strength = value.clamp(10, 200);
+                                                }
+                                            }
+                                        }
+                                        span {
+                                            class: "text-xs font-mono text-white/80 w-16 text-right",
+                                            "{config.read().lyrics_depth_blur_strength}%"
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     if active_category() == SettingsCategory::Library {
@@ -580,6 +619,7 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
                                         on_spotify_prefer_active_device: move |v: bool| {
                                             config.write().spotify_prefer_active_device = v;
                                         },
+                                        remote_folders: remote_folder_settings(config),
                                     }
                                 }
                             }
@@ -880,4 +920,44 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
             }
         }
     }
+}
+
+/// The active server's folder picker, or `None` when it has no folder tree or
+/// no creds. Only the active server carries hydrated creds.
+fn remote_folder_settings(mut config: Signal<AppConfig>) -> Option<RemoteFolderSettings> {
+    let creds = {
+        let cfg = config.read();
+        let server = cfg.server.as_ref()?;
+        let active_id = cfg.active_source.server_id()?;
+        if server.id.as_deref() != Some(active_id) {
+            return None;
+        }
+        if server.service != MusicService::Nextcloud {
+            return None;
+        }
+        RemoteCreds {
+            url: server.url.clone(),
+            user_id: server.user_id.clone()?,
+            token: server.access_token.clone()?,
+        }
+    };
+
+    Some(RemoteFolderSettings {
+        creds,
+        folders: config.read().active_server_folders(),
+        on_add: EventHandler::new(move |path: String| {
+            config.write().edit_active_server_folders(|folders| {
+                if !folders.contains(&path) {
+                    folders.push(path);
+                }
+            });
+        }),
+        on_remove: EventHandler::new(move |index: usize| {
+            config.write().edit_active_server_folders(|folders| {
+                if index < folders.len() {
+                    folders.remove(index);
+                }
+            });
+        }),
+    })
 }

@@ -76,10 +76,12 @@ pub fn AddServerPopup(
         MusicService::SoundCloud => "soundcloud",
         MusicService::AppleMusic => "applemusic",
         MusicService::Spotify => "spotify",
+        MusicService::Nextcloud => "nextcloud",
     };
 
     let server_name_label = i18n::t("server_name").to_string();
     let server_url_placeholder = i18n::t("server_url_placeholder").to_string();
+    let nextcloud_url_placeholder = i18n::t("nextcloud_url_placeholder").to_string();
     let custom_manual = i18n::t("custom_manual").to_string();
     let cancel_text = i18n::t("cancel").to_string();
     let save_text = i18n::t("save").to_string();
@@ -149,6 +151,7 @@ pub fn AddServerPopup(
                     apple_music_manual_token,
                     apple_music_use_manual,
                     server_url_placeholder: server_url_placeholder.clone(),
+                    nextcloud_url_placeholder: nextcloud_url_placeholder.clone(),
                 }
 
                 select {
@@ -160,6 +163,7 @@ pub fn AddServerPopup(
                             "soundcloud" => MusicService::SoundCloud,
                             "applemusic" => MusicService::AppleMusic,
                             "spotify" => MusicService::Spotify,
+                            "nextcloud" => MusicService::Nextcloud,
                             _ => MusicService::Jellyfin,
                         };
                         server_service.set(service);
@@ -199,6 +203,11 @@ pub fn AddServerPopup(
                         value: "spotify",
                         selected: server_service() == MusicService::Spotify,
                         "Spotify (experimental)"
+                    }
+                    option {
+                        value: "nextcloud",
+                        selected: server_service() == MusicService::Nextcloud,
+                        "Nextcloud"
                     }
                 }
 
@@ -347,6 +356,7 @@ fn ServerServiceFields(
     apple_music_manual_token: Signal<String>,
     apple_music_use_manual: Signal<bool>,
     server_url_placeholder: String,
+    nextcloud_url_placeholder: String,
 ) -> Element {
     match server_service() {
         MusicService::YtMusic => {
@@ -521,6 +531,17 @@ fn ServerServiceFields(
                 "Create an app at developer.spotify.com, add the redirect URI "
                 code { "http://127.0.0.1:8898/callback" }
                 ", add your Spotify account under User Management, and paste its Client ID above. Saving opens Spotify's sign-in page in your default browser — kopuz never sees your password. Spotify Development Mode is limited to five authorized users and requires the app owner to have Premium. Playback also requires Premium; followed playlists may be listed but Spotify only exposes tracks for playlists you own or collaborate on."
+            }
+        },
+        MusicService::Nextcloud => rsx! {
+            input {
+                placeholder: "{nextcloud_url_placeholder}",
+                value: "{server_url()}",
+                oninput: move |e| server_url.set(e.value()),
+                onkeydown: move |e| e.stop_propagation()
+            }
+            p { class: "text-xs text-white/60",
+                "Sign in with your username and an app password (Nextcloud Settings, Security), which is revocable and works with two-factor auth. After signing in, pick which folders hold your music under this server in Settings; kopuz otherwise looks for a Music folder. If your server runs the Music app, adding it as Subsonic instead gives you real tags and playlists."
             }
         },
         _ => rsx! {
