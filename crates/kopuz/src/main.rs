@@ -221,6 +221,18 @@ fn main() {
         panic!("android certificate verifier failed to initialize: {e}");
     }
 
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_FORCE_VBLANK_TIMER").is_none() {
+        // SAFETY: first statement of main, before any thread is spawned.
+        unsafe { std::env::set_var("WEBKIT_FORCE_VBLANK_TIMER", "1") };
+    }
+
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_FORCE_VBLANK_TIMER").is_none() {
+        // SAFETY: first statement of main, before any thread is spawned.
+        unsafe { std::env::set_var("WEBKIT_FORCE_VBLANK_TIMER", "1") };
+    }
+
     #[cfg(not(target_os = "android"))]
     {
         let identity_migration = legacy::migrate_identity();

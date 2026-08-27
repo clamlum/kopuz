@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>moe.kopuz.kopuz</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>MIT</project_license>
+  <project_license>EUPL-1.2</project_license>
   <name>Kopuz</name>
   <icon type="stock">moe.kopuz.kopuz</icon>
   <branding>
@@ -48,6 +48,13 @@
   </screenshots>
 
   <releases>
+    <release version="0.16.1" date="2026-08-26">
+      <description>
+        <p>
+          Scrolling no longer stutters on high-refresh displays: the webview's frame clock is capped at 60fps instead of chasing the monitor's vblank, which a large window could never keep up with. Apple Music signs in through the in-app WebView on Android, passwords can be forced into the system store with a configurable login URL, playlist folder changes survive until the move completes, and background lyric lines stay lit on their own timing. Packaging gains branding colours and keywords.
+        </p>
+      </description>
+    </release>
     <release version="0.16.0" date="2026-08-23">
       <description>
         <p>
