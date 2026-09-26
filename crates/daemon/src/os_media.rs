@@ -60,6 +60,7 @@ pub fn spawn(session: &SessionHandle) {
     let mut events = session.subscribe();
     tokio::spawn(async move {
         let mut last_modes: Option<(bool, LoopMode)> = None;
+        let mut last_volume: Option<f32> = None;
         loop {
             tokio::select! {
                 // Cancel-safe: if the state branch wins, the dropped recv
@@ -91,6 +92,7 @@ pub fn spawn(session: &SessionHandle) {
                                 RepeatMode::Track => LoopMode::Track,
                             }),
                         },
+                        SystemEvent::SetVolume(v) => PlayerCommand::SetVolume { volume: v as f32 },
                     };
                     command(&session, mapped).await;
                 }
@@ -108,6 +110,10 @@ pub fn spawn(session: &SessionHandle) {
                                         LoopMode::Track => RepeatMode::Track,
                                     },
                                 );
+                            }
+                            if last_volume != Some(state.volume) {
+                                last_volume = Some(state.volume);
+                                player::systemint::update_volume(state.volume as f64);
                             }
                         }
                         Ok(_) => {}

@@ -41,6 +41,7 @@ pub enum SystemEvent {
     Seek(f64),
     SetShuffle(bool),
     SetRepeat(RepeatMode),
+    SetVolume(f64),
 }
 
 /// MPRIS SetPosition requires a `mpris:trackid`; we expose a constant one
@@ -53,6 +54,7 @@ struct MprisState {
     position: Time,
     shuffle: bool,
     repeat: RepeatMode,
+    volume: f64,
 }
 
 static TX: OnceLock<UnboundedSender<SystemEvent>> = OnceLock::new();
@@ -78,6 +80,7 @@ fn state() -> Arc<Mutex<MprisState>> {
                 position: Time::ZERO,
                 shuffle: false,
                 repeat: RepeatMode::Off,
+                volume: 1.0,
             }))
         })
         .clone()
@@ -220,9 +223,15 @@ impl PlayerInterface for P {
             .unwrap_or_default())
     }
     async fn volume(&self) -> fdo::Result<f64> {
-        Ok(1.0)
+        Ok(self.0.lock().map(|s| s.volume).unwrap_or(1.0))
     }
-    async fn set_volume(&self, _: f64) -> mpris_server::zbus::Result<()> {
+    async fn set_volume(&self, volume: f64) -> mpris_server::zbus::Result<()> {
+        let volume = volume.clamp(0.0, 1.0);
+        if let Ok(mut s) = self.0.lock() {
+            s.volume = volume;
+        }
+        self.1.send(SystemEvent::SetVolume(volume)).ok();
+        notify();
         Ok(())
     }
     async fn position(&self) -> fdo::Result<Time> {
@@ -269,6 +278,21 @@ pub fn update_modes(shuffle: bool, repeat: RepeatMode) {
         let changed = s.shuffle != shuffle || s.repeat != repeat;
         s.shuffle = shuffle;
         s.repeat = repeat;
+        changed
+    } else {
+        false
+    };
+    if changed {
+        notify();
+    }
+}
+
+pub fn update_volume(volume: f64) {
+    setup();
+    let changed = if let Ok(mut s) = state().lock() {
+        let volume = volume.clamp(0.0, 1.0);
+        let changed = (s.volume - volume).abs() > f64::EPSILON;
+        s.volume = volume;
         changed
     } else {
         false
@@ -330,13 +354,14 @@ fn setup() {
                     };
                     while let Some(seeked) = nrx.recv().await {
                         if seeked {
-                            let (metadata, status, position, shuffle, repeat) = match st.lock() {
+                            let (metadata, status, position, shuffle, repeat, volume) = match st.lock() {
                                 Ok(s) => (
                                     s.metadata.clone(),
                                     s.status,
                                     s.position,
                                     s.shuffle,
                                     s.repeat.to_mpris(),
+                                    s.volume,
                                 ),
                                 Err(_) => continue,
                             };
@@ -345,12 +370,10 @@ fn setup() {
                                 Property::PlaybackStatus(status),
                                 Property::Shuffle(shuffle),
                                 Property::LoopStatus(repeat),
+                                Property::Volume(volume),
                             ])
                             .await
                             .ok();
-                            srv.emit(mpris_server::Signal::Seeked { position })
-                                .await
-                                .ok();
                         }
                     }
                     tracing::warn!(
