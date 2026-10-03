@@ -57,6 +57,7 @@ fn track(key: &str) -> Track {
         musicbrainz_track_id: None,
         playlist_item_id: None,
         artists: vec![],
+        credits: vec![],
     }
 }
 
@@ -108,7 +109,7 @@ async fn spawn_pair() -> Pair {
         .map(|key| track(key))
         .collect();
     database
-        .upsert_tracks(&config::Source::Local, &seeded)
+        .upsert_tracks(&config::Source::default(), &seeded)
         .await
         .expect("seed tracks");
     let config_service = Arc::new(ConfigService::new(
@@ -118,7 +119,7 @@ async fn spawn_pair() -> Pair {
     ));
     let library = Arc::new(LibraryService::new(
         database.clone(),
-        config::Source::Local,
+        config::Source::default(),
         Arc::new(radio::registry::StationRegistry::default()),
         dir.path().join("covers"),
     ));
@@ -131,6 +132,7 @@ async fn spawn_pair() -> Pair {
         provider,
     );
     library.attach_session(session.clone());
+    config_service.attach_session(session.clone());
     let jobs = Arc::new(JobRunner::new(session.clone()));
     let favorites = FavoritesService::new(database.clone(), session.clone());
     let artwork = daemon::ArtworkService::new(
@@ -152,8 +154,9 @@ async fn spawn_pair() -> Pair {
     );
     let sources =
         daemon::SourceService::new(database.clone(), session.clone(), config_service.clone());
-    let integrations = daemon::IntegrationService::new(config_service.clone(), session.clone());
-    let downloader = daemon::UrlDownloadService::new(session.clone(), config_service.clone());
+    sources.watch_active(session.config_watch());
+    let integrations = daemon::IntegrationService::new(config_service.clone());
+    let downloader = daemon::UrlDownloadService::new(config_service.clone());
     let build_api = |session: SessionHandle| {
         LocalApi::new(session)
             .with_config(config_service.clone())
@@ -400,6 +403,43 @@ async fn subscribe_stream_delivers_typed_events() {
     }
 }
 
+fn active_state(rows: Vec<api::SourceInfo>) -> Option<api::SourceState> {
+    rows.into_iter()
+        .find(|row| row.active)
+        .and_then(|row| row.state)
+}
+
+/// Wait out the daemon's first probe of its active source, which runs in the background from boot.
+async fn wait_probed(pair: &Pair) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = active_state(pair.local.sources().await.expect("local sources"));
+        if state.is_some_and(|state| state != api::SourceState::Checking) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never probed its active source: {state:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The connection dot reads the daemon's probe off the source row, the same on both transports.
+#[tokio::test]
+async fn the_active_sources_status_is_the_daemons_probe() {
+    let pair = spawn_pair().await;
+    wait_probed(&pair).await;
+    let local = active_state(pair.local.sources().await.expect("local sources"));
+    let wire = active_state(pair.wire.sources().await.expect("wire sources"));
+    assert_eq!(
+        local,
+        Some(api::SourceState::Online),
+        "a folder source is always reachable"
+    );
+    assert_eq!(wire, local, "the wire reports what the daemon holds");
+}
+
 #[tokio::test]
 async fn config_view_and_set_agree_across_transports() {
     let pair = spawn_pair().await;
@@ -493,21 +533,8 @@ async fn dont_recommend_is_refused_by_a_source_without_it() {
     assert!(!caps.dont_recommend);
 }
 
-#[tokio::test]
-async fn scan_job_indexes_local_files_over_the_wire() {
-    let pair = spawn_pair().await;
-    let music = pair._dir.path().join("music");
-    std::fs::create_dir_all(&music).expect("music dir");
-    std::fs::write(music.join("one.wav"), wav_bytes(1)).expect("write wav");
-    std::fs::write(music.join("two.wav"), wav_bytes(1)).expect("write wav");
-
-    let mut config = pair.wire.config().await.expect("view").config;
-    config.music_directory = vec![music.clone()];
-    pair.wire
-        .set_config(config)
-        .await
-        .expect("point the library at the temp dir");
-
+/// Scan the library and wait for the job to finish.
+async fn run_scan(pair: &Pair) {
     let job = pair
         .wire
         .start_job(api::JobKind::Scan)
@@ -528,10 +555,108 @@ async fn scan_job_indexes_local_files_over_the_wire() {
                 );
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            api::JobState::Finished => break,
+            api::JobState::Finished => return,
             other => panic!("scan ended as {other:?}: {status:?}"),
         }
     }
+}
+
+/// The library's artist names and album titles, sorted.
+async fn shelves(api: &dyn KopuzApi) -> (Vec<String>, Vec<String>) {
+    let mut artists: Vec<String> = api
+        .artists(Page::default())
+        .await
+        .expect("artists")
+        .artists
+        .into_iter()
+        .map(|artist| artist.name)
+        .collect();
+    let mut albums: Vec<String> = api
+        .albums(Page::default())
+        .await
+        .expect("albums")
+        .albums
+        .into_iter()
+        .map(|album| album.title)
+        .collect();
+    artists.sort();
+    albums.sort();
+    (artists, albums)
+}
+
+/// A tag edit files what a rescan of the file would, splits no names, and leaves no emptied album or artist behind.
+#[tokio::test]
+async fn a_tag_edit_files_what_a_rescan_would() {
+    let pair = spawn_pair().await;
+    let music = pair._dir.path().join("music");
+    std::fs::create_dir_all(&music).expect("music dir");
+    std::fs::write(music.join("one.wav"), wav_bytes(1)).expect("write wav");
+    pair.wire
+        .set_source_settings(
+            "local".into(),
+            vec![api::FieldValue::new(
+                "directories",
+                api::encode_directories(&[music.to_string_lossy().into_owned()]),
+            )],
+        )
+        .await
+        .expect("point the library at the temp dir");
+    run_scan(&pair).await;
+    let key = pair
+        .wire
+        .tracks(TrackFilter::default(), Page::default())
+        .await
+        .expect("tracks")
+        .items
+        .into_iter()
+        .find(|track| track.title.contains("one"))
+        .expect("the scanned file")
+        .key;
+
+    pair.wire
+        .update_track_metadata(api::TrackMetadataPatch {
+            key,
+            artist: Some("Ada, Bob".into()),
+            album: Some("Edited".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("edit the tags");
+
+    let edited = shelves(&pair.local).await;
+    assert_eq!(
+        edited,
+        (vec!["Ada, Bob".to_string()], vec!["Edited".to_string()]),
+        "one artist, no split, and the emptied album and its artist are gone"
+    );
+    assert_eq!(shelves(&pair.wire).await, edited);
+    run_scan(&pair).await;
+    assert_eq!(
+        shelves(&pair.local).await,
+        edited,
+        "a rescan of the edited file files the same"
+    );
+}
+
+#[tokio::test]
+async fn scan_job_indexes_local_files_over_the_wire() {
+    let pair = spawn_pair().await;
+    let music = pair._dir.path().join("music");
+    std::fs::create_dir_all(&music).expect("music dir");
+    std::fs::write(music.join("one.wav"), wav_bytes(1)).expect("write wav");
+    std::fs::write(music.join("two.wav"), wav_bytes(1)).expect("write wav");
+
+    pair.wire
+        .set_source_settings(
+            "local".into(),
+            vec![api::FieldValue::new(
+                "directories",
+                api::encode_directories(&[music.to_string_lossy().into_owned()]),
+            )],
+        )
+        .await
+        .expect("point the library at the temp dir");
+    run_scan(&pair).await;
 
     let page = pair
         .wire
@@ -654,6 +779,107 @@ async fn artwork_agrees_across_transports() {
 }
 
 #[tokio::test]
+async fn artists_are_keyed_by_identity_on_both_transports() {
+    let pair = spawn_pair().await;
+    let all = Page {
+        offset: 0,
+        limit: 100,
+    };
+    let credited = |key: &str, id: Option<&str>| Track {
+        artist: "Ada".into(),
+        artists: vec!["Ada".into()],
+        credits: vec![match id {
+            Some(id) => reader::ArtistCredit::linked("Ada", id),
+            None => reader::ArtistCredit::unlinked("Ada"),
+        }],
+        ..track(key)
+    };
+    let tracks = [
+        credited("/lib/ada-1a.flac", Some("ar-1")),
+        credited("/lib/ada-1b.flac", Some("ar-1")),
+        credited("/lib/ada-2.flac", Some("ar-2")),
+        credited("/lib/ada-bare.flac", None),
+    ];
+    pair.database
+        .upsert_tracks(&config::Source::default(), &tracks)
+        .await
+        .expect("seed credited tracks");
+
+    let artists = pair.local.artists(all).await.expect("local");
+    assert_eq!(artists, pair.wire.artists(all).await.expect("wire"));
+    let adas: Vec<&api::ArtistInfo> = artists
+        .artists
+        .iter()
+        .filter(|artist| artist.name == "Ada")
+        .collect();
+    let mut counts: Vec<u32> = adas.iter().map(|artist| artist.track_count).collect();
+    counts.sort();
+    assert_eq!(
+        counts,
+        [1, 1, 2],
+        "two ids and an unlinked name are three artists"
+    );
+
+    for ada in &adas {
+        let local = pair.local.artist_tracks(ada.key.clone(), all).await;
+        let wire = pair.wire.artist_tracks(ada.key.clone(), all).await;
+        let local = local.expect("local");
+        assert_eq!(local, wire.expect("wire"), "{}", ada.key);
+        assert_eq!(
+            local.total, ada.track_count,
+            "a tile opens the tracks it counts"
+        );
+        let detail = pair.local.artist(ada.key.clone()).await.expect("local");
+        assert_eq!(
+            detail,
+            pair.wire.artist(ada.key.clone()).await.expect("wire")
+        );
+        assert_eq!(
+            detail.info, **ada,
+            "the page names the artist the grid does"
+        );
+    }
+    let linked = adas
+        .iter()
+        .find(|artist| artist.track_count == 2)
+        .expect("ar-1");
+    let one = pair
+        .wire
+        .artist_tracks(linked.key.clone(), all)
+        .await
+        .expect("wire");
+    let mut keys: Vec<&str> = one.items.iter().map(|t| t.key.as_str()).collect();
+    keys.sort();
+    assert_eq!(keys, ["/lib/ada-1a.flac", "/lib/ada-1b.flac"]);
+    assert!(
+        one.items
+            .iter()
+            .all(|row| row.credits[0].key.as_ref() == Some(&linked.key)),
+        "a row opens the artist the grid lists"
+    );
+}
+
+#[tokio::test]
+async fn an_artist_key_the_library_files_nothing_under_opens_nothing_on_both_transports() {
+    let pair = spawn_pair().await;
+    let all = Page {
+        offset: 0,
+        limit: 100,
+    };
+    for (key, code) in [
+        ("", api::ErrorCode::NotFound),
+        ("ar-1-of-another-server", api::ErrorCode::NotFound),
+        ("0123456789abcdef", api::ErrorCode::NotFound),
+    ] {
+        let key = String::from(key);
+        let local = pair.local.artist_tracks(key.clone(), all).await;
+        let wire = pair.wire.artist_tracks(key.clone(), all).await;
+        assert_eq!(local.err().map(|e| e.code), Some(code), "{key}");
+        assert_eq!(wire.err().map(|e| e.code), Some(code), "{key}");
+    }
+}
+
+#[tokio::test]
 async fn library_reads_agree_across_transports() {
     let pair = spawn_pair().await;
     let all = Page {
@@ -703,16 +929,6 @@ async fn library_reads_agree_across_transports() {
             .expect("local"),
         pair.wire
             .album_tracks("no-such-album".into(), all)
-            .await
-            .expect("wire"),
-    );
-    assert_eq!(
-        pair.local
-            .artist_tracks(String::new(), all)
-            .await
-            .expect("local"),
-        pair.wire
-            .artist_tracks(String::new(), all)
             .await
             .expect("wire"),
     );
@@ -881,7 +1097,7 @@ async fn artwork_refs_agree_across_transports() {
     let mut with_art = track("/lib/seed-0.flac");
     with_art.cover = Some(cover.to_string_lossy().into_owned());
     pair.database
-        .upsert_tracks(&config::Source::Local, &[with_art])
+        .upsert_tracks(&config::Source::default(), &[with_art])
         .await
         .expect("re-seed with a cover");
 
@@ -1011,11 +1227,7 @@ async fn catalog_and_radio_report_absence_identically() {
         pair.wire.catalog(None).await.err().map(|e| e.code),
     );
 
-    let request = api::CatalogDetailRequest {
-        kind: api::CatalogItemKind::Album,
-        id: "MPRE1".into(),
-        continuation: None,
-    };
+    let request = api::CatalogDetailRequest::new(api::CatalogItemKind::Album, "MPRE1");
     assert_eq!(
         pair.local
             .catalog_detail(request.clone())
@@ -1137,6 +1349,7 @@ async fn mutations_agree_across_transports() {
 #[tokio::test]
 async fn sources_agree_across_transports_and_carry_no_secret() {
     let pair = spawn_pair().await;
+    wait_probed(&pair).await;
 
     let local = pair.local.sources().await.expect("local sources");
     let wire = pair.wire.sources().await.expect("wire sources");
@@ -1144,18 +1357,27 @@ async fn sources_agree_across_transports_and_carry_no_secret() {
     assert_eq!(local.len(), 1, "just the default local library: {local:?}");
     assert!(local[0].active, "the default library is active");
     assert!(local[0].authenticated, "a local library needs no sign-in");
-    assert_eq!(local[0].service, None);
+    assert_eq!(local[0].service.id, "folders");
+    assert!(!local[0].needs_network);
     assert_eq!(local[0].sign_in, api::SignInKind::None);
+    assert!(
+        local[0]
+            .settings
+            .iter()
+            .any(|field| matches!(field.kind, api::FieldKind::Directories)),
+        "its folders are a settings row: {:?}",
+        local[0].settings
+    );
 
     // Adding a server is visible to both, and provisioning a credential
     // reports authentication without echoing the secret.
-    let draft = api::ServerDraft {
+    let draft = api::SourceDraft {
         name: "Home".into(),
         service: "jellyfin".into(),
         values: vec![api::FieldValue::new("url", "https://jelly.example")],
         ..Default::default()
     };
-    let added = pair.wire.upsert_server(draft).await.expect("add server");
+    let added = pair.wire.upsert_source(draft).await.expect("add server");
     assert!(!added.authenticated, "a new server has no credentials yet");
     assert_eq!(added.detail.as_deref(), Some("https://jelly.example"));
     assert_eq!(
@@ -1188,7 +1410,7 @@ async fn sources_agree_across_transports_and_carry_no_secret() {
     );
 
     // A bad draft is refused identically.
-    let bad = api::ServerDraft {
+    let bad = api::SourceDraft {
         name: "No URL".into(),
         service: "jellyfin".into(),
         values: vec![api::FieldValue::new("url", "not-a-url")],
@@ -1196,18 +1418,183 @@ async fn sources_agree_across_transports_and_carry_no_secret() {
     };
     assert_eq!(
         pair.local
-            .upsert_server(bad.clone())
+            .upsert_source(bad.clone())
             .await
             .err()
             .map(|error| error.code),
-        pair.wire.upsert_server(bad).await.err().map(|e| e.code),
+        pair.wire.upsert_source(bad).await.err().map(|e| e.code),
     );
 
     pair.wire
-        .delete_server(added.id.clone())
+        .delete_source(added.id.clone())
         .await
         .expect("delete");
     assert_eq!(pair.local.sources().await.expect("sources").len(), 1);
+}
+
+/// A folder source is created, edited and deleted through the same calls as a
+/// server, with its folders carried as one field value.
+#[tokio::test]
+async fn a_folder_source_is_managed_through_the_generic_source_calls() {
+    let pair = spawn_pair().await;
+    let music = tempfile::tempdir().expect("tempdir");
+    let more = tempfile::tempdir().expect("tempdir");
+    let path = |dir: &tempfile::TempDir| dir.path().display().to_string();
+    let folders =
+        |paths: &[String]| api::FieldValue::new("directories", api::encode_directories(paths));
+
+    let services = pair.wire.services().await.expect("services");
+    let offered = services
+        .iter()
+        .find(|service| service.id == "folders")
+        .expect("folders are offered like any service");
+    assert!(
+        offered
+            .fields
+            .iter()
+            .any(|field| field.key == "directories"
+                && matches!(field.kind, api::FieldKind::Directories)),
+        "{offered:?}"
+    );
+
+    let empty = api::SourceDraft {
+        name: "Jazz".into(),
+        service: "folders".into(),
+        values: vec![folders(&[])],
+        ..Default::default()
+    };
+    let check = pair
+        .wire
+        .check_source_draft(empty.clone())
+        .await
+        .expect("check");
+    assert_eq!(
+        check,
+        pair.local
+            .check_source_draft(empty.clone())
+            .await
+            .expect("check")
+    );
+    assert!(
+        check
+            .problems
+            .iter()
+            .any(|problem| problem.field.as_deref() == Some("directories")),
+        "a folder source needs a folder: {check:?}"
+    );
+    assert_eq!(
+        pair.wire.upsert_source(empty).await.err().map(|e| e.code),
+        Some(ErrorCode::InvalidInput)
+    );
+
+    let created = pair
+        .wire
+        .upsert_source(api::SourceDraft {
+            name: "Jazz".into(),
+            service: "folders".into(),
+            values: vec![folders(&[path(&music)])],
+            ..Default::default()
+        })
+        .await
+        .expect("create");
+    assert_eq!(created.name, "Jazz");
+    assert_eq!(created.service.id, "folders");
+    assert!(created.authenticated && !created.needs_network);
+    assert_eq!(
+        api::spec_value(&created.settings, "directories").map(api::decode_directories),
+        Some(vec![path(&music)])
+    );
+    wait_probed(&pair).await;
+    let listed = pair.local.sources().await.expect("sources");
+    assert_eq!(listed, pair.wire.sources().await.expect("sources"));
+    assert_eq!(listed.len(), 2, "{listed:?}");
+
+    let renamed = pair
+        .local
+        .upsert_source(api::SourceDraft {
+            id: Some(created.id.clone()),
+            name: "Bebop".into(),
+            service: "folders".into(),
+            values: vec![folders(&[path(&music), path(&more)])],
+            ..Default::default()
+        })
+        .await
+        .expect("edit");
+    assert_eq!(renamed.id, created.id);
+    assert_eq!(renamed.name, "Bebop");
+    assert_eq!(
+        api::spec_value(&renamed.settings, "directories").map(api::decode_directories),
+        Some(vec![path(&music), path(&more)])
+    );
+
+    let narrowed = pair
+        .wire
+        .set_source_settings(created.id.clone(), vec![folders(&[path(&more)])])
+        .await
+        .expect("set folders");
+    assert_eq!(
+        api::spec_value(&narrowed.settings, "directories").map(api::decode_directories),
+        Some(vec![path(&more)])
+    );
+    assert_eq!(narrowed.name, "Bebop", "the name is left alone");
+
+    assert_eq!(
+        pair.wire
+            .validate_source(created.id.clone())
+            .await
+            .expect("validate"),
+        api::SourceState::Online
+    );
+
+    let filed = config::Source::from_column(&created.id);
+    pair.database
+        .upsert_tracks(&filed, &[track("/jazz/a.flac"), track("/jazz/b.flac")])
+        .await
+        .expect("seed the folder source");
+    let library_before = pair
+        .database
+        .tracks_count(&db::TrackFilter::new(config::Source::default()))
+        .await
+        .expect("count");
+
+    pair.wire
+        .delete_source(created.id.clone())
+        .await
+        .expect("delete");
+    let left = pair.local.sources().await.expect("sources");
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(
+        pair.database
+            .tracks_count(&db::TrackFilter::new(filed.clone()))
+            .await
+            .expect("count"),
+        0,
+        "a deleted folder source leaves no tracks behind"
+    );
+    assert!(
+        pair.database
+            .artists(&filed)
+            .await
+            .expect("artists")
+            .is_empty(),
+        "nor artists"
+    );
+    assert_eq!(
+        pair.database
+            .tracks_count(&db::TrackFilter::new(config::Source::default()))
+            .await
+            .expect("count"),
+        library_before,
+        "the other library is untouched"
+    );
+    assert_eq!(
+        pair.local
+            .delete_source(created.id)
+            .await
+            .err()
+            .map(|e| e.code),
+        Some(ErrorCode::NotFound)
+    );
 }
 
 /// The services a daemon offers, and the forms that add them, are its answer
@@ -1247,19 +1634,19 @@ async fn services_and_their_forms_agree_across_transports() {
 async fn a_draft_is_checked_identically_across_transports() {
     let pair = spawn_pair().await;
 
-    let missing = api::ServerDraft {
+    let missing = api::SourceDraft {
         name: String::new(),
         service: "spotify".into(),
         ..Default::default()
     };
     let local = pair
         .local
-        .check_server_draft(missing.clone())
+        .check_source_draft(missing.clone())
         .await
         .expect("local check");
     let wire = pair
         .wire
-        .check_server_draft(missing)
+        .check_source_draft(missing)
         .await
         .expect("wire check");
     assert_eq!(local, wire);
@@ -1272,13 +1659,13 @@ async fn a_draft_is_checked_identically_across_transports() {
         "a Spotify server needs its client id: {local:?}"
     );
 
-    let good = api::ServerDraft {
+    let good = api::SourceDraft {
         name: "Home".into(),
         service: "jellyfin".into(),
         values: vec![api::FieldValue::new("url", "https://jelly.example")],
         ..Default::default()
     };
-    let check = pair.wire.check_server_draft(good).await.expect("check");
+    let check = pair.wire.check_source_draft(good).await.expect("check");
     assert!(
         check.problems.is_empty(),
         "nothing wrong with it: {check:?}"
@@ -1286,19 +1673,19 @@ async fn a_draft_is_checked_identically_across_transports() {
     assert_eq!(check.sign_in, api::SignInKind::Password);
 
     // A service this daemon does not have is invalid input, not a panic.
-    let unknown = api::ServerDraft {
+    let unknown = api::SourceDraft {
         name: "Home".into(),
         service: "not-a-service".into(),
         ..Default::default()
     };
     assert_eq!(
         pair.local
-            .check_server_draft(unknown.clone())
+            .check_source_draft(unknown.clone())
             .await
             .err()
             .map(|error| error.code),
         pair.wire
-            .check_server_draft(unknown)
+            .check_source_draft(unknown)
             .await
             .err()
             .map(|error| error.code),
@@ -1313,7 +1700,7 @@ async fn source_settings_round_trip_without_touching_what_was_not_answered() {
 
     let added = pair
         .wire
-        .upsert_server(api::ServerDraft {
+        .upsert_source(api::SourceDraft {
             name: "Music".into(),
             service: "applemusic".into(),
             values: vec![
@@ -1569,4 +1956,16 @@ async fn download_statuses_agree_across_transports() {
         pair.wire.downloads().await.expect("wire downloads"),
         "nothing landed offline, and both say so"
     );
+}
+
+#[tokio::test]
+async fn both_transports_shake_hands_on_this_revision() {
+    let pair = spawn_pair().await;
+
+    for handshake in [pair.local.handshake().await, pair.wire.handshake().await] {
+        match handshake.expect("status") {
+            api::Handshake::Ready(status) => assert_eq!(status.proto_revision, api::WIRE_REVISION),
+            mismatched => panic!("{mismatched:?}"),
+        }
+    }
 }

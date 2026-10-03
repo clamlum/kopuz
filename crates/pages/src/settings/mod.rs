@@ -7,12 +7,10 @@ use navigation::{SettingsCategory, SettingsNavigation};
 use sections::{ConnectivitySection, DownloadsSection, MetadataSection, PlayerSection};
 
 use components::settings_items::{
-    AppSelect, BackBehaviorSelector, LanguageSelector, LocalSourceSettings, RadioRegistryDropdown,
-    ServerSettings, SettingItem, SettingsSection, ThemeSelector, ToggleSetting,
+    AppSelect, BackBehaviorSelector, LanguageSelector, RadioRegistryDropdown, SettingItem,
+    SettingsSection, SourceSettings, ThemeSelector, ToggleSetting,
 };
-use components::settings_popups::{
-    AddLocalSourcePopup, AddRegistryPopup, AddServerPopup, LoginPopup,
-};
+use components::settings_popups::{AddRegistryPopup, AddSourcePopup, LoginPopup};
 use components::settings_remote_folders::RemoteFolderSettings;
 use config::AppConfig;
 use dioxus::prelude::*;
@@ -54,30 +52,21 @@ fn BuildInfoCard() -> Element {
 #[component]
 pub fn Settings(config: Signal<AppConfig>) -> Element {
     let ctrl = use_context::<PlayerController>();
-    // The servers are the daemon's: it holds their credentials, so the config
+    // The sources are the daemon's: it holds their credentials, so the config
     // this page reads never carries them.
     let sources = hooks::sources::use_sources();
-    let servers = use_memo(move || -> Vec<api::SourceInfo> {
-        sources
-            .read()
-            .clone()
-            .unwrap_or_default()
+    let all_sources = use_memo(move || sources.read().clone().unwrap_or_default());
+    let active_server = use_memo(move || {
+        all_sources()
             .into_iter()
-            .filter(|source| source.kind == api::SourceKind::Server)
-            .collect()
+            .find(|source| source.active && source.needs_network)
     });
-    let active_server = use_memo(move || servers().into_iter().find(|server| server.active));
-    let mut show_add_server = use_signal(|| false);
-    let mut show_add_local_source = use_signal(|| false);
+    let mut show_add_source = use_signal(|| false);
     let mut show_login = use_signal(|| false);
 
-    let mut local_source_name = use_signal(String::new);
-    let mut local_source_directories = use_signal(Vec::<std::path::PathBuf>::new);
-    let mut local_source_error = use_signal(|| Option::<String>::None);
-
     let services = hooks::sources::use_services();
-    let server_name = use_signal(String::new);
-    let server_service = use_signal(String::new);
+    let source_name = use_signal(String::new);
+    let source_service = use_signal(String::new);
     let draft_values = use_signal(Vec::<api::FieldValue>::new);
     let draft_secrets = use_signal(Vec::<api::FieldValue>::new);
     let draft_check = use_signal(|| Option::<api::DraftCheck>::None);
@@ -136,37 +125,32 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
     // wrong with it and which sign-in saving it will start.
     use_effect(move || {
         let draft = crate::settings_actions::draft(
-            server_name,
-            server_service,
+            source_name,
+            source_service,
             draft_values,
             draft_secrets,
         );
         crate::settings_actions::check_draft(draft, draft_check);
     });
 
-    let handle_add_server = move |_| {
-        crate::settings_actions::add_server(
+    let handle_add_source = move |_| {
+        crate::settings_actions::add_source(
             crate::settings_actions::draft(
-                server_name,
-                server_service,
+                source_name,
+                source_service,
                 draft_values,
                 draft_secrets,
             ),
-            server_name,
+            source_name,
             draft_values,
             draft_secrets,
             error,
-            show_add_server,
+            show_add_source,
             show_login,
             ctrl.playback_error,
         );
     };
 
-    let handle_switch_local = move |source: config::Source| {
-        spawn(async move {
-            hooks::source_switch::apply_source_switch(config, source).await;
-        });
-    };
     let handle_switch_server = move |id: String| {
         crate::settings_actions::switch_server(id, error, show_login, ctrl.playback_error);
     };
@@ -474,58 +458,6 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
                     }
 
                     if active_category() == SettingsCategory::Library {
-                        SettingItem {
-                            title: i18n::t("local_libraries").to_string(),
-                            config_key: "music_directory",
-                            extra_config_keys: vec!["local_sources"],
-                            control: rsx! {
-                                LocalSourceSettings {
-                                    active_source: config.read().active_source.clone(),
-                                    default_directories: config.read().music_directory.clone(),
-                                    sources: config.read().local_sources.clone(),
-                                    on_add: move |_| show_add_local_source.set(true),
-                                    on_delete: move |id: String| config.write().remove_local_source(&id),
-                                    on_switch: handle_switch_local,
-                                    on_add_folder: move |(source, path): (config::Source, std::path::PathBuf)| {
-                                        let mut cfg = config.write();
-                                        match source {
-                                            config::Source::Local => {
-                                                if !cfg.music_directory.contains(&path) {
-                                                    cfg.music_directory.push(path);
-                                                }
-                                            }
-                                            config::Source::LocalLibrary(id) => {
-                                                if let Some(local) = cfg.local_sources.iter_mut().find(|local| local.id == id)
-                                                    && !local.directories.contains(&path)
-                                                {
-                                                    local.directories.push(path);
-                                                }
-                                            }
-                                            config::Source::Server(_) => {}
-                                        }
-                                    },
-                                    on_remove_folder: move |(source, index): (config::Source, usize)| {
-                                        let mut cfg = config.write();
-                                        match source {
-                                            config::Source::Local => {
-                                                if index < cfg.music_directory.len() {
-                                                    cfg.music_directory.remove(index);
-                                                }
-                                            }
-                                            config::Source::LocalLibrary(id) => {
-                                                if let Some(local) = cfg.local_sources.iter_mut().find(|local| local.id == id)
-                                                    && index < local.directories.len()
-                                                {
-                                                    local.directories.remove(index);
-                                                }
-                                            }
-                                            config::Source::Server(_) => {}
-                                        }
-                                    },
-                                }
-                            }
-                        }
-
                         RadioRegistryDropdown {
                             registries: config.read().radio_registries.clone(),
                             error: registry_toggle_error,
@@ -581,11 +513,11 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
 
                         div { id: "settings-media-servers",
                             SettingItem {
-                                title: i18n::t("media_servers").to_string(),
+                                title: i18n::t("sources").to_string(),
                                 control: rsx! {
-                                    ServerSettings {
-                                        servers: servers(),
-                                        on_add: move |_| show_add_server.set(true),
+                                    SourceSettings {
+                                        sources: all_sources(),
+                                        on_add: move |_| show_add_source.set(true),
                                         on_delete: handle_delete_saved,
                                         on_switch: handle_switch_server,
                                         on_login: move |_| sign_in_again(),
@@ -807,55 +739,18 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
             }
             }
 
-            if show_add_server() {
-                AddServerPopup {
+            if show_add_source() {
+                AddSourcePopup {
                     services: services.read().clone().unwrap_or_default(),
-                    service: server_service,
-                    name: server_name,
+                    service: source_service,
+                    name: source_name,
                     values: draft_values,
                     secrets: draft_secrets,
                     check: draft_check(),
                     host_access: host_access(),
                     error,
-                    on_close: move |_| show_add_server.set(false),
-                    on_save: handle_add_server
-                }
-            }
-
-            if show_add_local_source() {
-                AddLocalSourcePopup {
-                    name: local_source_name,
-                    directories: local_source_directories,
-                    error: local_source_error,
-                    on_close: move |_| {
-                        show_add_local_source.set(false);
-                        local_source_name.set(String::new());
-                        local_source_directories.set(Vec::new());
-                        local_source_error.set(None);
-                    },
-                    on_save: move |_| {
-                        let name = local_source_name().trim().to_string();
-                        if name.is_empty() {
-                            local_source_error.set(Some(i18n::t("local_library_name_required").to_string()));
-                            return;
-                        }
-                        let directories = local_source_directories();
-                        if directories.is_empty() {
-                            local_source_error.set(Some(i18n::t("local_library_folder_required").to_string()));
-                            return;
-                        }
-                        let source = config::SavedLocalSource::new(name, directories);
-                        let active = config::Source::LocalLibrary(source.id.clone());
-                        {
-                            let mut cfg = config.write();
-                            cfg.add_local_source(source);
-                            cfg.set_active_local_source(active);
-                        }
-                        show_add_local_source.set(false);
-                        local_source_name.set(String::new());
-                        local_source_directories.set(Vec::new());
-                        local_source_error.set(None);
-                    },
+                    on_close: move |_| show_add_source.set(false),
+                    on_save: handle_add_source
                 }
             }
 
@@ -874,8 +769,7 @@ pub fn Settings(config: Signal<AppConfig>) -> Element {
                     username,
                     password,
                     service_name: active_server()
-                        .and_then(|server| server.service)
-                        .map(|service| components::forms::text(&service.name))
+                        .map(|server| components::forms::text(&server.service.name))
                         .unwrap_or_else(|| i18n::t("server").to_string()),
                     error: login_error,
                     loading: is_loading,
@@ -899,7 +793,9 @@ fn remote_folder_settings(server: Option<api::SourceInfo>) -> Option<RemoteFolde
     if !server.capabilities.browse_folders || !server.authenticated {
         return None;
     }
-    let folders = server.directories.clone();
+    let folders = api::spec_value(&server.settings, "directories")
+        .map(api::decode_directories)
+        .unwrap_or_default();
     let add_id = server.id.clone();
     let add_folders = folders.clone();
     let remove_id = server.id.clone();
@@ -928,7 +824,8 @@ fn remote_folder_settings(server: Option<api::SourceInfo>) -> Option<RemoteFolde
 fn set_directories(id: String, directories: Vec<String>) {
     let api = hooks::consume_api();
     spawn(async move {
-        if let Err(error) = api.set_source_directories(id, directories).await {
+        let folders = api::FieldValue::new("directories", api::encode_directories(&directories));
+        if let Err(error) = api.set_source_settings(id, vec![folders]).await {
             tracing::warn!(%error, "setting the source folders failed");
             hooks::toast::toast_error(&error.to_string());
         }

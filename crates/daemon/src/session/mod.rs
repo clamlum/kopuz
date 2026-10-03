@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::{
-    ApiError, ApiEvent, BufferedRange, CommandAck, FadingState, Intent, NowPlaying, Page,
-    Phase as ApiPhase, PlayerCommand, PlayerState, PositionAnchor, QueueContext, QueueEdit,
-    QueueItem, QueueMode, QueueSummary, QueueWindow, SetQueueRequest, TrackKind,
+    ApiError, ApiEvent, BufferedRange, CommandAck, FadingState, Intent, Page, Phase as ApiPhase,
+    PlayerCommand, PlayerState, PositionAnchor, QueueContext, QueueEdit, QueueItem, QueueMode,
+    QueueSummary, QueueWindow, SetQueueRequest,
 };
 use player::engine::{Event as EngineEvent, Phase as EnginePhase, SourceFactory, Transition};
 use player::player::{LoadArgs, NowPlayingMeta, Player, PlayerInitError};
@@ -46,6 +46,9 @@ pub(crate) struct QueueMirrorSnapshot {
 #[async_trait::async_trait]
 pub trait QueueMaterializer: Send + Sync {
     async fn materialize(&self, context: &QueueContext) -> Result<Vec<Track>, ApiError>;
+
+    /// Make a restored queue's rows addressable by key, since some were listed once and never stored.
+    fn register_restored(&self, _tracks: &[Track]) {}
 }
 
 /// Durable playback bookkeeping: recents on commit, listen counts when a
@@ -105,6 +108,8 @@ enum SessionCmd {
         config: Box<config::AppConfig>,
         changed: Vec<String>,
     },
+    QueueUnread,
+    PreviewEqualizer(config::EqualizerSettings),
     Emit(Box<ApiEvent>),
     AttachExternal(crate::external::SharedExternalPlayer),
     /// The integration that can play what the engine cannot, offered
@@ -194,6 +199,8 @@ impl SessionHandle {
             materializer: materializer.clone(),
             queue_store: services.queue_store,
             queue_dirty: false,
+            queue_unread: false,
+            persisting: None,
             recorder: services.recorder,
             scrobbler: services.scrobbler,
             last_recent_key: None,
@@ -389,7 +396,17 @@ impl SessionHandle {
 
     /// Adopt a new config (a ConfigService patch): applies live audio
     /// settings and emits `config.changed`.
-    pub fn set_config(&self, config: config::AppConfig, changed: Vec<String>) {
+    /// The stored queue could not be read, so nothing may be saved over it until a new queue is built.
+    pub fn hold_unread_queue(&self) {
+        let _ = self.cmd_tx.send(SessionCmd::QueueUnread);
+    }
+
+    /// Let the engine play `equalizer` without storing it or touching the settings.
+    pub fn preview_equalizer(&self, equalizer: config::EqualizerSettings) {
+        let _ = self.cmd_tx.send(SessionCmd::PreviewEqualizer(equalizer));
+    }
+
+    pub(crate) fn set_config(&self, config: config::AppConfig, changed: Vec<String>) {
         let _ = self.cmd_tx.send(SessionCmd::SetConfig {
             config: Box::new(config),
             changed,
@@ -496,6 +513,10 @@ struct Session {
     materializer: Arc<dyn QueueMaterializer>,
     queue_store: Option<Arc<dyn crate::persistence::QueueStore>>,
     queue_dirty: bool,
+    /// The active source's stored queue could not be read, so nothing is saved over it until a new queue is built.
+    queue_unread: bool,
+    /// The last queue save in flight; each waits for the one before, so awaiting this awaits them all.
+    persisting: Option<tokio::task::JoinHandle<()>>,
     recorder: Option<Arc<dyn PlaybackRecorder>>,
     scrobbler: Option<Arc<crate::scrobbler::Scrobbler>>,
     last_recent_key: Option<String>,
@@ -579,8 +600,13 @@ impl Session {
                 let _ = reply.send(result);
             }
             SessionCmd::SetConfig { config, changed } => {
+                if config.active_source != self.config.active_source {
+                    self.swap_queue(&config, state_tx).await;
+                }
                 self.apply_config(*config, changed, state_tx);
             }
+            SessionCmd::QueueUnread => self.queue_unread = true,
+            SessionCmd::PreviewEqualizer(equalizer) => self.player.set_equalizer(equalizer),
             SessionCmd::Emit(event) => self.emit(*event),
             SessionCmd::AttachExternal(player) => {
                 self.attach_external_now(player);
@@ -621,10 +647,13 @@ impl Session {
                 });
             }
             SessionCmd::Persist(reply) => {
-                if let Some(store) = self.queue_store.clone() {
+                self.settle_persists().await;
+                if let Some(store) = self.queue_store.clone()
+                    && !self.queue_unread
+                {
                     let snapshot = self.snapshot();
                     self.queue_dirty = false;
-                    store.save(snapshot).await;
+                    store.save(&self.config.active_source, snapshot).await;
                 }
                 let _ = reply.send(());
             }
@@ -1269,18 +1298,15 @@ impl Session {
         }
         self.last_recent_key = Some(uid);
         if let Some(recorder) = self.recorder.clone() {
+            let events = self.events.clone();
             tokio::spawn(async move {
                 recorder.record_recent(&track).await;
-            });
-            self.emit(ApiEvent::LibraryInvalidated {
-                table: api::Table::Recents,
+                announce_history(&events);
             });
         }
     }
 
     /// Record the committed track as recently played, once per session track.
-    /// The invalidation event lets clients refresh recents immediately even
-    /// though the durable write is fire-and-forget.
     fn maybe_record_recent(&mut self) {
         let Some(recorder) = self.recorder.clone() else {
             return;
@@ -1294,11 +1320,10 @@ impl Session {
         }
         self.last_recent_key = Some(uid);
         let track = track.clone();
+        let events = self.events.clone();
         tokio::spawn(async move {
             recorder.record_recent(&track).await;
-        });
-        self.emit(ApiEvent::LibraryInvalidated {
-            table: api::Table::Recents,
+            announce_history(&events);
         });
     }
 
@@ -1318,8 +1343,10 @@ impl Session {
         if track.duration == u64::MAX {
             return;
         }
+        let events = self.events.clone();
         tokio::spawn(async move {
             recorder.bump_listen_count(&track).await;
+            announce_history(&events);
         });
     }
 
@@ -1330,6 +1357,8 @@ impl Session {
         snapshot: db::QueueSnapshot,
         state_tx: &watch::Sender<PlayerState>,
     ) -> Result<CommandAck, ApiError> {
+        // A restore replaces whatever is playing, an integration's device included.
+        self.release_external();
         self.cancel_load_task();
         self.cancel_radio_task();
         self.pending_transition = None;
@@ -1391,14 +1420,59 @@ impl Session {
     /// Fire-and-forget save off the actor thread; overlapping writes are
     /// last-write-wins on one SQLite row.
     fn persist_async(&mut self) {
+        self.queue_dirty = false;
         let Some(store) = self.queue_store.clone() else {
             return;
         };
+        if self.queue_unread {
+            return;
+        }
         let snapshot = self.snapshot();
-        self.queue_dirty = false;
-        tokio::spawn(async move {
-            store.save(snapshot).await;
-        });
+        let source = self.config.active_source.clone();
+        let before = self.persisting.take();
+        self.persisting = Some(tokio::spawn(async move {
+            if let Some(before) = before {
+                let _ = before.await;
+            }
+            store.save(&source, snapshot).await;
+        }));
+    }
+
+    /// Wait out every queue save already started.
+    async fn settle_persists(&mut self) {
+        if let Some(pending) = self.persisting.take() {
+            let _ = pending.await;
+        }
+    }
+
+    /// Park the queue under the source being left, or drop it when that source is gone, and resume the one being entered.
+    async fn swap_queue(
+        &mut self,
+        next: &config::AppConfig,
+        state_tx: &watch::Sender<PlayerState>,
+    ) {
+        let (resumed, unread) = match self.queue_store.clone() {
+            Some(store) => {
+                self.settle_persists().await;
+                let leaving = self.config.active_source.clone();
+                if !next.has_source(&leaving) {
+                    store.forget(&leaving).await;
+                } else if !self.queue_unread {
+                    store.save(&leaving, self.snapshot()).await;
+                }
+                match store.load(&next.active_source).await {
+                    Ok(resumed) => (resumed, false),
+                    Err(error) => {
+                        tracing::warn!(%error, "the queue of the source switched to could not be read");
+                        (db::QueueSnapshot::default(), true)
+                    }
+                }
+            }
+            None => (db::QueueSnapshot::default(), false),
+        };
+        self.materializer.register_restored(&resumed.queue);
+        let _ = self.handle_restore(resumed, state_tx);
+        self.queue_unread = unread;
     }
 
     fn commit_transition_model(&mut self, token: u64) -> bool {
@@ -1520,7 +1594,15 @@ impl Session {
         let pending = self.pending_resume.as_ref();
         let position = pending.and_then(|pending| {
             (pending.track_key == track.id.uid()).then(|| {
-                Duration::from_millis(pending.position_ms.min(track.duration.saturating_mul(1000)))
+                // Workaround: When the last track gets replayed/resumed after it ended,
+                // it should show progress starting from the start instead of leaving it
+                // at the end of the song, while audio is playing in the background.
+                if self.phase == ApiPhase::Ended {
+                    Duration::ZERO
+                } else {
+                    let duration = track.duration.saturating_mul(1_000);
+                    Duration::from_millis(pending.position_ms.min(duration))
+                }
             })
         });
         (position, pending.is_some())
@@ -1629,6 +1711,13 @@ struct ExternalState {
     track: Option<Track>,
     artwork: Option<String>,
     completed_key: Option<String>,
+}
+
+/// Tell clients play history moved, sent after the write so a re-read sees it.
+fn announce_history(events: &broadcast::Sender<ApiEvent>) {
+    let _ = events.send(ApiEvent::LibraryInvalidated {
+        table: api::Table::Recents,
+    });
 }
 
 fn merge_buffered_range(ranges: &mut Vec<BufferedRange>, incoming: BufferedRange) {

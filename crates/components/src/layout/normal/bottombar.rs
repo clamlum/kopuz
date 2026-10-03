@@ -55,7 +55,9 @@ pub fn BottombarNormal(
             .unwrap_or_default();
         return rsx! {
             div {
-                class: "shrink-0 mx-2 mb-[env(safe-area-inset-bottom)] h-[68px] bg-[#121212]/95 backdrop-blur-3xl border border-white/10 rounded-[24px] flex items-center px-3 gap-3 relative overflow-hidden shadow-[0_12px_40px_rgba(0,0,0,0.8)]",
+                // The tab bar underneath owns the bottom safe area; the pill
+                // only needs to clear it.
+                class: "shrink-0 mx-2 mb-2 h-[68px] bg-[#121212]/95 backdrop-blur-3xl border border-white/10 rounded-[24px] flex items-center px-3 gap-3 relative overflow-hidden shadow-[0_12px_40px_rgba(0,0,0,0.8)]",
                 onclick: move |_| is_fullscreen.set(true),
                 ontouchstart: move |evt| bar_swipe.start(&evt),
                 ontouchmove: move |evt| bar_swipe.update(&evt),
@@ -97,6 +99,10 @@ pub fn BottombarNormal(
     }
 
     let current_track_snapshot = ctrl.current_track_snapshot.read().clone();
+    let artist = current_track_snapshot
+        .as_ref()
+        .and_then(|track| track.primary_credit())
+        .and_then(|credit| credit.key.clone());
     let cover = ctrl
         .current_cover_url(hooks::artwork::Size::Thumb)
         .unwrap_or_default();
@@ -166,8 +172,9 @@ pub fn BottombarNormal(
                         span {
                             class: "text-xs text-slate-400 truncate hover:text-white/70 hover:underline cursor-pointer",
                             onclick: move |_| {
-                                let artist = current_song_artist.read().clone();
-                                nav_ctrl.navigate_to_artist(artist);
+                                if let Some(artist) = artist.clone() {
+                                    nav_ctrl.open_artist(artist);
+                                }
                             },
                             "{current_song_artist}"
                         }

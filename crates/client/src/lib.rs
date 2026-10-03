@@ -366,13 +366,24 @@ impl api::LibraryApi for GrpcApi {
     async fn artist_tracks(&self, artist: String, page: Page) -> Result<api::TrackPage, ApiError> {
         let tracks = self
             .client()
-            .get_artist_tracks(Request::new(proto::ArtistTracksRequest {
-                artist,
-                page: Some(convert::page_to_proto(page)),
-            }))
+            .get_artist_tracks(Request::new(convert::artist_tracks_request_to_proto(
+                &artist, page,
+            )))
             .await
             .map_err(wire_error)?;
         Ok(convert::track_page_from_proto(tracks.get_ref()))
+    }
+
+    async fn artist(&self, artist: String) -> Result<api::ArtistDetail, ApiError> {
+        let detail = self
+            .client()
+            .get_artist(Request::new(proto::ArtistRequest {
+                key: artist.to_string(),
+            }))
+            .await
+            .map_err(wire_error)?;
+        convert::artist_detail_from_proto(detail.get_ref())
+            .ok_or_else(|| ApiError::internal("the daemon sent an artist detail naming no artist"))
     }
 
     async fn artist_sample_tracks(&self, page: Page) -> Result<api::TrackPage, ApiError> {
@@ -569,9 +580,9 @@ impl api::LibraryApi for GrpcApi {
         Ok(())
     }
 
-    async fn refresh_artist_artwork(&self, names: Vec<String>) -> Result<(), ApiError> {
+    async fn refresh_artist_artwork(&self, artists: Vec<String>) -> Result<(), ApiError> {
         self.client()
-            .refresh_artist_artwork(Request::new(proto::RefreshArtistArtworkRequest { names }))
+            .refresh_artist_artwork(Request::new(convert::refresh_artists_to_proto(&artists)))
             .await
             .map_err(wire_error)?;
         Ok(())
@@ -719,6 +730,15 @@ impl api::ConfigApi for GrpcApi {
             .map_err(wire_error)?;
         Ok(())
     }
+
+    async fn daemon_status(&self) -> Result<api::DaemonStatus, ApiError> {
+        let status = self
+            .client()
+            .get_status(Request::new(proto::GetStatusRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::daemon_status_from_proto(status.get_ref()))
+    }
 }
 
 #[async_trait::async_trait]
@@ -787,6 +807,23 @@ impl api::JobApi for GrpcApi {
         Ok(JobRef {
             job_id: job.get_ref().job_id.clone(),
         })
+    }
+
+    async fn search_downloads(
+        &self,
+        query: String,
+    ) -> Result<Vec<api::DownloadCandidate>, ApiError> {
+        let found = self
+            .client()
+            .search_downloads(Request::new(proto::SearchDownloadsRequest { query }))
+            .await
+            .map_err(wire_error)?;
+        Ok(found
+            .get_ref()
+            .candidates
+            .iter()
+            .map(convert::download_candidate_from_proto)
+            .collect())
     }
 
     async fn download_formats(&self) -> Result<Vec<api::ChoiceOption>, ApiError> {
@@ -1110,13 +1147,13 @@ impl api::SourceApi for GrpcApi {
             .collect())
     }
 
-    async fn check_server_draft(
+    async fn check_source_draft(
         &self,
-        draft: api::ServerDraft,
+        draft: api::SourceDraft,
     ) -> Result<api::DraftCheck, ApiError> {
         let check = self
             .client()
-            .check_server_draft(Request::new(convert::server_draft_to_proto(&draft)))
+            .check_source_draft(Request::new(convert::source_draft_to_proto(&draft)))
             .await
             .map_err(wire_error)?;
         Ok(convert::draft_check_from_proto(check.get_ref()))
@@ -1147,54 +1184,18 @@ impl api::SourceApi for GrpcApi {
         Ok(convert::source_info_from_proto(info.get_ref()))
     }
 
-    async fn upsert_local_source(
-        &self,
-        draft: api::LocalSourceDraft,
-    ) -> Result<api::SourceInfo, ApiError> {
+    async fn upsert_source(&self, draft: api::SourceDraft) -> Result<api::SourceInfo, ApiError> {
         let info = self
             .client()
-            .upsert_local_source(Request::new(convert::local_draft_to_proto(&draft)))
+            .upsert_source(Request::new(convert::source_draft_to_proto(&draft)))
             .await
             .map_err(wire_error)?;
         Ok(convert::source_info_from_proto(info.get_ref()))
     }
 
-    async fn delete_local_source(&self, id: String) -> Result<(), ApiError> {
+    async fn delete_source(&self, id: String) -> Result<(), ApiError> {
         self.client()
-            .delete_local_source(Request::new(proto::SourceId { id }))
-            .await
-            .map_err(wire_error)?;
-        Ok(())
-    }
-
-    async fn set_source_directories(
-        &self,
-        id: String,
-        directories: Vec<String>,
-    ) -> Result<api::SourceInfo, ApiError> {
-        let info = self
-            .client()
-            .set_source_directories(Request::new(proto::SetSourceDirectoriesRequest {
-                id,
-                directories,
-            }))
-            .await
-            .map_err(wire_error)?;
-        Ok(convert::source_info_from_proto(info.get_ref()))
-    }
-
-    async fn upsert_server(&self, draft: api::ServerDraft) -> Result<api::SourceInfo, ApiError> {
-        let info = self
-            .client()
-            .upsert_server(Request::new(convert::server_draft_to_proto(&draft)))
-            .await
-            .map_err(wire_error)?;
-        Ok(convert::source_info_from_proto(info.get_ref()))
-    }
-
-    async fn delete_server(&self, id: String) -> Result<(), ApiError> {
-        self.client()
-            .delete_server(Request::new(proto::SourceId { id }))
+            .delete_source(Request::new(proto::SourceId { id }))
             .await
             .map_err(wire_error)?;
         Ok(())

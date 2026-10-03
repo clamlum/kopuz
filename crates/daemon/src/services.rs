@@ -7,7 +7,7 @@
 //! no change at all on the other side of the API.
 
 use api::schema::{ChoiceOption, FieldKind, FieldSpec, FieldValue, Icon, Problem, Text, value_of};
-use api::{ServerDraft, ServiceInfo, ServiceRef, SignInKind};
+use api::{ServiceInfo, ServiceRef, SignInKind, SourceDraft};
 use config::{AppConfig, Browser, MusicService, SavedServer};
 
 /// The field keys a form and its answers agree on.
@@ -20,6 +20,10 @@ pub const LANGUAGE: &str = "language";
 pub const TOKEN: &str = "token";
 pub const PLAYBACK_BROWSER: &str = "playback_browser";
 pub const PREFER_ACTIVE_DEVICE: &str = "prefer_active_device";
+pub const DIRECTORIES: &str = "directories";
+
+/// The service id of the folders the daemon scans itself.
+pub const FOLDERS: &str = "folders";
 
 /// `auth_method` values.
 const BY_BROWSER: &str = "browser";
@@ -78,7 +82,7 @@ impl<'a> From<&'a config::MusicServer> for ServerView<'a> {
 }
 
 pub fn all() -> Vec<ServiceInfo> {
-    MusicService::ALL
+    let mut services: Vec<ServiceInfo> = MusicService::ALL
         .iter()
         .map(|service| ServiceInfo {
             id: service.id().to_string(),
@@ -88,7 +92,60 @@ pub fn all() -> Vec<ServiceInfo> {
             experimental: matches!(service, MusicService::Spotify),
             fields: add_fields(*service),
         })
-        .collect()
+        .collect();
+    services.push(folders());
+    services
+}
+
+/// The folders a daemon scans for music, offered like any other service.
+pub fn folders() -> ServiceInfo {
+    ServiceInfo {
+        id: FOLDERS.to_string(),
+        name: Text::key("remote_music_folders"),
+        icon: Icon::Class("fa-solid fa-folder-tree".into()),
+        accent: "#6366f1".to_string(),
+        experimental: false,
+        fields: vec![directories_field(&[])],
+    }
+}
+
+pub fn folders_ref() -> ServiceRef {
+    let service = folders();
+    ServiceRef {
+        id: service.id,
+        name: service.name,
+        icon: service.icon,
+        accent: service.accent,
+    }
+}
+
+/// The folder list of a source, with the paths it holds now.
+pub fn directories_field(paths: &[String]) -> FieldSpec {
+    FieldSpec {
+        required: true,
+        value: Some(api::schema::encode_directories(paths)),
+        ..text_field(DIRECTORIES, "remote_music_folders", FieldKind::Directories)
+    }
+}
+
+/// What is wrong with a folder source's answers.
+pub fn check_folders(draft: &SourceDraft) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    if draft.name.trim().is_empty() {
+        problems.push(Problem::on("name", Text::key("server_name_required")));
+    }
+    let paths = folder_paths(&draft.values);
+    if paths.is_empty() || paths.iter().any(|path| path.trim().is_empty()) {
+        problems.push(Problem::on(DIRECTORIES, Text::key("folder_required")));
+    }
+    problems
+}
+
+/// The folders a draft or a settings answer names, none if it does not.
+pub fn folder_paths(values: &[FieldValue]) -> Vec<String> {
+    value_of(values, DIRECTORIES)
+        .map(api::schema::decode_directories)
+        .unwrap_or_default()
 }
 
 pub fn service_ref(service: MusicService) -> ServiceRef {
@@ -150,6 +207,7 @@ fn options_for(browsers: &[Browser]) -> Vec<ChoiceOption> {
         .map(|browser| ChoiceOption {
             value: browser.id().to_string(),
             label: Text::literal(browser.label()),
+            ..Default::default()
         })
         .collect()
 }
@@ -161,6 +219,7 @@ fn browser_field(value: Option<&str>, show_when: Option<FieldValue>) -> FieldSpe
     let mut options = vec![ChoiceOption {
         value: AUTOMATIC.to_string(),
         label: Text::key("sign_in_browser_auto"),
+        ..Default::default()
     }];
     options.extend(options_for(Browser::ALL));
     FieldSpec {
@@ -182,6 +241,7 @@ fn code_options(codes: &[&str]) -> Vec<ChoiceOption> {
         .map(|code| ChoiceOption {
             value: (*code).to_string(),
             label: Text::literal(*code),
+            ..Default::default()
         })
         .collect()
 }
@@ -209,7 +269,7 @@ fn url_field(placeholder: &str) -> FieldSpec {
 
 /// The form that adds one of these.
 pub fn add_fields(service: MusicService) -> Vec<FieldSpec> {
-    match service {
+    let fields = match service {
         MusicService::YtMusic => vec![
             FieldSpec {
                 required: true,
@@ -222,10 +282,12 @@ pub fn add_fields(service: MusicService) -> Vec<FieldSpec> {
                             ChoiceOption {
                                 value: BY_BROWSER.to_string(),
                                 label: Text::key("sign_in_with_browser"),
+                                ..Default::default()
                             },
                             ChoiceOption {
                                 value: ANONYMOUS.to_string(),
                                 label: Text::key("sign_in_anonymously"),
+                                ..Default::default()
                             },
                         ],
                     },
@@ -280,10 +342,12 @@ pub fn add_fields(service: MusicService) -> Vec<FieldSpec> {
                             ChoiceOption {
                                 value: BY_BROWSER.to_string(),
                                 label: Text::key("sign_in_with_browser"),
+                                ..Default::default()
                             },
                             ChoiceOption {
                                 value: MANUAL.to_string(),
                                 label: Text::key("apple_music_paste_token"),
+                                ..Default::default()
                             },
                         ],
                     },
@@ -315,13 +379,36 @@ pub fn add_fields(service: MusicService) -> Vec<FieldSpec> {
         MusicService::Jellyfin | MusicService::Subsonic | MusicService::Custom => {
             vec![url_field("server_url_placeholder")]
         }
+    };
+    #[cfg(target_os = "android")]
+    let fields = webview_fields(fields);
+    fields
+}
+
+#[cfg(any(target_os = "android", test))]
+fn webview_fields(mut fields: Vec<FieldSpec>) -> Vec<FieldSpec> {
+    fields.retain(|field| field.key != BROWSER && field.key != PLAYBACK_BROWSER);
+    for field in &mut fields {
+        if field.key == AUTH_METHOD
+            && let FieldKind::Radio { options } = &mut field.kind
+        {
+            for option in options {
+                if option.value == BY_BROWSER {
+                    option.label = Text::key("sign_in_with_webview");
+                }
+            }
+        }
+        if field.help == Some(Text::key("soundcloud_sign_in_help")) {
+            field.help = Some(Text::key("webview_sign_in_help"));
+        }
     }
+    fields
 }
 
 /// The options a configured source has, with the values it currently holds.
 pub fn settings(server: &ServerView<'_>, config: &AppConfig) -> Vec<FieldSpec> {
     let browser = server.browser.map(|browser| browser.id().to_string());
-    match server.service {
+    let fields = match server.service {
         MusicService::YtMusic | MusicService::SoundCloud if !server.anonymous => {
             vec![browser_field(browser.as_deref(), None)]
         }
@@ -357,6 +444,7 @@ pub fn settings(server: &ServerView<'_>, config: &AppConfig) -> Vec<FieldSpec> {
             let mut hosts = vec![ChoiceOption {
                 value: AUTOMATIC.to_string(),
                 label: Text::key("playback_browser_auto"),
+                ..Default::default()
             }];
             hosts.extend(options_for(Browser::CHROMIUM_FAMILY));
             vec![
@@ -390,7 +478,10 @@ pub fn settings(server: &ServerView<'_>, config: &AppConfig) -> Vec<FieldSpec> {
             ]
         }
         _ => Vec::new(),
-    }
+    };
+    #[cfg(target_os = "android")]
+    let fields = webview_fields(fields);
+    fields
 }
 
 /// The line under a source's name.
@@ -420,12 +511,12 @@ fn draft_sign_in(service: MusicService, anonymous: bool) -> SignInKind {
     }
 }
 
-fn anonymous_draft(draft: &ServerDraft) -> bool {
+fn anonymous_draft(draft: &SourceDraft) -> bool {
     value_of(&draft.values, AUTH_METHOD) == Some(ANONYMOUS)
 }
 
 /// What saving this draft would need, and what is wrong with it.
-pub fn check(service: MusicService, draft: &ServerDraft) -> (SignInKind, Vec<Problem>) {
+pub fn check(service: MusicService, draft: &SourceDraft) -> (SignInKind, Vec<Problem>) {
     let mut problems = Vec::new();
     if draft.name.trim().is_empty() {
         problems.push(Problem::on("name", Text::key("server_name_required")));
@@ -467,7 +558,7 @@ pub fn check(service: MusicService, draft: &ServerDraft) -> (SignInKind, Vec<Pro
 }
 
 /// Fold a draft's answers into the row that is stored.
-pub fn apply(service: MusicService, draft: &ServerDraft, saved: &mut SavedServer) {
+pub fn apply(service: MusicService, draft: &SourceDraft, saved: &mut SavedServer) {
     let value = |key: &str| {
         value_of(&draft.values, key)
             .map(str::trim)
@@ -550,5 +641,41 @@ pub fn problem_text(problem: &Problem) -> String {
     match &problem.label {
         Text::Key(key) => key.clone(),
         Text::Literal(text) => text.clone(),
+    }
+}
+
+#[cfg(test)]
+mod webview_tests {
+    use super::*;
+
+    #[test]
+    fn android_forms_have_no_external_browser_or_registered_app_setup() {
+        for service in [
+            MusicService::YtMusic,
+            MusicService::SoundCloud,
+            MusicService::AppleMusic,
+            MusicService::Spotify,
+        ] {
+            let fields = webview_fields(add_fields(service));
+            assert!(
+                fields
+                    .iter()
+                    .all(|field| field.key != BROWSER && field.key != PLAYBACK_BROWSER)
+            );
+            if service != MusicService::Spotify {
+                assert!(fields.iter().all(|field| field.key != CLIENT_ID
+                    && field.key != "client_secret"
+                    && field.key != "developer_token"));
+            }
+            for field in fields {
+                if let FieldKind::Radio { options } = field.kind {
+                    for option in options {
+                        if option.value == BY_BROWSER {
+                            assert_eq!(option.label, Text::key("sign_in_with_webview"));
+                        }
+                    }
+                }
+            }
+        }
     }
 }

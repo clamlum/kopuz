@@ -56,7 +56,7 @@ pub fn BottombarVaxry(
         let fav = is_fav();
         return rsx! {
             div {
-                class: "shrink-0 h-[68px] bg-black/85 backdrop-blur-2xl border-t border-white/10 flex items-center px-3 gap-3 relative overflow-hidden mb-[env(safe-area-inset-bottom)]",
+                class: "shrink-0 h-[68px] bg-black/85 backdrop-blur-2xl border-t border-white/10 flex items-center px-3 gap-3 relative overflow-hidden",
                 onclick: move |_| is_fullscreen.set(true),
                 ontouchstart: move |evt| bar_swipe.start(&evt),
                 ontouchmove: move |evt| bar_swipe.update(&evt),
@@ -103,6 +103,10 @@ pub fn BottombarVaxry(
     }
 
     let current_track_snapshot = ctrl.current_track_snapshot.read().clone();
+    let artist = current_track_snapshot
+        .as_ref()
+        .and_then(|track| track.primary_credit())
+        .and_then(|credit| credit.key.clone());
     let cover = ctrl
         .current_cover_url(hooks::artwork::Size::Thumb)
         .unwrap_or_default();
@@ -179,8 +183,9 @@ pub fn BottombarVaxry(
                         span {
                             class: "text-[11px] text-slate-400 truncate min-w-0 shrink-0 max-w-[40%] cursor-pointer hover:underline hover:text-slate-300",
                             onclick: move |_| {
-                                let artist = current_song_artist.read().clone();
-                                nav_ctrl.navigate_to_artist(artist);
+                                if let Some(artist) = artist.clone() {
+                                    nav_ctrl.open_artist(artist);
+                                }
                             },
                             "{current_song_artist}"
                         }

@@ -27,6 +27,8 @@ pub struct LibraryService {
     session: OnceLock<SessionHandle>,
     catalog: OnceLock<Arc<crate::catalog::CatalogService>>,
     transient: std::sync::Mutex<TransientTracks>,
+    /// Artists a photo lookup is out for, so a grid re-asking mid-batch does not send the same lookups again.
+    artwork_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Tracks that exist but the database has never seen: a browse shelf, a
@@ -126,6 +128,7 @@ impl LibraryService {
             session: OnceLock::new(),
             catalog: OnceLock::new(),
             transient: std::sync::Mutex::new(TransientTracks::default()),
+            artwork_in_flight: Arc::default(),
         }
     }
 
@@ -206,13 +209,15 @@ impl LibraryService {
     }
 
     fn scan_roots(config: &config::AppConfig) -> Vec<(config::Source, Vec<PathBuf>)> {
-        std::iter::once((config::Source::Local, config.music_directory.clone()))
-            .chain(config.local_sources.iter().map(|source| {
+        config
+            .local_sources
+            .iter()
+            .map(|source| {
                 (
                     config::Source::LocalLibrary(source.id.clone()),
                     source.directories.clone(),
                 )
-            }))
+            })
             .collect()
     }
 
@@ -238,13 +243,6 @@ impl LibraryService {
             Some(
                 self.db
                     .album_tracks(&self.query_source(), album)
-                    .await
-                    .map_err(db_error)?,
-            )
-        } else if let Some(artist) = filter.artist.as_deref() {
-            Some(
-                self.db
-                    .artist_tracks(&self.query_source(), artist, None)
                     .await
                     .map_err(db_error)?,
             )
@@ -330,9 +328,20 @@ impl LibraryService {
     }
 
     pub fn stats(&self) -> api::StatsView {
-        api::StatsView {
-            listen_counts: self.current_config().listen_counts.clone(),
-        }
+        let config = self.current_config();
+        let own = config.active_source.listen_count_key("");
+        let listen_counts = config
+            .listen_counts
+            .iter()
+            .filter_map(|(key, count)| {
+                if own.is_empty() {
+                    (!key.starts_with("local:")).then(|| (key.clone(), *count))
+                } else {
+                    key.strip_prefix(&own).map(|uid| (uid.to_owned(), *count))
+                }
+            })
+            .collect();
+        api::StatsView { listen_counts }
     }
 
     /// Lyrics for one library track, through the app's full provider chain
@@ -466,6 +475,7 @@ impl LibraryService {
             musicbrainz_recording_id: None,
             musicbrainz_track_id: None,
             playlist_item_id: None,
+            credits: Vec::new(),
             artists: vec![],
         }
     }
@@ -538,11 +548,13 @@ impl QueueMaterializer for LibraryService {
                 .album_tracks(&self.query_source(), id)
                 .await
                 .map_err(db_error),
-            QueueContext::Artist { name } => self
-                .db
-                .artist_tracks(&self.query_source(), name, None)
-                .await
-                .map_err(db_error),
+            QueueContext::Artist { artist } => {
+                let row = self.artist_row(artist).await?;
+                self.db
+                    .artist_tracks(&self.query_source(), &row.key, None)
+                    .await
+                    .map_err(db_error)
+            }
             QueueContext::Genre { name } => self
                 .db
                 .genre_tracks(&self.query_source(), name)
@@ -589,6 +601,10 @@ impl QueueMaterializer for LibraryService {
             QueueContext::PlaylistRadio { id } => self.catalog_service()?.playlist_radio(id).await,
         }
     }
+
+    fn register_restored(&self, tracks: &[Track]) {
+        self.register_transient(tracks);
+    }
 }
 
 #[cfg(test)]
@@ -612,6 +628,7 @@ mod tests {
             musicbrainz_recording_id: None,
             musicbrainz_track_id: None,
             playlist_item_id: None,
+            credits: Vec::new(),
             artists: vec![],
         }
     }
@@ -669,14 +686,16 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].title, "song 4");
 
+        let ada = library
+            .artists(Page::default())
+            .await
+            .expect("artist grid")
+            .artists
+            .into_iter()
+            .find(|artist| artist.name == "Ada")
+            .expect("Ada is listed");
         let page = library
-            .tracks(
-                TrackFilter {
-                    artist: Some("Ada".into()),
-                    ..Default::default()
-                },
-                Page::default(),
-            )
+            .artist_tracks(&ada.key, Page::default())
             .await
             .expect("artist listing");
         assert_eq!(page.total, 3);
@@ -746,6 +765,7 @@ mod tests {
             musicbrainz_recording_id: None,
             musicbrainz_track_id: None,
             playlist_item_id: None,
+            credits: Vec::new(),
             artists: vec![],
         };
 

@@ -28,38 +28,6 @@ pub fn intent_from_proto(value: Option<&Intent>) -> api::Intent {
     }
 }
 
-pub fn now_playing_to_proto(value: &api::NowPlaying) -> NowPlaying {
-    NowPlaying {
-        key: value.key.clone(),
-        uid: value.uid.clone(),
-        title: value.title.clone(),
-        artist: value.artist.clone(),
-        album: value.album.clone(),
-        duration_ms: value.duration_ms,
-        khz: value.khz,
-        bitrate: u32::from(value.bitrate),
-        kind: track_kind_to_proto(value.kind) as i32,
-        seekable: value.seekable,
-        artwork: value.artwork.as_ref().map(artwork_ref_to_proto),
-    }
-}
-
-pub fn now_playing_from_proto(value: &NowPlaying) -> api::NowPlaying {
-    api::NowPlaying {
-        key: value.key.clone(),
-        uid: value.uid.clone(),
-        title: value.title.clone(),
-        artist: value.artist.clone(),
-        album: value.album.clone(),
-        duration_ms: value.duration_ms,
-        khz: value.khz,
-        bitrate: value.bitrate.min(u32::from(u16::MAX)) as u16,
-        kind: track_kind_from_proto(value.kind),
-        seekable: value.seekable,
-        artwork: value.artwork.as_ref().and_then(artwork_ref_from_proto),
-    }
-}
-
 pub fn external_device_to_proto(value: &api::ExternalDevice) -> ExternalDevice {
     ExternalDevice {
         id: value.id.clone(),
@@ -139,14 +107,14 @@ pub fn player_state_to_proto(value: &api::PlayerState) -> PlayerState {
         now_ms: value.now_ms,
         phase: phase_to_proto(value.phase) as i32,
         intent: Some(intent_to_proto(&value.intent)),
-        track: value.track.as_ref().map(now_playing_to_proto),
+        row: value.track.as_ref().map(track_info_to_proto),
         position: value.position.as_ref().map(anchor_to_proto),
         queue: Some(queue_summary_to_proto(&value.queue)),
         volume: value.volume,
         buffered: value.buffered.iter().map(buffered_to_proto).collect(),
         fading: value.fading.as_ref().map(|fading| FadingState {
             from_token: fading.from_token,
-            track: Some(now_playing_to_proto(&fading.track)),
+            row: Some(track_info_to_proto(&fading.track)),
             position_ms: fading.position_ms,
         }),
         external: value.external.as_ref().map(|external| ExternalPlayback {
@@ -164,19 +132,18 @@ pub fn player_state_from_proto(value: &PlayerState) -> api::PlayerState {
         now_ms: value.now_ms,
         phase: phase_from_proto(value.phase),
         intent: intent_from_proto(value.intent.as_ref()),
-        track: value.track.as_ref().map(now_playing_from_proto),
+        track: value.row.as_ref().map(track_info_from_proto),
         position: value.position.as_ref().map(anchor_from_proto),
         queue: queue_summary_from_proto(value.queue.as_ref()),
         volume: value.volume,
         buffered: value.buffered.iter().map(buffered_from_proto).collect(),
-        fading: value.fading.as_ref().map(|fading| api::FadingState {
-            from_token: fading.from_token,
-            track: fading
-                .track
-                .as_ref()
-                .map(now_playing_from_proto)
-                .unwrap_or_default(),
-            position_ms: fading.position_ms,
+        // A fade with no outgoing track has nothing to keep on screen.
+        fading: value.fading.as_ref().and_then(|fading| {
+            Some(api::FadingState {
+                from_token: fading.from_token,
+                track: track_info_from_proto(fading.row.as_ref()?),
+                position_ms: fading.position_ms,
+            })
         }),
         external: value
             .external

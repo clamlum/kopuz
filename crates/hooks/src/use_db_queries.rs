@@ -15,7 +15,6 @@
 //! result count.
 
 use api::{Page, TrackFilter};
-use config::Source;
 use dioxus::prelude::*;
 use tracing::Instrument;
 
@@ -116,7 +115,7 @@ pub fn use_tracks_window(filter: Memo<TrackFilter>, page: Memo<Page>) -> TracksW
 /// One album's tracks, disc/track-ordered. An empty `album_id` (the home-hero
 /// "nothing picked yet" sentinel) resolves to empty without asking.
 pub fn use_album_tracks(
-    source: Memo<Source>,
+    source: Memo<String>,
     album_id: Memo<String>,
 ) -> Resource<Vec<api::TrackInfo>> {
     let api = use_api();
@@ -147,38 +146,54 @@ pub fn use_album_tracks(
     })
 }
 
-/// Every track credited to an artist.
+/// Every track credited to an artist. No artist resolves to empty without asking.
 pub fn use_artist_tracks(
-    source: Memo<Source>,
-    artist: Memo<String>,
-) -> Resource<Vec<api::TrackInfo>> {
+    source: Memo<String>,
+    artist: Memo<Option<String>>,
+) -> Resource<Result<Vec<api::TrackInfo>, api::ApiError>> {
     let api = use_api();
     let gens = use_generations();
     use_resource(move || {
         let _ = gens.generation(Table::Tracks);
-        let (api, s, name) = (api.clone(), source(), artist());
+        let (api, s, artist) = (api.clone(), source(), artist());
         let span = tracing::info_span!(
             "query.artist_tracks",
             source = s.as_str(),
-            artist = %name,
+            artist = ?artist,
             rows = tracing::field::Empty,
         );
         async move {
-            let rows = api
-                .artist_tracks(name, all())
-                .await
-                .map(|page| page.items)
-                .unwrap_or_default();
+            let Some(artist) = artist else {
+                tracing::Span::current().record("rows", 0);
+                return Ok(Vec::new());
+            };
+            let rows = api.artist_tracks(artist, all()).await?.items;
             tracing::Span::current().record("rows", rows.len());
-            rows
+            Ok(rows)
         }
         .instrument(span)
     })
 }
 
+/// One artist's name, photo, track count and billed albums. No artist resolves to `None`.
+pub fn use_artist(
+    source: Memo<String>,
+    artist: Memo<Option<String>>,
+) -> Resource<Option<Result<api::ArtistDetail, api::ApiError>>> {
+    let api = use_api();
+    let gens = use_generations();
+    use_resource(move || {
+        let _ = gens.generation(Table::Tracks);
+        let _ = gens.generation(Table::Albums);
+        let (api, s, artist) = (api.clone(), source(), artist());
+        let span = tracing::info_span!("query.artist", source = s.as_str(), artist = ?artist);
+        async move { Some(api.artist(artist?).await) }.instrument(span)
+    })
+}
+
 /// Every track in a genre. An empty genre resolves to empty without asking.
 pub fn use_genre_tracks(
-    source: Memo<Source>,
+    source: Memo<String>,
     genre: Memo<String>,
 ) -> Resource<Vec<api::TrackInfo>> {
     let api = use_api();
@@ -210,7 +225,7 @@ pub fn use_genre_tracks(
 }
 
 /// One track per artist, for the artist grid's tiles.
-pub fn use_artist_sample_tracks(source: Memo<Source>, limit: u32) -> Resource<Vec<api::TrackInfo>> {
+pub fn use_artist_sample_tracks(source: Memo<String>, limit: u32) -> Resource<Vec<api::TrackInfo>> {
     let api = use_api();
     let gens = use_generations();
     use_resource(move || {
@@ -228,7 +243,7 @@ pub fn use_artist_sample_tracks(source: Memo<Source>, limit: u32) -> Resource<Ve
 }
 
 /// The genre with the most tracks, for the home page's heading.
-pub fn use_top_genre(source: Memo<Source>) -> Resource<Option<String>> {
+pub fn use_top_genre(source: Memo<String>) -> Resource<Option<String>> {
     let api = use_api();
     let gens = use_generations();
     use_resource(move || {
@@ -241,7 +256,7 @@ pub fn use_top_genre(source: Memo<Source>) -> Resource<Option<String>> {
 
 /// Resolve tracks by key (recents, playlist refs), preserving input order.
 pub fn use_tracks_by_keys(
-    source: Memo<Source>,
+    source: Memo<String>,
     keys: Memo<Vec<String>>,
 ) -> Resource<Vec<api::TrackInfo>> {
     let api = use_api();
@@ -269,7 +284,7 @@ pub fn use_tracks_by_keys(
 }
 
 /// This source's recently-played tracks, newest first.
-pub fn use_recently_played(source: Memo<Source>) -> Resource<Vec<api::TrackInfo>> {
+pub fn use_recently_played(source: Memo<String>) -> Resource<Vec<api::TrackInfo>> {
     let api = use_api();
     let gens = use_generations();
     use_resource(move || {
@@ -290,7 +305,7 @@ pub fn use_recently_played(source: Memo<Source>) -> Resource<Vec<api::TrackInfo>
 }
 
 /// One album by id.
-pub fn use_album(source: Memo<Source>, album_id: Memo<String>) -> Resource<Option<api::AlbumInfo>> {
+pub fn use_album(source: Memo<String>, album_id: Memo<String>) -> Resource<Option<api::AlbumInfo>> {
     let api = use_api();
     let gens = use_generations();
     use_resource(move || {
@@ -302,7 +317,7 @@ pub fn use_album(source: Memo<Source>, album_id: Memo<String>) -> Resource<Optio
 }
 
 /// Distinct artists for a source with track counts and photos, A→Z.
-pub fn use_artists(source: Memo<Source>) -> Resource<Vec<api::ArtistInfo>> {
+pub fn use_artists(source: Memo<String>) -> Resource<Vec<api::ArtistInfo>> {
     let api = use_api();
     let gens = use_generations();
     use_resource(move || {
@@ -326,11 +341,34 @@ pub fn use_artists(source: Memo<Source>) -> Resource<Vec<api::ArtistInfo>> {
     })
 }
 
-/// The in-memory active source, straight from the config signal in context —
-/// the persisted copy lags a server switch by the debounced save.
-pub fn use_active_source() -> Memo<config::Source> {
-    let config = use_context::<Signal<config::AppConfig>>();
-    use_memo(move || config.read().active_source.clone())
+/// The id of the active source, empty until the daemon has listed them.
+pub fn use_active_source() -> Memo<String> {
+    let active = crate::sources::use_active_source_info();
+    use_memo(move || {
+        active
+            .read()
+            .as_ref()
+            .map(|source| source.id.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// The active source's play counts by track uid, re-read when tracks or
+/// recents change or the source does.
+pub fn use_listen_counts(source: Memo<String>) -> Resource<std::collections::HashMap<String, u64>> {
+    let api = use_api();
+    let gens = use_generations();
+    use_resource(move || {
+        let _ = (source(), gens.generation(Table::Tracks));
+        let _ = gens.generation(Table::Recents);
+        let api = api.clone();
+        async move {
+            api.stats()
+                .await
+                .map(|stats| stats.listen_counts)
+                .unwrap_or_default()
+        }
+    })
 }
 
 /// The playlist catalog for the active source, re-queried on a
@@ -354,7 +392,7 @@ pub fn use_playlists() -> Resource<api::PlaylistCatalog> {
 /// newest track, so a scan that only adds tracks to a known album still moves
 /// it up.
 pub fn use_recently_added_albums(
-    source: Memo<Source>,
+    source: Memo<String>,
     limit: u32,
 ) -> Resource<Vec<api::AlbumInfo>> {
     let api = use_api();
@@ -381,7 +419,7 @@ pub fn use_recently_added_albums(
     })
 }
 
-pub fn use_albums(source: Memo<Source>) -> Resource<Vec<api::AlbumInfo>> {
+pub fn use_albums(source: Memo<String>) -> Resource<Vec<api::AlbumInfo>> {
     let api = use_api();
     let gens = use_generations();
     use_resource(move || {

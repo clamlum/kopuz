@@ -91,9 +91,22 @@ impl CatalogService {
         ))
     }
 
-    /// Convert a source's browse page, registering the songs so their keys
-    /// resolve later and the tile images so their bytes can be served.
-    fn page(&self, home: DiscoverHome, config: &config::AppConfig) -> CatalogPage {
+    /// Convert a browse page `listed` served, registering its songs and tile images so later requests resolve them.
+    fn page(
+        &self,
+        mut home: DiscoverHome,
+        listed: &config::Source,
+        config: &config::AppConfig,
+    ) -> CatalogPage {
+        let songs = home
+            .shelves
+            .iter_mut()
+            .flat_map(|shelf| shelf.items.iter_mut())
+            .filter_map(|item| match item {
+                DiscoverItem::Song(track) => Some(&mut **track),
+                _ => None,
+            });
+        crate::wire::listed_by(listed, songs);
         let songs: Vec<reader::Track> = home
             .shelves
             .iter()
@@ -197,12 +210,14 @@ impl CatalogService {
             None => source.discover_home().await,
         }
         .map_err(source_error)?;
-        Ok(self.page(home, &config))
+        Ok(self.page(home, source.source(), &config))
     }
 
     pub async fn detail(&self, request: CatalogDetailRequest) -> Result<CatalogDetail, ApiError> {
-        if request.id.trim().is_empty() {
-            return Err(ApiError::invalid_input("catalog id is required"));
+        if request.id.is_empty() {
+            return Err(ApiError::invalid_input(
+                "a catalog entity is opened by its id",
+            ));
         }
         let config = self.config();
         let source = self.source();
@@ -212,7 +227,7 @@ impl CatalogService {
                 // reached by a library ref needs the lookup first; and a saved
                 // album from a source that stores no browse id is found by what
                 // it is called, which is why the id alone is enough here.
-                let album = match source
+                let mut album = match source
                     .fetch_album_by_ref(&request.id)
                     .await
                     .map_err(source_error)?
@@ -233,12 +248,15 @@ impl CatalogService {
                             .map_err(source_error)?,
                     },
                 };
+                crate::wire::listed_by(source.source(), &mut album.tracks);
                 self.library.register_transient(&album.tracks);
                 let artwork = self.remember_thumbnail(&album.browse_id, album.thumbnail.as_deref());
+                let artist_key = album.artist_id.as_deref().map(str::to_string);
                 Ok(CatalogDetail {
                     kind: CatalogItemKind::Album,
                     id: album.browse_id,
                     title: album.title,
+                    artist_key,
                     subtitle: album.artist,
                     artwork,
                     playback_id: album.audio_playlist_id,
@@ -252,10 +270,11 @@ impl CatalogService {
                 })
             }
             CatalogItemKind::Playlist => {
-                let page = source
+                let mut page = source
                     .fetch_playlist_entries_page(&request.id, request.continuation)
                     .await
                     .map_err(source_error)?;
+                crate::wire::listed_by(source.source(), &mut page.tracks);
                 self.library.register_transient(&page.tracks);
                 let artwork = self
                     .thumbnail(&request.id)
@@ -278,24 +297,33 @@ impl CatalogService {
                 })
             }
             CatalogItemKind::Artist => {
-                let channel_id = if request.id.starts_with("UC") {
-                    request.id
-                } else {
-                    source
-                        .resolve_artist_channel_id(request.id.trim())
-                        .await
-                        .map_err(source_error)?
-                        .ok_or_else(|| ApiError::not_found("catalog artist not found"))?
+                let key = request.id;
+                let filed = crate::artist_row::find(&self.db, source.source(), &key).await?;
+                // An artist the library hasn't filed is one the source just listed, by the id it issued.
+                let channel_id = match filed {
+                    Some(row) => match row.source_id {
+                        Some(id) => id,
+                        None => return self.library_artist(&key).await,
+                    },
+                    None => key,
                 };
                 let artist = source
                     .fetch_artist(&channel_id)
                     .await
                     .map_err(source_error)?;
+                if source
+                    .name_artist(&channel_id, &artist.name)
+                    .await
+                    .unwrap_or(false)
+                {
+                    self.session.invalidate(api::Table::Tracks);
+                }
                 let page = self.page(
                     DiscoverHome {
                         shelves: artist.sections,
                         continuation: None,
                     },
+                    source.source(),
                     &config,
                 );
                 let artwork =
@@ -319,12 +347,32 @@ impl CatalogService {
         }
     }
 
+    /// An artist the source issued no id for has no catalog page, so it is the tracks the library files under it.
+    async fn library_artist(&self, key: &str) -> Result<CatalogDetail, ApiError> {
+        let artist = self.library.artist(key).await?.info;
+        let every = api::Page {
+            offset: 0,
+            limit: u32::MAX,
+        };
+        let tracks = self.library.artist_tracks(key, every).await?.items;
+        Ok(CatalogDetail {
+            kind: CatalogItemKind::Artist,
+            id: key.to_string(),
+            title: artist.name,
+            artwork: artist.artwork,
+            tracks,
+            ..Default::default()
+        })
+    }
+
     /// A source's mix seeded by one track, with the seed pinned to the front.
     ///
     /// Sources return the seed somewhere in the list, or not at all; a caller
     /// that asked to start from this track means it should play first.
     pub async fn track_radio(&self, key: &str) -> Result<Vec<reader::Track>, ApiError> {
-        let mut tracks = self.source().start_radio(key).await.map_err(source_error)?;
+        let source = self.source();
+        let mut tracks = source.start_radio(key).await.map_err(source_error)?;
+        crate::wire::listed_by(source.source(), &mut tracks);
         self.library.register_transient(&tracks);
         let seed = match take_seed(&mut tracks, key) {
             Some(seed) => seed,
@@ -335,11 +383,12 @@ impl CatalogService {
     }
 
     pub async fn playlist_radio(&self, id: &str) -> Result<Vec<reader::Track>, ApiError> {
-        let tracks = self
-            .source()
+        let source = self.source();
+        let mut tracks = source
             .start_playlist_radio(id)
             .await
             .map_err(source_error)?;
+        crate::wire::listed_by(source.source(), &mut tracks);
         self.library.register_transient(&tracks);
         Ok(tracks)
     }
@@ -397,6 +446,7 @@ mod tests {
             musicbrainz_recording_id: None,
             musicbrainz_track_id: None,
             playlist_item_id: None,
+            credits: Vec::new(),
             artists: Vec::new(),
         }
     }

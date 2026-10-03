@@ -182,10 +182,16 @@ fn Field(
                 for option in options.into_iter() {
                     label {
                         key: "{option.value}",
-                        class: "flex items-center gap-2 text-sm text-white cursor-pointer",
+                        class: if option.unavailable.is_some() {
+                            "flex items-center gap-2 text-sm text-white opacity-40 cursor-not-allowed"
+                        } else {
+                            "flex items-center gap-2 text-sm text-white cursor-pointer"
+                        },
+                        title: option.unavailable.as_ref().map(super::text),
                         input {
                             r#type: "radio",
                             name: "{field.key}",
+                            disabled: option.unavailable.is_some(),
                             checked: value == option.value,
                             onchange: {
                                 let key = field.key.clone();
@@ -217,6 +223,35 @@ fn Field(
                     DirectoryButton {
                         on_pick: move |path: String| {
                             on_change.call(api::FieldValue::new(picked_key.clone(), path));
+                        },
+                    }
+                }
+            }
+        }
+        api::FieldKind::Directories => {
+            let key = field.key.clone();
+            let paths = api::decode_directories(&value);
+            let added = paths.clone();
+            let removed = paths.clone();
+            let add_key = key.clone();
+            rsx! {
+                div { class: "flex-1",
+                    crate::settings_items::MultiDirectoryPicker {
+                        current_paths: paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>(),
+                        on_add: move |path: std::path::PathBuf| {
+                            let mut next = added.clone();
+                            let path = path.display().to_string();
+                            if !next.contains(&path) {
+                                next.push(path);
+                            }
+                            on_change.call(api::FieldValue::new(add_key.clone(), api::encode_directories(&next)));
+                        },
+                        on_remove: move |index: usize| {
+                            let mut next = removed.clone();
+                            if index < next.len() {
+                                next.remove(index);
+                            }
+                            on_change.call(api::FieldValue::new(key.clone(), api::encode_directories(&next)));
                         },
                     }
                 }

@@ -7,12 +7,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use api::prelude::*;
-use api::{ErrorCode, LoopMode};
+use api::{ErrorCode, LoopMode, TrackKind};
 use futures_util::StreamExt;
 use player::engine::{AudioSink, DataCallback, DataCallbackFactory, SinkConfig};
 
-use super::state::now_playing_from;
 use super::*;
+use crate::wire::track_info;
 
 const TEST_CONFIG: SinkConfig = SinkConfig {
     channels: 2,
@@ -141,6 +141,11 @@ fn test_track(key: &String) -> Track {
         musicbrainz_recording_id: None,
         musicbrainz_track_id: None,
         playlist_item_id: None,
+        credits: if key.contains("credited") {
+            vec![reader::models::ArtistCredit::linked("Ada", "ar-ada")]
+        } else {
+            Vec::new()
+        },
         artists: vec![],
     }
 }
@@ -331,6 +336,29 @@ async fn set_queue_then_window_round_trips() {
     assert_eq!(window.total, 3);
     assert_eq!(window.items[0].track.title, "track-0");
     assert_eq!(window.rev, ack.rev);
+}
+
+/// A frontend opens the artist and album off the state's row, so it must be the queue's own.
+#[tokio::test]
+async fn the_playing_row_is_the_one_the_queue_holds() {
+    let harness = harness(|_| {});
+    harness
+        .api
+        .set_queue(replace(&["credited-0", "track-1"]))
+        .await
+        .expect("set queue");
+    let state = wait_state(&harness.api, "a track to show", |state| {
+        state.track.is_some()
+    })
+    .await;
+    let queue = harness.api.queue_snapshot().await.expect("queue");
+    let playing = state.track.expect("track");
+
+    assert_eq!(
+        playing,
+        queue.items[queue.position.expect("position") as usize]
+    );
+    assert_eq!(playing.credits[0].name, "Ada");
 }
 
 #[tokio::test]
@@ -995,7 +1023,7 @@ async fn radio_tracks_reject_seek_commands() {
 #[test]
 fn radio_sentinel_becomes_wire_kind() {
     let track = test_track(&"radio:station:main".to_string());
-    let now = now_playing_from(&track, &config::AppConfig::default());
+    let now = track_info(&track, &config::AppConfig::default());
     assert_eq!(now.kind, TrackKind::Radio);
     assert_eq!(now.duration_ms, None);
     assert!(!now.seekable);
@@ -1005,7 +1033,7 @@ fn radio_sentinel_becomes_wire_kind() {
 /// matches the wrong one silently works on local tracks (where they are
 /// equal) while missing every server track.
 #[test]
-fn now_playing_carries_both_the_library_ref_and_the_source_qualified_id() {
+fn the_playing_row_carries_both_the_library_ref_and_the_source_qualified_id() {
     let server = Track {
         id: reader::models::TrackId::Server {
             service: config::MusicService::YtMusic,
@@ -1013,29 +1041,45 @@ fn now_playing_carries_both_the_library_ref_and_the_source_qualified_id() {
         },
         ..test_track(&"abc123".to_string())
     };
-    let now = now_playing_from(&server, &config::AppConfig::default());
+    let now = track_info(&server, &config::AppConfig::default());
     assert_eq!(now.key, "abc123", "key is the bare library ref");
     assert_eq!(now.uid, "ytmusic:abc123", "uid is source-qualified");
     assert_ne!(now.key, now.uid, "the two must not be conflated");
 
     // Local tracks are the case that hides the mistake: both are the path.
     let local = test_track(&"/music/a.flac".to_string());
-    let now = now_playing_from(&local, &config::AppConfig::default());
+    let now = track_info(&local, &config::AppConfig::default());
     assert_eq!(now.key, now.uid);
 }
 
 struct MemoryStore {
-    saved: Mutex<Vec<db::QueueSnapshot>>,
+    saved: Mutex<Vec<(config::Source, db::QueueSnapshot)>>,
 }
 
 #[async_trait::async_trait]
 impl crate::persistence::QueueStore for MemoryStore {
-    async fn load(&self) -> Option<db::QueueSnapshot> {
-        None
+    async fn load(&self, source: &config::Source) -> Result<db::QueueSnapshot, db::DbError> {
+        let saved = self.saved.lock().expect("store lock");
+        Ok(saved
+            .iter()
+            .rev()
+            .find(|(at, _)| at == source)
+            .map(|(_, snapshot)| snapshot.clone())
+            .unwrap_or_default())
     }
 
-    async fn save(&self, snapshot: db::QueueSnapshot) {
-        self.saved.lock().expect("store lock").push(snapshot);
+    async fn save(&self, source: &config::Source, snapshot: db::QueueSnapshot) {
+        self.saved
+            .lock()
+            .expect("store lock")
+            .push((source.clone(), snapshot));
+    }
+
+    async fn forget(&self, source: &config::Source) {
+        self.saved
+            .lock()
+            .expect("store lock")
+            .retain(|(at, _)| at != source);
     }
 }
 
@@ -1104,6 +1148,81 @@ async fn recents_record_once_and_completion_bumps_listens() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let recents = recorder.recents.lock().expect("lock").clone();
     assert_eq!(recents.len(), 2, "resume must not re-record the same track");
+}
+
+/// Writes play history slowly, into the same log a listening client writes what it hears.
+struct SlowRecorder {
+    log: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl SlowRecorder {
+    async fn write(&self) {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        self.log.lock().expect("log lock").push("written");
+    }
+}
+
+#[async_trait::async_trait]
+impl PlaybackRecorder for SlowRecorder {
+    async fn record_recent(&self, _: &Track) {
+        self.write().await;
+    }
+
+    async fn bump_listen_count(&self, _: &Track) {
+        self.write().await;
+    }
+}
+
+/// A client re-reading play history on its event must find the write that caused it.
+#[tokio::test]
+async fn play_history_is_announced_after_it_is_written() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let harness = harness_with_services(
+        |_| {},
+        Arc::new(|track| Some(wav_factory(track.duration.min(6)))),
+        Some(Arc::new(SlowRecorder { log: log.clone() })),
+    );
+    let mut events = harness.api.session.subscribe();
+    let heard = log.clone();
+    tokio::spawn(async move {
+        while let Ok(event) = events.recv().await {
+            if matches!(
+                event,
+                ApiEvent::LibraryInvalidated {
+                    table: api::Table::Recents
+                }
+            ) {
+                heard.lock().expect("log lock").push("announced");
+            }
+        }
+    });
+
+    harness
+        .api
+        .set_queue(replace(&["short-a", "short-b"]))
+        .await
+        .expect("set queue");
+    wait_committed(&harness.api).await;
+    drive_until(&harness, "auto-advance to second track", |state| {
+        state.queue.index == Some(1) && matches!(state.intent, Intent::Committed { .. })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let log = log.lock().expect("log lock").clone();
+    let (mut written, mut announced) = (0, 0);
+    for entry in &log {
+        match *entry {
+            "written" => written += 1,
+            _ => announced += 1,
+        }
+        assert!(announced <= written, "announced before written: {log:?}");
+    }
+    assert_eq!(
+        (written, announced),
+        (3, 3),
+        "two recents and a listen: {log:?}"
+    );
 }
 
 #[tokio::test]
@@ -1238,11 +1357,123 @@ async fn persist_now_writes_the_current_snapshot() {
     session.persist_now().await;
 
     let saved = store.saved.lock().expect("store lock");
-    let last = saved.last().expect("at least one snapshot");
+    let (_, last) = saved.last().expect("at least one snapshot");
     assert_eq!(last.version, 1);
     assert_eq!(last.queue.len(), 2);
     assert_eq!(last.current_queue_index, 0);
     assert!(!last.shuffle_enabled);
+}
+
+/// Each source keeps its queue: leaving one parks it, coming back resumes it, and a source never visited starts empty.
+#[tokio::test]
+async fn switching_sources_parks_and_resumes_each_queue() {
+    let store = Arc::new(MemoryStore {
+        saved: Mutex::new(Vec::new()),
+    });
+    let sink = FakeSinkHandle::default();
+    let player =
+        Player::try_with_sink(Box::new(FakeSink(sink.clone()))).expect("headless player starts");
+    let mut on_a = config::AppConfig::default();
+    on_a.local_sources.push(config::SavedLocalSource {
+        id: "local:b".into(),
+        name: "B".into(),
+        directories: Vec::new(),
+    });
+    let mut on_b = on_a.clone();
+    on_b.active_source = config::Source::LocalLibrary("local:b".into());
+    let services = PlaybackServices {
+        config: on_a.clone(),
+        queue_store: Some(store.clone()),
+        ..Default::default()
+    };
+    let session = SessionHandle::spawn_with_factory(
+        Arc::new(StubLibrary),
+        player,
+        services,
+        Arc::new(|track| Some(wav_factory(track.duration.min(6)))),
+    );
+    let api = LocalApi::new(session.clone());
+    api.set_queue(replace(&["a-0", "a-1"]))
+        .await
+        .expect("set queue");
+    wait_committed(&api).await;
+    let on_a_titles = queue_titles(&api).await;
+
+    session.set_config(on_b.clone(), vec!["active_source".into()]);
+    session.persist_now().await;
+    assert!(queue_titles(&api).await.is_empty(), "B was never visited");
+    api.set_queue(replace(&["b-0"])).await.expect("set queue");
+    wait_committed(&api).await;
+
+    session.set_config(on_a.clone(), vec!["active_source".into()]);
+    session.persist_now().await;
+    assert_eq!(
+        queue_titles(&api).await,
+        on_a_titles,
+        "A resumes its own queue"
+    );
+
+    session.set_config(on_b, vec!["active_source".into()]);
+    session.persist_now().await;
+    assert_eq!(queue_titles(&api).await.len(), 1, "and B its own");
+}
+
+/// A deleted source is not parked: its queue would outlive it.
+#[tokio::test]
+async fn leaving_a_deleted_source_parks_nothing() {
+    let store = Arc::new(MemoryStore {
+        saved: Mutex::new(Vec::new()),
+    });
+    let sink = FakeSinkHandle::default();
+    let player =
+        Player::try_with_sink(Box::new(FakeSink(sink.clone()))).expect("headless player starts");
+    let mut on_b = config::AppConfig::default();
+    on_b.local_sources.push(config::SavedLocalSource {
+        id: "local:b".into(),
+        name: "B".into(),
+        directories: Vec::new(),
+    });
+    on_b.active_source = config::Source::LocalLibrary("local:b".into());
+    let services = PlaybackServices {
+        config: on_b.clone(),
+        queue_store: Some(store.clone()),
+        ..Default::default()
+    };
+    let session = SessionHandle::spawn_with_factory(
+        Arc::new(StubLibrary),
+        player,
+        services,
+        Arc::new(|track| Some(wav_factory(track.duration.min(6)))),
+    );
+    let api = LocalApi::new(session.clone());
+    api.set_queue(replace(&["b-0"])).await.expect("set queue");
+    wait_committed(&api).await;
+    let saves_of_b = || {
+        store
+            .saved
+            .lock()
+            .expect("store lock")
+            .iter()
+            .filter(|(at, _)| *at == config::Source::LocalLibrary("local:b".into()))
+            .count()
+    };
+    session.persist_now().await;
+    assert!(saves_of_b() > 0, "the queue was stored while B was active");
+
+    let mut deleted = on_b.clone();
+    deleted.remove_local_source("local:b");
+    session.set_config(
+        deleted,
+        vec!["local_sources".into(), "active_source".into()],
+    );
+    session.persist_now().await;
+
+    assert_eq!(
+        saves_of_b(),
+        0,
+        "a deleted source's queue is dropped, not parked"
+    );
+    assert!(queue_titles(&api).await.is_empty());
 }
 
 #[tokio::test]
@@ -1443,6 +1674,7 @@ fn external_track(title: &str) -> Track {
         musicbrainz_recording_id: None,
         musicbrainz_track_id: None,
         playlist_item_id: None,
+        credits: Vec::new(),
         artists: Vec::new(),
     }
 }
@@ -1488,6 +1720,159 @@ async fn transport_commands_reach_the_integration_that_owns_playback() {
         vec!["seek:4200", "pause"],
         "next and previous drive the queue, not the integration"
     );
+}
+
+/// Switching source replaces what is playing, an integration's device included, so commands stop reaching it.
+#[tokio::test]
+async fn switching_source_releases_the_integration_that_owned_playback() {
+    let harness = harness(|_| {});
+    let stub = Arc::new(StubExternal::default());
+    harness.api.session.attach_external(stub.clone());
+    harness.api.session.report_external(crate::ExternalReport {
+        track: Some(external_track("remote")),
+        position_ms: 1000,
+        playing: true,
+        ..Default::default()
+    });
+    wait_state(&harness.api, "external track shown", |state| {
+        state.external.is_some()
+    })
+    .await;
+
+    let mut elsewhere = config::AppConfig::default();
+    elsewhere.local_sources.push(config::SavedLocalSource {
+        id: "local:b".into(),
+        name: "B".into(),
+        directories: Vec::new(),
+    });
+    elsewhere.active_source = config::Source::LocalLibrary("local:b".into());
+    harness
+        .api
+        .session
+        .set_config(elsewhere, vec!["active_source".into()]);
+    let state = wait_state(&harness.api, "playback handed back", |state| {
+        state.external.is_none()
+    })
+    .await;
+    assert_ne!(state.phase, ApiPhase::Playing);
+    harness
+        .api
+        .player_command(PlayerCommand::Toggle)
+        .await
+        .expect("toggle accepted");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        stub.calls(),
+        vec!["stop"],
+        "the device is stopped once and hears nothing after"
+    );
+}
+
+/// Cannot read one source's queue, as a damaged or locked database would.
+struct UnreadableStore {
+    inner: MemoryStore,
+    unreadable: config::Source,
+}
+
+#[async_trait::async_trait]
+impl crate::persistence::QueueStore for UnreadableStore {
+    async fn load(&self, source: &config::Source) -> Result<db::QueueSnapshot, db::DbError> {
+        if *source == self.unreadable {
+            return Err(db::DbError::Backend("unreadable".into()));
+        }
+        self.inner.load(source).await
+    }
+
+    async fn save(&self, source: &config::Source, snapshot: db::QueueSnapshot) {
+        self.inner.save(source, snapshot).await;
+    }
+
+    async fn forget(&self, source: &config::Source) {
+        self.inner.forget(source).await;
+    }
+}
+
+/// A queue that could not be read is not saved over, until a new one is built in its place.
+#[tokio::test]
+async fn an_unreadable_queue_is_not_saved_over() {
+    let b = config::Source::LocalLibrary("local:b".into());
+    let store = Arc::new(UnreadableStore {
+        inner: MemoryStore {
+            saved: Mutex::new(Vec::new()),
+        },
+        unreadable: b.clone(),
+    });
+    let sink = FakeSinkHandle::default();
+    let player =
+        Player::try_with_sink(Box::new(FakeSink(sink.clone()))).expect("headless player starts");
+    let mut on_a = config::AppConfig::default();
+    on_a.local_sources.push(config::SavedLocalSource {
+        id: "local:b".into(),
+        name: "B".into(),
+        directories: Vec::new(),
+    });
+    let mut on_b = on_a.clone();
+    on_b.active_source = b.clone();
+    let services = PlaybackServices {
+        config: on_a.clone(),
+        queue_store: Some(store.clone()),
+        ..Default::default()
+    };
+    let session = SessionHandle::spawn_with_factory(
+        Arc::new(StubLibrary),
+        player,
+        services,
+        Arc::new(|track| Some(wav_factory(track.duration.min(6)))),
+    );
+    let api = LocalApi::new(session.clone());
+    api.set_queue(replace(&["a-0"])).await.expect("set queue");
+    wait_committed(&api).await;
+    let saves_of_b = || {
+        store
+            .inner
+            .saved
+            .lock()
+            .expect("store lock")
+            .iter()
+            .filter(|(at, _)| *at == b)
+            .count()
+    };
+
+    session.set_config(on_b.clone(), vec!["active_source".into()]);
+    session.persist_now().await;
+    assert!(queue_titles(&api).await.is_empty());
+    api.player_command(PlayerCommand::SetVolume { volume: 0.3 })
+        .await
+        .expect("a change that marks the session dirty");
+    api.player_command(PlayerCommand::SetMode {
+        shuffle: Some(true),
+        loop_mode: None,
+    })
+    .await
+    .expect("a shuffle toggle on nothing builds no queue");
+    session.persist_now().await;
+    session.set_config(on_a, vec!["active_source".into()]);
+    session.persist_now().await;
+    assert_eq!(saves_of_b(), 0, "nothing was saved over B's queue");
+
+    session.set_config(on_b, vec!["active_source".into()]);
+    session.persist_now().await;
+    api.set_queue(replace(&["b-new"])).await.expect("set queue");
+    wait_committed(&api).await;
+    session.persist_now().await;
+    assert!(saves_of_b() > 0, "a queue built on B is saved again");
+}
+
+/// An equalizer preview reaches the engine without becoming the session's settings.
+#[tokio::test]
+async fn an_equalizer_preview_leaves_the_settings_alone() {
+    let harness = harness(|_| {});
+    let before = harness.api.session.config_watch().borrow().clone();
+    let mut preview = before.equalizer.clone();
+    preview.enabled = !preview.enabled;
+    harness.api.session.preview_equalizer(preview);
+    harness.api.session.persist_now().await;
+    assert_eq!(*harness.api.session.config_watch().borrow(), before);
 }
 
 #[tokio::test]
@@ -1696,7 +2081,7 @@ async fn the_shutdown_flush_persists_the_volume_the_debounce_still_holds() {
         Arc::new(|track| Some(wav_factory(track.duration.min(6)))),
     );
     service
-        .mutate_state(|_| {})
+        .mutate_state(&[], |_| {})
         .await
         .expect("seed the database");
     LocalApi::new(session.clone())
@@ -1718,6 +2103,53 @@ async fn the_shutdown_flush_persists_the_volume_the_debounce_still_holds() {
         0.2,
         "the engine's volume reaches the database"
     );
+}
+
+/// Concurrent writers each save then hand the session a config; the session must end on the one saved last, and every save moves the revision.
+#[tokio::test]
+async fn config_changes_reach_the_session_in_the_order_they_were_saved() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let database = db::init(&dir.path().join("order.db")).await.expect("db");
+    let service = Arc::new(crate::ConfigService::new(
+        database,
+        dir.path().join("settings.toml"),
+        config::AppConfig::default(),
+    ));
+    let player = Player::try_with_sink(Box::new(FakeSink(FakeSinkHandle::default())))
+        .expect("headless player starts");
+    let session = SessionHandle::spawn_with_factory(
+        Arc::new(StubLibrary),
+        player,
+        PlaybackServices::default(),
+        Arc::new(|track| Some(wav_factory(track.duration.min(6)))),
+    );
+    service.attach_session(session.clone());
+    let first = service.view().await.expect("view").revision;
+
+    let writers: Vec<_> = (1..=20u8)
+        .map(|crossfade| {
+            let service = service.clone();
+            tokio::spawn(async move {
+                service
+                    .mutate_state(&["crossfade_seconds"], move |config| {
+                        config.crossfade_seconds = crossfade;
+                    })
+                    .await
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.await.expect("writer").expect("saved");
+    }
+    session.persist_now().await;
+
+    let saved = service.snapshot().await.crossfade_seconds;
+    assert_eq!(
+        session.config_watch().borrow().crossfade_seconds,
+        saved,
+        "the session holds what was saved last"
+    );
+    assert_eq!(service.view().await.expect("view").revision, first + 20);
 }
 
 async fn stored_volume(database: &db::Db) -> f32 {

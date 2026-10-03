@@ -339,8 +339,7 @@ pub fn artist_sort_field_from_proto(value: i32) -> config::ArtistSortField {
 
 pub fn source_ref_to_proto(value: &config::Source) -> SourceRef {
     let kind = match value {
-        config::Source::Local => source_ref::Kind::Local(Unit {}),
-        config::Source::LocalLibrary(id) => source_ref::Kind::LocalLibrary(id.clone()),
+        config::Source::LocalLibrary(id) => source_ref::Kind::Folders(id.clone()),
         config::Source::Server(id) => source_ref::Kind::Server(id.clone()),
     };
     SourceRef { kind: Some(kind) }
@@ -348,14 +347,14 @@ pub fn source_ref_to_proto(value: &config::Source) -> SourceRef {
 
 pub fn source_ref_from_proto(value: Option<&SourceRef>) -> config::Source {
     match value.and_then(|value| value.kind.as_ref()) {
-        Some(source_ref::Kind::LocalLibrary(id)) => config::Source::LocalLibrary(id.clone()),
+        Some(source_ref::Kind::Folders(id)) => config::Source::LocalLibrary(id.clone()),
         Some(source_ref::Kind::Server(id)) => config::Source::Server(id.clone()),
-        Some(source_ref::Kind::Local(_)) | None => config::Source::Local,
+        None => config::Source::default(),
     }
 }
 
-pub fn saved_local_source_to_proto(value: &config::SavedLocalSource) -> SavedLocalSource {
-    SavedLocalSource {
+pub fn saved_folder_source_to_proto(value: &config::SavedLocalSource) -> SavedFolderSource {
+    SavedFolderSource {
         id: value.id.clone(),
         name: value.name.clone(),
         directories: value
@@ -366,7 +365,7 @@ pub fn saved_local_source_to_proto(value: &config::SavedLocalSource) -> SavedLoc
     }
 }
 
-pub fn saved_local_source_from_proto(value: &SavedLocalSource) -> config::SavedLocalSource {
+pub fn saved_folder_source_from_proto(value: &SavedFolderSource) -> config::SavedLocalSource {
     config::SavedLocalSource {
         id: value.id.clone(),
         name: value.name.clone(),
@@ -502,10 +501,10 @@ pub fn artist_sort_criterion_from_proto(
 
 pub fn config_to_proto(value: &config::AppConfig) -> Config {
     Config {
-        local_sources: value
+        folder_sources: value
             .local_sources
             .iter()
-            .map(saved_local_source_to_proto)
+            .map(saved_folder_source_to_proto)
             .collect(),
         active_source: Some(source_ref_to_proto(&value.active_source)),
         source_explicitly_set: value.source_explicitly_set,
@@ -513,11 +512,6 @@ pub fn config_to_proto(value: &config::AppConfig) -> Config {
             .server_folders
             .iter()
             .map(|(k, v)| (k.clone(), StringList { values: v.clone() }))
-            .collect(),
-        music_directory: value
-            .music_directory
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
             .collect(),
         theme: value.theme.clone(),
         live_theme_path: value.live_theme_path.clone(),
@@ -612,9 +606,9 @@ pub fn config_to_proto(value: &config::AppConfig) -> Config {
 pub fn config_from_proto(value: &Config) -> config::AppConfig {
     config::AppConfig {
         local_sources: value
-            .local_sources
+            .folder_sources
             .iter()
-            .map(saved_local_source_from_proto)
+            .map(saved_folder_source_from_proto)
             .collect(),
         active_source: source_ref_from_proto(value.active_source.as_ref()),
         source_explicitly_set: value.source_explicitly_set,
@@ -622,11 +616,6 @@ pub fn config_from_proto(value: &Config) -> config::AppConfig {
             .server_folders
             .iter()
             .map(|(k, v)| (k.clone(), v.values.clone()))
-            .collect(),
-        music_directory: value
-            .music_directory
-            .iter()
-            .map(std::path::PathBuf::from)
             .collect(),
         theme: value.theme.clone(),
         live_theme_path: value.live_theme_path.clone(),

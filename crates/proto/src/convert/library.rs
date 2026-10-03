@@ -4,7 +4,6 @@ use crate::*;
 pub fn track_filter_to_proto(value: &api::TrackFilter) -> TrackFilter {
     TrackFilter {
         search: value.search.clone(),
-        artist: value.artist.clone(),
         album: value.album.clone(),
         genre: value.genre.clone(),
         favorite: value.favorite,
@@ -16,7 +15,6 @@ pub fn track_filter_to_proto(value: &api::TrackFilter) -> TrackFilter {
 pub fn track_filter_from_proto(value: &TrackFilter) -> api::TrackFilter {
     api::TrackFilter {
         search: value.search.clone(),
-        artist: value.artist.clone(),
         album: value.album.clone(),
         genre: value.genre.clone(),
         favorite: value.favorite,
@@ -60,12 +58,11 @@ pub fn track_info_to_proto(value: &api::TrackInfo) -> TrackInfo {
         seekable: value.seekable,
         offline: value.offline,
         format: value.format.clone(),
-        artists: value.artists.clone(),
         musicbrainz_release_id: value.musicbrainz_release_id.clone(),
         musicbrainz_recording_id: value.musicbrainz_recording_id.clone(),
         musicbrainz_track_id: value.musicbrainz_track_id.clone(),
-        playlist_item_id: value.playlist_item_id.clone(),
         artwork: value.artwork.as_ref().map(artwork_ref_to_proto),
+        credits: value.credits.iter().map(artist_credit_to_proto).collect(),
     }
 }
 
@@ -86,12 +83,11 @@ pub fn track_info_from_proto(value: &TrackInfo) -> api::TrackInfo {
         seekable: value.seekable,
         offline: value.offline,
         format: value.format.clone(),
-        artists: value.artists.clone(),
         musicbrainz_release_id: value.musicbrainz_release_id.clone(),
         musicbrainz_recording_id: value.musicbrainz_recording_id.clone(),
         musicbrainz_track_id: value.musicbrainz_track_id.clone(),
-        playlist_item_id: value.playlist_item_id.clone(),
         artwork: value.artwork.as_ref().and_then(artwork_ref_from_proto),
+        credits: value.credits.iter().map(artist_credit_from_proto).collect(),
     }
 }
 
@@ -180,7 +176,7 @@ pub fn artwork_request_to_proto(value: &api::ArtworkRequest) -> ArtworkRequest {
     let entity = match &value.target {
         api::ArtworkTarget::Track(key) => Entity::Track(key.clone()),
         api::ArtworkTarget::Album(id) => Entity::Album(id.clone()),
-        api::ArtworkTarget::Artist(name) => Entity::Artist(name.clone()),
+        api::ArtworkTarget::Artist(artist) => Entity::ArtistKey(artist.to_string()),
         api::ArtworkTarget::Playlist(id) => Entity::Playlist(id.clone()),
         api::ArtworkTarget::Catalog(id) => Entity::Catalog(id.clone()),
         api::ArtworkTarget::Station(id) => Entity::Station(id.clone()),
@@ -196,7 +192,7 @@ pub fn artwork_request_from_proto(value: &ArtworkRequest) -> Option<api::Artwork
     let target = match value.entity.as_ref()? {
         Entity::Track(key) => api::ArtworkTarget::Track(key.clone()),
         Entity::Album(id) => api::ArtworkTarget::Album(id.clone()),
-        Entity::Artist(name) => api::ArtworkTarget::Artist(name.clone()),
+        Entity::ArtistKey(key) => api::ArtworkTarget::Artist(key.clone()),
         Entity::Playlist(id) => api::ArtworkTarget::Playlist(id.clone()),
         Entity::Catalog(id) => api::ArtworkTarget::Catalog(id.clone()),
         Entity::Station(id) => api::ArtworkTarget::Station(id.clone()),
@@ -212,7 +208,7 @@ pub fn artwork_target_to_proto(value: &api::ArtworkTarget) -> ArtworkTarget {
     let entity = match value {
         api::ArtworkTarget::Track(key) => Entity::Track(key.clone()),
         api::ArtworkTarget::Album(id) => Entity::Album(id.clone()),
-        api::ArtworkTarget::Artist(name) => Entity::Artist(name.clone()),
+        api::ArtworkTarget::Artist(artist) => Entity::ArtistKey(artist.to_string()),
         api::ArtworkTarget::Playlist(id) => Entity::Playlist(id.clone()),
         api::ArtworkTarget::Catalog(id) => Entity::Catalog(id.clone()),
         api::ArtworkTarget::Station(id) => Entity::Station(id.clone()),
@@ -227,7 +223,7 @@ pub fn artwork_target_from_proto(value: &ArtworkTarget) -> Option<api::ArtworkTa
     Some(match value.entity.as_ref()? {
         Entity::Track(key) => api::ArtworkTarget::Track(key.clone()),
         Entity::Album(id) => api::ArtworkTarget::Album(id.clone()),
-        Entity::Artist(name) => api::ArtworkTarget::Artist(name.clone()),
+        Entity::ArtistKey(key) => api::ArtworkTarget::Artist(key.clone()),
         Entity::Playlist(id) => api::ArtworkTarget::Playlist(id.clone()),
         Entity::Catalog(id) => api::ArtworkTarget::Catalog(id.clone()),
         Entity::Station(id) => api::ArtworkTarget::Station(id.clone()),
@@ -257,6 +253,7 @@ pub fn album_info_to_proto(value: &api::AlbumInfo) -> AlbumInfo {
         artist: value.artist.clone(),
         genre: value.genre.clone(),
         year: value.year as u32,
+        artist_key: value.artist_key.as_ref().map(ToString::to_string),
         artwork: value.artwork.as_ref().map(artwork_ref_to_proto),
     }
 }
@@ -268,6 +265,7 @@ pub fn album_info_from_proto(value: &AlbumInfo) -> api::AlbumInfo {
         artist: value.artist.clone(),
         genre: value.genre.clone(),
         year: value.year as u16,
+        artist_key: value.artist_key.clone(),
         artwork: value.artwork.as_ref().and_then(artwork_ref_from_proto),
     }
 }
@@ -288,6 +286,7 @@ pub fn album_page_from_proto(value: &AlbumPage) -> api::AlbumPage {
 
 pub fn artist_info_to_proto(value: &api::ArtistInfo) -> ArtistInfo {
     ArtistInfo {
+        key: value.key.to_string(),
         name: value.name.clone(),
         track_count: value.track_count,
         artwork: value.artwork.as_ref().map(artwork_ref_to_proto),
@@ -296,6 +295,7 @@ pub fn artist_info_to_proto(value: &api::ArtistInfo) -> ArtistInfo {
 
 pub fn artist_info_from_proto(value: &ArtistInfo) -> api::ArtistInfo {
     api::ArtistInfo {
+        key: value.key.clone(),
         name: value.name.clone(),
         track_count: value.track_count,
         artwork: value.artwork.as_ref().and_then(artwork_ref_from_proto),
@@ -330,6 +330,52 @@ pub fn search_results_from_proto(value: &SearchResults) -> api::SearchResults {
     }
 }
 
+pub fn artist_credit_to_proto(value: &api::ArtistCredit) -> ArtistCredit {
+    ArtistCredit {
+        name: value.name.clone(),
+        key: value.key.as_ref().map(ToString::to_string),
+    }
+}
+
+pub fn artist_credit_from_proto(value: &ArtistCredit) -> api::ArtistCredit {
+    api::ArtistCredit {
+        name: value.name.clone(),
+        key: value.key.clone(),
+    }
+}
+
+pub fn refresh_artists_to_proto(value: &[String]) -> RefreshArtistArtworkRequest {
+    RefreshArtistArtworkRequest {
+        keys: value.to_vec(),
+    }
+}
+
+pub fn refresh_artists_from_proto(value: &RefreshArtistArtworkRequest) -> Vec<String> {
+    value.keys.clone()
+}
+
+pub fn artist_tracks_request_to_proto(artist: &str, page: api::Page) -> ArtistTracksRequest {
+    ArtistTracksRequest {
+        key: artist.to_string(),
+        page: Some(page_to_proto(page)),
+    }
+}
+
+pub fn artist_detail_to_proto(value: &api::ArtistDetail) -> ArtistDetail {
+    ArtistDetail {
+        info: Some(artist_info_to_proto(&value.info)),
+        albums: value.albums.iter().map(album_info_to_proto).collect(),
+    }
+}
+
+/// A detail without its artist is malformed, and says so rather than naming nobody.
+pub fn artist_detail_from_proto(value: &ArtistDetail) -> Option<api::ArtistDetail> {
+    Some(api::ArtistDetail {
+        info: artist_info_from_proto(value.info.as_ref()?),
+        albums: value.albums.iter().map(album_info_from_proto).collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,16 +400,66 @@ mod tests {
             seekable: true,
             offline: false,
             format: Some("FLAC".into()),
-            artists: vec!["a".into(), "b".into()],
             musicbrainz_release_id: Some("mbr".into()),
             musicbrainz_recording_id: None,
             musicbrainz_track_id: None,
-            playlist_item_id: Some("pi-1".into()),
             artwork: Some(api::ArtworkRef {
                 target: api::ArtworkTarget::Track("k".into()),
                 version: 9,
             }),
+            credits: vec![
+                api::ArtistCredit {
+                    name: "a".into(),
+                    key: Some(String::from("UC-a")),
+                },
+                api::ArtistCredit {
+                    name: "b".into(),
+                    key: None,
+                },
+            ],
         };
         assert_eq!(track, track_info_from_proto(&track_info_to_proto(&track)));
+    }
+
+    #[test]
+    fn every_artist_reference_carries_its_key_across() {
+        let key = String::from("ar-1");
+        let target = api::ArtworkTarget::Artist(key.clone());
+        assert_eq!(
+            artwork_target_from_proto(&artwork_target_to_proto(&target)),
+            Some(target)
+        );
+        let keys = [key.clone(), String::from("5f0c1e2d9a8b4c3d")];
+        assert_eq!(
+            refresh_artists_from_proto(&refresh_artists_to_proto(&keys)),
+            keys
+        );
+
+        let detail = api::ArtistDetail {
+            info: api::ArtistInfo {
+                key: key.clone(),
+                name: "Ada".into(),
+                track_count: 2,
+                artwork: None,
+            },
+            albums: vec![api::AlbumInfo {
+                id: "al".into(),
+                artist_key: Some(key),
+                ..Default::default()
+            }],
+        };
+        assert_eq!(
+            artist_detail_from_proto(&artist_detail_to_proto(&detail)),
+            Some(detail)
+        );
+    }
+
+    #[test]
+    fn a_detail_naming_no_artist_is_malformed() {
+        let sent = ArtistDetail {
+            info: None,
+            albums: Vec::new(),
+        };
+        assert_eq!(artist_detail_from_proto(&sent), None);
     }
 }

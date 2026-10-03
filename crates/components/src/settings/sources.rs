@@ -1,6 +1,5 @@
-//! Local-library and remote-server settings controls.
+//! Source settings controls.
 
-use config::SavedLocalSource;
 use dioxus::prelude::*;
 #[cfg(not(target_os = "android"))]
 use rfd::AsyncFileDialog;
@@ -43,97 +42,6 @@ pub fn MultiDirectoryPicker(
                 }
             }
             AddFolderButton { on_add, add_text }
-        }
-    }
-}
-
-#[component]
-pub fn LocalSourceSettings(
-    active_source: config::Source,
-    default_directories: Vec<std::path::PathBuf>,
-    sources: Vec<SavedLocalSource>,
-    on_add: EventHandler<()>,
-    on_delete: EventHandler<String>,
-    on_switch: EventHandler<config::Source>,
-    on_add_folder: EventHandler<(config::Source, std::path::PathBuf)>,
-    on_remove_folder: EventHandler<(config::Source, usize)>,
-) -> Element {
-    let default_active = active_source == config::Source::Local;
-    rsx! {
-        div { class: "flex flex-col gap-3 w-full",
-            div { class: "bg-white/5 p-3 rounded w-full space-y-2",
-                div { class: "flex items-center justify-between gap-3",
-                    div { class: "min-w-0 flex items-center gap-2",
-                        p { class: "text-sm font-medium text-white truncate", "{i18n::t(\"local\")}" }
-                        if default_active {
-                            span { class: "text-[10px] px-2 py-0.5 rounded bg-indigo-500/30 text-indigo-200",
-                                "{i18n::t(\"active_local_library\")}"
-                            }
-                        }
-                    }
-                    if !default_active {
-                        button {
-                            onclick: move |_| on_switch.call(config::Source::Local),
-                            class: "text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white transition-colors",
-                            "{i18n::t(\"switch_to_local_library\")}"
-                        }
-                    }
-                }
-                MultiDirectoryPicker {
-                    current_paths: default_directories,
-                    on_add: move |path| on_add_folder.call((config::Source::Local, path)),
-                    on_remove: move |index| on_remove_folder.call((config::Source::Local, index)),
-                }
-            }
-            for source in sources.iter().cloned() {
-                {
-                    let id = source.id.clone();
-                    let id_delete = id.clone();
-                    let source_key = config::Source::LocalLibrary(id.clone());
-                    let switch_key = source_key.clone();
-                    let add_folder_key = source_key.clone();
-                    let remove_folder_key = source_key.clone();
-                    let is_active = active_source.local_library_id() == Some(source.id.as_str());
-                    rsx! {
-                        div { key: "{source.id}", class: "bg-white/5 p-3 rounded w-full space-y-2",
-                            div { class: "flex items-center justify-between gap-3",
-                                div { class: "min-w-0 flex items-center gap-2",
-                                    p { class: "text-sm font-medium text-white truncate", "{source.name}" }
-                                    if is_active {
-                                        span { class: "text-[10px] px-2 py-0.5 rounded bg-indigo-500/30 text-indigo-200",
-                                            "{i18n::t(\"active_local_library\")}"
-                                        }
-                                    }
-                                }
-                                div { class: "flex items-center gap-2 shrink-0",
-                                    if !is_active {
-                                        button {
-                                            onclick: move |_| on_switch.call(switch_key.clone()),
-                                            class: "text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white transition-colors",
-                                            "{i18n::t(\"switch_to_local_library\")}"
-                                        }
-                                    }
-                                    button {
-                                        onclick: move |_| on_delete.call(id_delete.clone()),
-                                        class: "text-red-400 hover:text-red-300 text-sm px-2 py-1 transition-colors",
-                                        "{i18n::t(\"delete\")}"
-                                    }
-                                }
-                            }
-                            MultiDirectoryPicker {
-                                current_paths: source.directories.clone(),
-                                on_add: move |path| on_add_folder.call((add_folder_key.clone(), path)),
-                                on_remove: move |index| on_remove_folder.call((remove_folder_key.clone(), index)),
-                            }
-                        }
-                    }
-                }
-            }
-            button {
-                onclick: move |_| on_add.call(()),
-                class: "bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
-                "{i18n::t(\"add_local_library\")}"
-            }
         }
     }
 }
@@ -193,10 +101,10 @@ fn AddFolderButton(on_add: EventHandler<std::path::PathBuf>, add_text: String) -
 }
 
 #[component]
-pub fn ServerSettings(
-    /// The configured servers as the daemon reports them, including which one
+pub fn SourceSettings(
+    /// The configured sources as the daemon reports them, including which one
     /// is active and whether it holds usable credentials.
-    servers: Vec<api::SourceInfo>,
+    sources: Vec<api::SourceInfo>,
     on_add: EventHandler<()>,
     on_delete: EventHandler<String>,
     on_switch: EventHandler<String>,
@@ -215,26 +123,29 @@ pub fn ServerSettings(
 
     rsx! {
         div { class: "flex flex-col gap-2 w-full",
-            if servers.is_empty() {
+            if sources.is_empty() {
                 p { class: "text-xs text-white/50 italic", "{i18n::t(\"no_saved_servers\")}" }
             }
-            for srv in servers.iter().cloned() {
+            for srv in sources.iter().cloned() {
                 {
                     let id = srv.id.clone();
                     let is_active = srv.active;
                     let id_switch = id.clone();
                     let id_delete = id.clone();
-                    let settings = srv.settings.clone();
+                    // A server that browses a folder tree has its own picker for them.
+                    let settings: Vec<api::FieldSpec> = srv
+                        .settings
+                        .iter()
+                        .filter(|field| {
+                            !(srv.capabilities.browse_folders
+                                && matches!(field.kind, api::FieldKind::Directories))
+                        })
+                        .cloned()
+                        .collect();
                     let settings_id = srv.id.clone();
-                    let service_name = srv
-                        .service
-                        .as_ref()
-                        .map(|service| crate::forms::text(&service.name))
-                        .unwrap_or_default();
+                    let service_name = crate::forms::text(&srv.service.name);
                     let url = srv.detail.clone().unwrap_or_default();
-                    // Folders are the whole library definition here, so the
-                    // picker sits on the card the way it does for a local
-                    // library, not behind a separate dialog.
+                    // Folders are the whole library definition, so the picker sits on the card.
                     let picker = is_active.then(|| remote_folders.clone()).flatten();
                     let needs_host = srv.capabilities.browser_playback && !host_access;
                     rsx! {
@@ -252,7 +163,7 @@ pub fn ServerSettings(
                                 }
                                 p { class: "text-xs text-white/60", "{i18n::t_with(\"service\", &[(\"name\", service_name.clone())])}" }
                                 p { class: "text-xs text-white/60 truncate", "{url}" }
-                                if is_active {
+                                if is_active && srv.needs_network {
                                     match conn() {
                                         hooks::source_switch::ConnStatus::Online => rsx! {
                                             p { class: "text-xs mt-1", style: "color:#3fb950", "{i18n::t(\"connected\")}" }
@@ -281,10 +192,12 @@ pub fn ServerSettings(
                                         "{switch_text}"
                                     }
                                 }
-                                button {
-                                    onclick: move |_| on_delete.call(id_delete.clone()),
-                                    class: "text-red-400 hover:text-red-300 text-sm px-2 py-1 transition-colors",
-                                    "{delete_text}"
+                                if !srv.permanent {
+                                    button {
+                                        onclick: move |_| on_delete.call(id_delete.clone()),
+                                        class: "text-red-400 hover:text-red-300 text-sm px-2 py-1 transition-colors",
+                                        "{delete_text}"
+                                    }
                                 }
                             }
                             }
@@ -320,7 +233,7 @@ pub fn ServerSettings(
             button {
                 onclick: move |_| on_add.call(()),
                 class: "bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
-                "{i18n::t(\"add_server\")}"
+                "{i18n::t(\"add_source\")}"
             }
         }
     }

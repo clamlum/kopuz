@@ -13,7 +13,7 @@ pub(super) fn render_server_section(
     hero_cover: Option<String>,
     continue_listening: Vec<(Track, Option<Album>, Option<String>)>,
     hero_entry: Option<(Track, Option<Album>, Option<String>)>,
-    artists: Vec<(String, Option<String>)>,
+    artists: Vec<(String, Option<String>, String)>,
     new_releases: Vec<AlbumCard>,
     made_for_you: (String, Vec<AlbumCard>),
     recently_added: Vec<AlbumCard>,
@@ -21,7 +21,7 @@ pub(super) fn render_server_section(
     on_select_album: EventHandler<String>,
     on_play_album: EventHandler<String>,
     on_select_playlist: EventHandler<String>,
-    on_search_artist: EventHandler<String>,
+    on_open_artist: EventHandler<String>,
     active_card_menu: Signal<Option<String>>,
     scroll_container: impl Fn(&str, i32) + Copy + 'static,
 ) -> Element {
@@ -51,7 +51,7 @@ pub(super) fn render_server_section(
             on_select_album,
             on_play_album,
         ),
-        "top_artists" => render_top_artists(is_vaxry, artists, on_search_artist, scroll_container),
+        "top_artists" => render_top_artists(is_vaxry, artists, on_open_artist, scroll_container),
         "new_releases" => render_albums_row(
             "home-albums-scroll",
             i18n::t("new_releases").to_string(),
@@ -162,6 +162,10 @@ fn ServerHeroBanner(
             });
         }
     });
+
+    if hero_entry.is_none() && !edit {
+        return rsx! {};
+    }
 
     let hero_height = config.read().hero_height;
     let section_class = if is_vaxry {
@@ -487,7 +491,7 @@ fn render_listen_now(
             if use_cards {
                 div { class: "flex overflow-x-auto gap-4 pb-4 scrollbar-hide scroll-smooth -mx-2 px-2",
                     ontouchstart: move |evt| evt.stop_propagation(),
-                    for (album_id, title, artist, cover_url) in shuffled_albums.iter().skip(1).take(10).cloned() {
+                    for (album_id, title, artist, cover_url) in shuffled_albums.iter().take(10).cloned() {
                         div {
                             class: "flex-none w-40 group cursor-pointer",
                             onclick: {
@@ -516,8 +520,8 @@ fn render_listen_now(
                     }
                 }
             } else {
-                div { class: "grid grid-cols-[repeat(auto-fill,minmax(350px,1fr))] gap-4",
-                    for (album_id, title, artist, cover_url) in shuffled_albums.iter().skip(1).take(8).cloned() {
+                div { class: "grid grid-cols-[repeat(auto-fill,minmax(min(350px,100%),1fr))] gap-4",
+                    for (album_id, title, artist, cover_url) in shuffled_albums.iter().take(8).cloned() {
                         div {
                             class: "flex items-center bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl cursor-pointer transition-all duration-300 group overflow-hidden pr-4",
                             onclick: {
@@ -556,8 +560,8 @@ fn render_listen_now(
 
 fn render_top_artists(
     is_vaxry: bool,
-    artists: Vec<(String, Option<String>)>,
-    on_search_artist: EventHandler<String>,
+    artists: Vec<(String, Option<String>, String)>,
+    on_open_artist: EventHandler<String>,
     scroll_container: impl Fn(&str, i32) + Copy + 'static,
 ) -> Element {
     if artists.is_empty() {
@@ -589,13 +593,10 @@ fn render_top_artists(
                 id: "home-artists-scroll",
                 class: "flex overflow-x-auto gap-6 pb-6 pt-2 overflow-y-visible scrollbar-hide scroll-smooth -mx-2 px-2",
                 ontouchstart: move |evt| evt.stop_propagation(),
-                for (artist, cover_url) in artists {
+                for (artist, cover_url, key) in artists {
                     div {
                         class: "flex-none w-32 md:w-40 group cursor-pointer",
-                        onclick: {
-                            let artist = artist.clone();
-                            move |_| on_search_artist.call(artist.clone())
-                        },
+                        onclick: move |_| on_open_artist.call(key.clone()),
                         div { class: "w-32 h-32 md:w-40 md:h-40 rounded-full bg-stone-800/80 mb-4 overflow-hidden transition-all duration-500 relative mx-auto",
                             if let Some(url) = cover_url {
                                 img { src: "{url}", class: "w-full h-full object-cover", decoding: "async", loading: "lazy" }

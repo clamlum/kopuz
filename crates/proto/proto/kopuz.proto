@@ -41,6 +41,7 @@ service Kopuz {
   rpc GetAlbumTracks(AlbumTracksRequest) returns (TrackPage);
   rpc GetArtists(Page) returns (ArtistPage);
   rpc GetArtistTracks(ArtistTracksRequest) returns (TrackPage);
+  rpc GetArtist(ArtistRequest) returns (ArtistDetail);
   rpc GetArtistSampleTracks(Page) returns (TrackPage);
   rpc GetGenres(GetGenresRequest) returns (GenreList);
   rpc GetTopGenre(GetTopGenreRequest) returns (TopGenreResponse);
@@ -91,6 +92,7 @@ service Kopuz {
   rpc CancelJob(JobId) returns (CancelJobResponse);
   rpc StartDownloads(DownloadRequest) returns (JobRef);
   rpc DownloadUrl(DownloadUrlRequest) returns (JobRef);
+  rpc SearchDownloads(SearchDownloadsRequest) returns (DownloadCandidates);
   rpc GetDownloadFormats(GetDownloadFormatsRequest) returns (DownloadFormats);
   rpc GetArtworkSettings(GetArtworkSettingsRequest) returns (ArtworkSettings);
   rpc SetArtworkSettings(SetArtworkSettingsRequest) returns (ArtworkSettings);
@@ -106,13 +108,10 @@ service Kopuz {
   rpc GetSources(GetSourcesRequest) returns (SourceList);
   rpc GetServices(GetServicesRequest) returns (ServiceList);
   rpc SelectSource(SourceId) returns (SourceInfo);
-  rpc UpsertLocalSource(LocalSourceDraft) returns (SourceInfo);
-  rpc DeleteLocalSource(SourceId) returns (Unit);
-  rpc SetSourceDirectories(SetSourceDirectoriesRequest) returns (SourceInfo);
   rpc SetSourceSettings(SetSourceSettingsRequest) returns (SourceInfo);
-  rpc CheckServerDraft(ServerDraft) returns (DraftCheck);
-  rpc UpsertServer(ServerDraft) returns (SourceInfo);
-  rpc DeleteServer(SourceId) returns (Unit);
+  rpc CheckSourceDraft(SourceDraft) returns (DraftCheck);
+  rpc UpsertSource(SourceDraft) returns (SourceInfo);
+  rpc DeleteSource(SourceId) returns (Unit);
   rpc ProvisionCredentials(CredentialProvision) returns (SourceInfo);
   rpc LoginSource(SourceLoginRequest) returns (SourceInfo);
   rpc ClearCredentials(SourceId) returns (Unit);
@@ -264,7 +263,7 @@ message PlayerState {
   uint64 now_ms = 2;
   Phase phase = 3;
   Intent intent = 4;
-  optional NowPlaying track = 5;
+  reserved 5; // was a trimmed summary of `row`
   optional PositionAnchor position = 6;
   QueueSummary queue = 7;
   float volume = 8;
@@ -275,6 +274,8 @@ message PlayerState {
   optional ExternalPlayback external = 11;
   optional ErrorBody error = 12;
   optional uint64 output_latency_ms = 13;
+  // What is playing, the same row the queue holds.
+  optional TrackInfo row = 14;
 }
 
 // phase is engine truth; intent is what the daemon is trying to do.
@@ -295,22 +296,6 @@ message Intent {
   }
 }
 
-message NowPlaying {
-  // key is the library ref and the GetArtwork entity id; uid is the
-  // source-qualified identity. Same meaning as on TrackInfo.
-  string key = 1;
-  string uid = 10;
-  string title = 2;
-  string artist = 3;
-  string album = 4;
-  optional uint64 duration_ms = 5;
-  uint32 khz = 6;
-  uint32 bitrate = 7;
-  TrackKind kind = 8;
-  bool seekable = 9;
-  optional ArtworkRef artwork = 11;
-}
-
 message PositionAnchor {
   uint64 ms = 1;
   uint64 at_ms = 2;
@@ -324,9 +309,10 @@ message BufferedRange {
 }
 
 message FadingState {
+  reserved 2; // was a trimmed summary of `row`
   uint64 from_token = 1;
-  NowPlaying track = 2;
   uint64 position_ms = 3;
+  TrackInfo row = 4;
 }
 
 message ExternalPlayback {
@@ -378,10 +364,10 @@ message SetQueueRequest {
 // Reference-shaped contexts materialize daemon-side, so "play this album"
 // never round-trips a track list through the client.
 message QueueContext {
+  reserved 3; // was a name, now a key
   oneof kind {
     TrackKeys tracks = 1;
     Id album = 2;
-    Name artist = 3;
     Name genre = 4;
     Id playlist = 5;
     TrackFilter filter = 6;
@@ -390,6 +376,7 @@ message QueueContext {
     // it and pins the seed at the front.
     Key track_radio = 8;
     Id playlist_radio = 9;
+    string artist_key = 10;
   }
   message TrackKeys {
     repeated string keys = 1;
@@ -472,7 +459,7 @@ message QueueSnapshot {
 
 message TrackFilter {
   optional string search = 1;
-  optional string artist = 2;
+  reserved 2; // was a name-only artist filter; artist_tracks keys by identity
   optional string album = 3;
   optional string genre = 4;
   optional bool favorite = 5;
@@ -520,6 +507,8 @@ message AlbumInfo {
   uint32 year = 5;
   // Absent when the daemon has no cover for the album.
   optional ArtworkRef artwork = 6;
+  // Absent only when the album bills nobody.
+  optional string artist_key = 7;
 }
 
 message AlbumPage {
@@ -544,6 +533,7 @@ message ArtistInfo {
   string name = 1;
   uint32 track_count = 2;
   optional ArtworkRef artwork = 3;
+  string key = 4;
 }
 
 message ArtistPage {
@@ -552,8 +542,14 @@ message ArtistPage {
 }
 
 message ArtistTracksRequest {
-  string artist = 1;
+  reserved 1; // was a name, now a key
   Page page = 2;
+  string key = 3;
+}
+
+message ArtistDetail {
+  ArtistInfo info = 1;
+  repeated AlbumInfo albums = 2;
 }
 
 message GetGenresRequest {}
@@ -591,7 +587,8 @@ message WebUrl {
 }
 
 message RefreshArtistArtworkRequest {
-  repeated string names = 1;
+  reserved 1; // were names, now keys
+  repeated string keys = 2;
 }
 
 message SearchResults {
@@ -630,6 +627,8 @@ message Icon {
 message ChoiceOption {
   string value = 1;
   Text label = 2;
+  // Why it cannot be picked right now; absent when it can.
+  Text unavailable = 3;
 }
 
 enum FieldKindTag {
@@ -644,6 +643,8 @@ enum FieldKindTag {
   FIELD_KIND_TAG_RADIO = 7;
   // No control: a line of explanation, which show_when can hide.
   FIELD_KIND_TAG_NOTE = 8;
+  // A list of filesystem paths; the value is one JSON array of strings.
+  FIELD_KIND_TAG_DIRECTORIES = 9;
 }
 
 message FieldKind {
@@ -690,13 +691,6 @@ message Problem {
 
 // No credential appears in any of these. A source says whether it is
 // authenticated, never with what.
-enum SourceKind {
-  SOURCE_KIND_UNKNOWN = 0;
-  SOURCE_KIND_LOCAL = 1;
-  SOURCE_KIND_LOCAL_LIBRARY = 2;
-  SOURCE_KIND_SERVER = 3;
-}
-
 enum PlaylistCapability {
   PLAYLIST_CAPABILITY_NONE = 0;
   PLAYLIST_CAPABILITY_ADD_REMOVE = 1;
@@ -742,6 +736,9 @@ message SourceCapabilities {
   bool browser_playback = 16;
   // It takes a "stop recommending this" signal for a track.
   bool dont_recommend = 17;
+  // Playing a search result starts a track radio from it rather than
+  // queueing the results.
+  bool search_radio = 18;
 }
 
 // What making a source usable takes.
@@ -780,15 +777,14 @@ message ServiceList {
 message SourceInfo {
   string id = 1;
   string name = 2;
-  SourceKind kind = 3;
-  // Absent for a local source.
-  optional ServiceRef service = 4;
+  reserved 3; // was kind
+  ServiceRef service = 4;
   bool active = 5;
   bool authenticated = 6;
   SourceCapabilities capabilities = 7;
   reserved 8, 9, 11, 12; // were url, browser, storefront, language: now settings rows
   bool anonymous = 10;
-  repeated string directories = 13;
+  reserved 13; // was directories: now a settings row
   // The line under its name: an address, or whatever else identifies it.
   optional string detail = 14;
   SignInKind sign_in = 15;
@@ -798,6 +794,12 @@ message SourceInfo {
   // None once a source is authenticated, so it cannot answer for a source
   // whose stored credentials have gone stale.
   SignInKind reauth = 17;
+  // Reachability is worth watching: the library lives across the network.
+  bool needs_network = 18;
+  // Every install has it, so it cannot be deleted.
+  bool permanent = 19;
+  // What the daemon's last probe found; absent until it has probed this source.
+  optional SourceState state = 20;
 }
 
 message GetSourcesRequest {}
@@ -810,15 +812,8 @@ message SourceId {
   string id = 1;
 }
 
-message LocalSourceDraft {
-  // Absent creates a new local library.
-  optional string id = 1;
-  string name = 2;
-  repeated string directories = 3;
-}
-
 // The answers to a ServiceInfo's form. Absent id creates.
-message ServerDraft {
+message SourceDraft {
   optional string id = 1;
   string name = 2;
   reserved 3, 5, 6, 7, 8; // were url, browser, anonymous, storefront, language: now form answers
@@ -832,11 +827,6 @@ message ServerDraft {
 message DraftCheck {
   SignInKind sign_in = 1;
   repeated Problem problems = 2;
-}
-
-message SetSourceDirectoriesRequest {
-  string id = 1;
-  repeated string directories = 2;
 }
 
 message SetSourceSettingsRequest {
@@ -1001,6 +991,7 @@ message CatalogPage {
 
 message CatalogDetailRequest {
   CatalogItemKind kind = 1;
+  // What the daemon handed out for the entity: a tile's id, or an artist's key.
   string id = 2;
   optional string continuation = 3;
 }
@@ -1017,6 +1008,8 @@ message CatalogDetail {
   repeated TrackInfo tracks = 9;
   repeated CatalogShelf shelves = 10;
   optional string continuation = 11;
+  // For an album, the artist its header opens; absent when it bills nobody.
+  optional string artist_key = 12;
 }
 
 // ---------------- radio ----------------
@@ -1156,14 +1149,26 @@ message TrackInfo {
   reserved 15;
   // The container, upper-cased ("FLAC"); a row from a service names no file.
   optional string format = 22;
-  // Every credited artist, where the source separates them.
-  repeated string artists = 16;
+  reserved 16; // was the names alone, now each credit's
   optional string musicbrainz_release_id = 17;
   optional string musicbrainz_recording_id = 18;
   optional string musicbrainz_track_id = 19;
-  optional string playlist_item_id = 20;
+  reserved 20; // was playlist_item_id; an entry's id belongs to the entry, not the track
   // Absent when there is no cover.
   optional ArtworkRef artwork = 21;
+  // Every credited artist in billing order, each with the key that opens it where there is one.
+  repeated ArtistCredit credits = 23;
+}
+
+// An artist key is minted by the daemon; a frontend compares and passes it back, never reads it.
+message ArtistCredit {
+  string name = 1;
+  // Absent when the daemon cannot tell which artist the name means.
+  optional string key = 2;
+}
+
+message ArtistRequest {
+  string key = 1;
 }
 
 message TrackRef {
@@ -1240,6 +1245,24 @@ message DownloadUrlRequest {
   string url = 1;
   // One of GetDownloadFormats' option values.
   string format = 2;
+}
+
+message SearchDownloadsRequest {
+  string query = 1;
+}
+
+message DownloadCandidate {
+  // What DownloadUrl takes to fetch this one song.
+  string url = 1;
+  string title = 2;
+  string artist = 3;
+  string album = 4;
+  uint64 duration_secs = 5;
+  optional string cover_url = 6;
+}
+
+message DownloadCandidates {
+  repeated DownloadCandidate candidates = 1;
 }
 
 message GetDownloadFormatsRequest {}
@@ -1326,6 +1349,8 @@ message DownloadList {
 message ConfigView {
   Config config = 1;
   repeated string locked_keys = 2;
+  // Rises with every saved change, so a client can tell an older view from a newer one.
+  uint64 revision = 3;
 }
 
 // Replaces the settings surface wholesale: read the view, change what you
@@ -1338,12 +1363,11 @@ message SetConfigRequest {
 
 // ---------------- config ----------------
 
-// A source is Local, a named local library, or a server; the id carries the
-// namespace (`local:<uuid>` or the server id) exactly as AppConfig holds it.
+// A source is a folder library or a server; the id carries the namespace as AppConfig holds it.
 message SourceRef {
+  reserved 1, 2;
   oneof kind {
-    Unit local = 1;
-    string local_library = 2;
+    string folders = 4;
     string server = 3;
   }
 }
@@ -1353,7 +1377,7 @@ message StringList {
   repeated string values = 1;
 }
 
-message SavedLocalSource {
+message SavedFolderSource {
   string id = 1;
   string name = 2;
   repeated string directories = 3;
@@ -1401,13 +1425,12 @@ message ArtistSortCriterion {
 // The settings surface, mirroring config::AppConfig minus the keys the
 // daemon never sends: credentials and machine-local path state.
 message Config {
-  repeated SavedLocalSource local_sources = 1;
+  repeated SavedFolderSource folder_sources = 69;
   SourceRef active_source = 2;
   bool source_explicitly_set = 3;
   map<string, StringList> server_folders = 4;
-  // 5, 6, 11-13, 48-50 were the settings the daemon publishes as field lists.
-  reserved 5, 6, 11, 12, 13, 48, 49, 50;
-  repeated string music_directory = 7;
+  // 5-7, 11-13, 48-50 were the settings the daemon publishes as field lists, and the retired music_directory.
+  reserved 1, 5, 6, 7, 11, 12, 13, 48, 49, 50;
   string theme = 8;
   string live_theme_path = 9;
   string device_id = 10;
@@ -1604,19 +1627,22 @@ message DaemonStatus {
   string version = 1;
   reserved 2; // was api_version; the frontend ships with the daemon
   uint64 uptime_secs = 3;
+  // Bumped on any change a mismatched peer would misread; a client's handshake refuses a daemon on another revision.
+  uint32 proto_revision = 4;
 }
 
 // Which entity a cover belongs to. Carried on library rows so a client can
 // ask for the image without knowing how it is stored. catalog and station
 // name things outside the library: a browse tile, a radio station icon.
 message ArtworkTarget {
+  reserved 3; // was a name, now a key
   oneof entity {
     string track = 1;
     string album = 2;
-    string artist = 3;
     string playlist = 4;
     string catalog = 5;
     string station = 6;
+    string artist_key = 7;
   }
 }
 
@@ -1629,13 +1655,14 @@ message ArtworkRef {
 }
 
 message ArtworkRequest {
+  reserved 3; // was a name, now a key
   oneof entity {
     string track = 1;
     string album = 2;
-    string artist = 3;
     string playlist = 5;
     string catalog = 6;
     string station = 7;
+    string artist_key = 8;
   }
   bool hq = 4;
 }
@@ -1718,6 +1745,7 @@ enum Table {
   TABLE_FOLDERS = 5;
   TABLE_SERVERS = 6;
   TABLE_RECENTS = 7;
+  TABLE_STATIONS = 8;
 }
 
 enum JobKind {
@@ -1743,6 +1771,7 @@ enum SourceState {
   SOURCE_STATE_ONLINE = 1;
   SOURCE_STATE_AUTH_EXPIRED = 2;
   SOURCE_STATE_OFFLINE = 3;
+  SOURCE_STATE_CHECKING = 4;
 }
 
 enum NoticeLevel {

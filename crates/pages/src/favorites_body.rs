@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 const ITEM_HEIGHT: f64 = 60.0;
 
-/// The source-agnostic Favorites body. Renders local or any server: covers via
+/// The source-agnostic Favorites body. Renders any source: covers via
 /// the source seam, the favorites partition keyed on the active source, and the
 /// remote-sync/download affordances gated on [`Capabilities`].
 #[component]
@@ -506,9 +506,9 @@ fn track_matches_filter(track: &api::TrackInfo, query: &str) -> bool {
         || track.artist.to_lowercase().contains(query)
         || track.album.to_lowercase().contains(query)
         || track
-            .artists
+            .credits
             .iter()
-            .any(|artist| artist.to_lowercase().contains(query))
+            .any(|credit| credit.name.to_lowercase().contains(query))
 }
 
 #[cfg(test)]
@@ -527,7 +527,10 @@ mod tests {
             khz: 44_100,
             track_number: Some(11),
             disc_number: Some(1),
-            artists: vec!["Anthony Gonzalez".to_string()],
+            credits: vec![api::ArtistCredit {
+                name: "Anthony Gonzalez".to_string(),
+                key: None,
+            }],
             ..Default::default()
         }
     }

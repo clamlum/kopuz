@@ -1,7 +1,7 @@
 //! Source-agnostic Album page (issue #35). One grid + one detail render any
 //! source: every cover is a reference the daemon resolves, and the divergent
-//! affordances (tag/cover edit + delete-from-disk for local, downloads for a
-//! server) gate on [`api::SourceCapabilities`] — no `is_server()`.
+//! affordances (tag/cover edit + delete-from-disk, downloads) gate on
+//! [`api::SourceCapabilities`] — no `is_server()`.
 
 use components::dots_menu::{DotsMenu, MenuAction};
 use components::playlist_modal::PlaylistModal;
@@ -39,7 +39,7 @@ fn copy_album_link(url: String) {
 enum AlbumAction {
     Queue,
     Playlist,
-    /// Local: delete the files + DB rows. Server: drop the cached rows (a re-sync
+    /// Delete the files + DB rows, or for a catalog source drop the cached rows (a re-sync
     /// re-adds them) — there's no remote album delete.
     Remove,
 }
@@ -386,7 +386,7 @@ fn AlbumDetail(
     let albums_res = use_albums(source);
 
     // Discover albums are opened by the source's own browse id and aren't in the
-    // local DB until saved. When the DB has no row for the id, fetch the album
+    // library until saved. When the library has no row for the id, fetch the album
     // straight from the catalog remote by that browse id so every searched /
     // discovered album renders (header + full track list) instead of "not found".
     let direct_remote_res: Resource<Option<api::CatalogDetail>> = {
@@ -415,7 +415,7 @@ fn AlbumDetail(
     let album = match album_res.read().clone().flatten() {
         Some(a) => a,
         None => {
-            // Not saved locally — render the remote album directly if it resolved.
+            // Not saved yet — render the remote album directly if it resolved.
             if let Some(remote) = direct_remote_res.read().clone().flatten() {
                 let mut tracks = remote.tracks;
                 tracks.sort_by(|a, b| {
@@ -430,13 +430,14 @@ fn AlbumDetail(
                 });
                 return rsx! {
                     div { class: "absolute inset-0 flex flex-col overflow-hidden p-8",
-                        YtAlbumDetail {
+                        RemoteAlbumDetail {
                             config,
                             title: remote.title,
                             artist: remote.subtitle.unwrap_or_default(),
+                            artist_key: remote.artist_key,
                             year: remote.year,
-                            browse_id: Some(remote.id),
-                            local_cover: hooks::artwork::url(remote.artwork.as_ref(), hooks::artwork::Size::Thumb),
+                            album_id: Some(remote.id),
+                            remote_cover: hooks::artwork::url(remote.artwork.as_ref(), hooks::artwork::Size::Thumb),
                             tracks,
                             on_close,
                         }
@@ -496,7 +497,7 @@ fn AlbumDetail(
     // browse id, so the library only ever holds the few tracks the user saved —
     // an album page would show 1 of 18 songs. The daemon resolves the saved
     // album to its remote listing (header + every track), the way a catalog
-    // shows it. `None` for local/other sources and while offline; drives both
+    // shows it. `None` for library-backed sources and while offline; drives both
     // the full track list and the catalog-styled header.
     let remote_album_res: Resource<Option<api::CatalogDetail>> = {
         let api = api.clone();
@@ -525,7 +526,7 @@ fn AlbumDetail(
         let conf = config.read();
 
         // Full album from the catalog remote (already in album order). Used
-        // whenever it resolved; the locally-saved subset is the fallback.
+        // whenever it resolved; the saved subset is the fallback.
         if !offline && let Some(remote) = remote_album_res.read().clone().flatten() {
             let mut remote = remote.tracks;
             remote.sort_by(|a, b| {
@@ -563,7 +564,7 @@ fn AlbumDetail(
 
     let album_title = album.title.clone();
     let album_artist = album.artist.clone();
-    let album_artist_for_nav = album_artist.clone();
+    let album_artist_key = album.artist_key.clone();
     let cover_url = hooks::artwork::for_album(&album, hooks::artwork::Size::Thumb);
     let cap = caps();
     let aid = album.id.clone();
@@ -600,31 +601,36 @@ fn AlbumDetail(
             .any(|track| downloads.read().is_active(&track.key));
 
     // Catalog-style album page: the whole catalog-remote side renders this,
-    // from the moment the page opens — header built from the local album row so it
-    // shows instantly, track list filling from the locally-saved subset until the
-    // remote album resolves the full listing. Local / other sources keep the
+    // from the moment the page opens — header built from the library's album row so it
+    // shows instantly, track list filling from the already-saved subset until the
+    // remote album resolves the full listing. Other sources keep the
     // standard TrackListView.
     let cover_url_remote = cover_url.clone();
-    let yt_title = album.title.clone();
-    let yt_artist = album.artist.clone();
-    // Prefer the remote album's year once resolved; fall back to the local row.
-    let yt_remote = remote_album_res.read().clone().flatten();
-    let yt_year = yt_remote
+    let remote_title = album.title.clone();
+    let remote_artist = album.artist.clone();
+    // Prefer the remote album's year once resolved; fall back to the library row.
+    let remote_album = remote_album_res.read().clone().flatten();
+    let remote_year = remote_album
         .as_ref()
         .and_then(|a| a.year.clone())
         .or_else(|| (album.year > 0).then(|| album.year.to_string()));
-    let yt_browse_id = yt_remote.as_ref().map(|a| a.id.clone());
+    let remote_album_id = remote_album.as_ref().map(|a| a.id.clone());
+    let remote_artist_key = remote_album
+        .as_ref()
+        .and_then(|a| a.artist_key.clone())
+        .or_else(|| album.artist_key.clone());
 
     rsx! {
         div { class: "absolute inset-0 flex flex-col overflow-hidden p-8",
             if cap.albums == api::AlbumPresentation::Remote {
-                YtAlbumDetail {
+                RemoteAlbumDetail {
                     config,
-                    title: yt_title,
-                    artist: yt_artist,
-                    year: yt_year,
-                    browse_id: yt_browse_id,
-                    local_cover: cover_url_remote,
+                    title: remote_title,
+                    artist: remote_artist,
+                    artist_key: remote_artist_key,
+                    year: remote_year,
+                    album_id: remote_album_id,
+                    remote_cover: cover_url_remote,
                     tracks: tracks(),
                     on_close,
                 }
@@ -633,7 +639,9 @@ fn AlbumDetail(
                 name: album_title,
                 description: album_artist,
                 on_description_click: Some(EventHandler::new(move |_| {
-                    nav_ctrl.navigate_to_artist(album_artist_for_nav.clone());
+                    if let Some(artist) = album_artist_key.clone() {
+                        nav_ctrl.open_artist(artist);
+                    }
                 })),
                 cover_url,
                 is_album: true,
@@ -716,25 +724,28 @@ fn AlbumDetail(
     }
 }
 
-/// Catalog-style album page: a left meta column (cover, artist link, title,
-/// "Album", song count · duration · year, play / shuffle / download) beside the
-/// full track list. Shown only for a catalog source once the album
-/// resolved; local/other sources use [`TrackListView`]. Rows reuse [`TrackRow`]
-/// so play / queue / menu / download behave exactly as everywhere else.
+/// The album page a source that presents albums itself gets: a left meta column
+/// (cover, artist link, title, song count · duration · year, and the actions the
+/// source supports) beside the full track list. Chosen by
+/// [`api::AlbumPresentation`]; a source whose albums are a view of the library
+/// uses [`TrackListView`]. Rows reuse [`TrackRow`], so play / queue / menu /
+/// download behave exactly as everywhere else.
 #[component]
-fn YtAlbumDetail(
+fn RemoteAlbumDetail(
     config: Signal<AppConfig>,
     title: String,
     artist: String,
+    artist_key: Option<String>,
     year: Option<String>,
-    browse_id: Option<String>,
-    local_cover: Option<utils::CoverUrl>,
+    album_id: Option<String>,
+    remote_cover: Option<utils::CoverUrl>,
     tracks: Vec<api::TrackInfo>,
     on_close: EventHandler<()>,
 ) -> Element {
     let mut ctrl = use_context::<hooks::use_player_controller::PlayerController>();
     let nav_ctrl = use_context::<components::NavigationController>();
     let downloads = hooks::downloads::use_downloads();
+    let cap = hooks::sources::use_capabilities();
 
     let mut active_menu = use_signal(|| None::<String>);
     let mut show_playlist_modal = use_signal(|| false);
@@ -744,7 +755,12 @@ fn YtAlbumDetail(
     let dur_min = total / 60;
     let song_count = tracks.len();
     let artist_name = artist;
-    let artist_for_nav = artist_name.clone();
+    let names_artist = artist_key.is_some();
+    let open_artist = move |_| {
+        if let Some(artist) = artist_key.clone() {
+            nav_ctrl.open_artist(artist);
+        }
+    };
 
     // Current track for the row highlight. Read `current_queue_index`
     // *reactively* (`current_track()` peeks, so the page wouldn't re-render on a
@@ -767,12 +783,11 @@ fn YtAlbumDetail(
 
     let tracks_play_all = tracks.clone();
     let tracks_download_all = tracks.clone();
-    let artist_for_nav_btn = artist_name.clone();
     // Prefer the provider's album page; fall back to its first track page.
     // The daemon knows which sources have web pages and how they spell them;
     // an id and a key are all that leave here.
     let share_api = hooks::use_api();
-    let share_id = browse_id.clone();
+    let share_id = album_id.clone();
     let share_key = tracks.first().map(|track| track.key.clone());
     let share_url = use_resource(move || {
         let api = share_api.clone();
@@ -805,7 +820,7 @@ fn YtAlbumDetail(
                 div { class: "md:w-[320px] shrink-0 flex flex-col items-center md:items-start text-center md:text-left gap-5 md:pt-2",
                     div {
                         class: "w-full max-w-[300px] aspect-square rounded-lg bg-stone-800 overflow-hidden relative shrink-0 shadow-2xl shadow-black/40",
-                        if let Some(url) = &local_cover {
+                        if let Some(url) = &remote_cover {
                             img { src: "{url.as_ref()}", class: "w-full h-full object-cover", decoding: "async" }
                         } else {
                             div { class: "w-full h-full flex items-center justify-center text-white/20",
@@ -816,7 +831,7 @@ fn YtAlbumDetail(
                     div { class: "flex flex-col gap-2 w-full",
                         button {
                             class: "text-sm font-semibold text-white/60 hover:text-white hover:underline transition-colors truncate max-w-full self-center md:self-start",
-                            onclick: move |_| nav_ctrl.navigate_to_artist(artist_for_nav.clone()),
+                            onclick: open_artist.clone(),
                             "{artist_name}"
                         }
                         h1 { class: "text-3xl font-semibold tracking-tight text-white leading-[1.1] break-words", "{title}" }
@@ -835,10 +850,11 @@ fn YtAlbumDetail(
                         }
                     }
                     div { class: "flex items-center gap-3 mt-1",
-                        // Download all / remove downloads.
+                        // Download all / remove downloads, for a source that keeps files.
+                        if cap().downloads {
                         button {
                             class: "w-11 h-11 rounded-full border border-white/15 flex items-center justify-center text-slate-300 hover:text-white hover:border-white/30 transition-colors disabled:opacity-40",
-                            title: if all_downloaded { "Remove download".to_string() } else { "Download".to_string() },
+                            title: if all_downloaded { i18n::t("remove_download").to_string() } else { i18n::t("download_offline").to_string() },
                             disabled: downloads.read().running,
                             onclick: move |_| {
                                 if all_downloaded {
@@ -857,12 +873,15 @@ fn YtAlbumDetail(
                             },
                             i { class: if all_downloaded { "fa-solid fa-trash" } else { "fa-solid fa-download" } }
                         }
-                        // Go to artist.
+                        }
+                        // Go to artist, when the album names one to go to.
+                        if names_artist {
                         button {
                             class: "w-11 h-11 rounded-full border border-white/15 flex items-center justify-center text-slate-300 hover:text-white hover:border-white/30 transition-colors",
-                            title: "Go to artist".to_string(),
-                            onclick: move |_| nav_ctrl.navigate_to_artist(artist_for_nav_btn.clone()),
+                            title: i18n::t("go_to_artist").to_string(),
+                            onclick: open_artist.clone(),
                             i { class: "fa-solid fa-user" }
+                        }
                         }
                         // Play (primary).
                         button {
@@ -888,7 +907,7 @@ fn YtAlbumDetail(
                         if let Some(url) = share_url {
                             button {
                                 class: "w-11 h-11 rounded-full border border-white/15 flex items-center justify-center text-slate-300 hover:text-white hover:border-white/30 transition-colors",
-                                title: "Share".to_string(),
+                                title: i18n::t("share").to_string(),
                                 onclick: move |_| copy_album_link(url.clone()),
                                 i { class: "fa-solid fa-arrow-up-from-bracket" }
                             }

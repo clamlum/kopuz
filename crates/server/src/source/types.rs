@@ -81,6 +81,10 @@ pub struct RadioSeeds {
     pub track: bool,
     /// Backs [`MediaSource::start_playlist_radio`](super::MediaSource::start_playlist_radio).
     pub playlist: bool,
+    /// Playing a search result starts a radio from it instead of queueing the
+    /// results: a catalog search is a list of unrelated matches, not an album.
+    /// Needs `track`.
+    pub search: bool,
 }
 
 impl RadioSeeds {
@@ -88,18 +92,21 @@ impl RadioSeeds {
     pub const NONE: Self = Self {
         track: false,
         playlist: false,
+        search: false,
     };
 
     /// A song seed only, the Subsonic/OpenSubsonic shape.
     pub const TRACK: Self = Self {
         track: true,
         playlist: false,
+        search: false,
     };
 
     /// Both seeds, the catalog-remote shape.
     pub const ALL: Self = Self {
         track: true,
         playlist: true,
+        search: false,
     };
 }
 
@@ -113,11 +120,18 @@ pub struct PlaylistPage {
     pub next: Option<String>,
 }
 
+/// What looking one artist up found: a photo, and the name the source's own record gives when the lookup went by id.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ArtistLookup {
+    pub image: Option<String>,
+    pub name: Option<String>,
+}
+
 #[derive(Default)]
 pub struct LibrarySnapshot {
     pub albums: Vec<reader::Album>,
     pub tracks: Vec<reader::Track>,
-    pub artist_images: Vec<(String, String)>,
+    pub artist_images: Vec<(reader::ArtistCredit, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +187,7 @@ pub struct RemoteAlbum {
     pub browse_id: String,
     pub title: String,
     pub artist: Option<String>,
+    pub artist_id: Option<String>,
     pub year: Option<String>,
     pub thumbnail: Option<String>,
     pub audio_playlist_id: Option<String>,
@@ -185,6 +200,7 @@ impl From<crate::ytmusic::discover::YtAlbum> for RemoteAlbum {
             browse_id: a.browse_id,
             title: a.title,
             artist: a.artist,
+            artist_id: a.artist_id,
             year: a.year,
             thumbnail: a.thumbnail,
             audio_playlist_id: a.audio_playlist_id,

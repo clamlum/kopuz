@@ -33,26 +33,20 @@ impl LibraryService {
         })
     }
 
-    /// Like [`Self::spawn_scan`], but with the roots pinned by the caller.
-    /// The embedded frontend uses this: its config signal is the authority,
-    /// and reading the session watch here instead would race the async
-    /// config push (a lost race scans and prunes against default roots).
-    pub fn spawn_scan_with_config(
-        self: &Arc<Self>,
-        runner: &JobRunner,
-        config: config::AppConfig,
-    ) -> Result<JobRef, ApiError> {
-        let service = self.clone();
-        runner.start(JobKind::Scan, move |ctx| async move {
-            service.run_scan(&ctx, &config).await
-        })
-    }
-
     pub fn spawn_remote_sync(self: &Arc<Self>, runner: &JobRunner) -> Result<JobRef, ApiError> {
         let service = self.clone();
         runner.start(JobKind::LibrarySync, move |ctx| async move {
             let config = service.current_config();
-            service.run_remote_sync(&ctx, &config).await
+            let result = service.run_remote_sync(&ctx, &config).await;
+            if result.is_ok() && !ctx.cancelled() {
+                crate::auto_sync::mark_synced(
+                    &service.db,
+                    JobKind::LibrarySync,
+                    &config.active_source,
+                )
+                .await;
+            }
+            result
         })
     }
 
@@ -195,16 +189,29 @@ impl LibraryService {
                 .prune_source(&source, &keep_keys, &keep_albums)
                 .await
                 .map_err(db_error)?;
-            for (artist, image) in &library.local_artist_images {
+            // The scanner names a folder's artist by text; here that is the identity of the source's unlinked row.
+            let unlinked = self
+                .db
+                .unlinked_artist_keys(&source)
+                .await
+                .map_err(db_error)?;
+            for (name, image) in &library.local_artist_images {
+                let Some(key) = unlinked.get(name) else {
+                    continue;
+                };
                 let path = image.to_string_lossy().into_owned();
-                let _ = self.db.set_artist_image(artist, "local", Some(&path)).await;
+                let _ = self
+                    .db
+                    .set_artist_image(&source, key, "local", Some(&path))
+                    .await;
             }
             if let Ok((_, photos)) = self.db.artist_images().await {
-                for (artist, photo) in photos {
+                for ((photo_source, key), photo) in photos {
                     if let reader::ArtistImageRef::Local(path) = photo
+                        && photo_source == source.as_str()
                         && !path.exists()
                     {
-                        let _ = self.db.set_artist_image(&artist, "local", None).await;
+                        let _ = self.db.set_artist_image(&source, &key, "local", None).await;
                     }
                 }
             }
@@ -354,10 +361,12 @@ impl LibraryService {
             ctx.progress("persisting", Some(done), Some(total), None);
             self.invalidate(Table::Tracks);
         }
-        // Normalized, because that is the key every read looks the photo up
-        // under; storing the display name here wrote rows nothing found.
-        for (name, url) in &snapshot.artist_images {
-            let key = utils::artist::normalize_artist_key(name);
+        let unlinked = self.db.unlinked_artist_keys(&src).await.map_err(db_error)?;
+        let linked = self.db.linked_artist_keys(&src).await.map_err(db_error)?;
+        for (artist, url) in &snapshot.artist_images {
+            let Some(key) = super::artist_art::credit_key(artist, &linked, &unlinked) else {
+                continue;
+            };
             let _ = source.set_artist_image(&key, "server", Some(url)).await;
         }
         let keep_keys: Vec<String> = snapshot

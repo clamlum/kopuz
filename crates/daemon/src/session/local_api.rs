@@ -5,6 +5,8 @@ use super::*;
 /// In-process implementation of [`api::KopuzApi`] over a running session.
 pub struct LocalApi {
     pub(super) session: SessionHandle,
+    /// When this surface came up, which is as close to the daemon's start as it has.
+    pub(super) started: std::time::Instant,
     pub(super) library: Option<Arc<crate::library::LibraryService>>,
     pub(super) config: Option<Arc<crate::config_service::ConfigService>>,
     pub(super) jobs: Option<Arc<crate::jobs::JobRunner>>,
@@ -25,6 +27,7 @@ impl LocalApi {
     pub fn new(session: SessionHandle) -> Self {
         Self {
             session,
+            started: std::time::Instant::now(),
             library: None,
             config: None,
             jobs: None,
@@ -418,6 +421,10 @@ impl api::LibraryApi for LocalApi {
         self.library()?.artist_tracks(&artist, page).await
     }
 
+    async fn artist(&self, artist: String) -> Result<api::ArtistDetail, ApiError> {
+        self.library()?.artist(&artist).await
+    }
+
     async fn artist_sample_tracks(&self, page: Page) -> Result<api::TrackPage, ApiError> {
         self.library()?.artist_sample_tracks(page).await
     }
@@ -450,8 +457,8 @@ impl api::LibraryApi for LocalApi {
         self.library()?.album_web_url(&id).await
     }
 
-    async fn refresh_artist_artwork(&self, names: Vec<String>) -> Result<(), ApiError> {
-        self.library()?.refresh_artist_artwork(names).await
+    async fn refresh_artist_artwork(&self, artists: Vec<String>) -> Result<(), ApiError> {
+        self.library()?.refresh_artist_artwork(artists).await
     }
 
     async fn favorites(&self) -> Result<api::FavoritesView, ApiError> {
@@ -531,12 +538,10 @@ impl api::ArtworkApi for LocalApi {
         let keys = crate::artwork::settings::written_keys(&values);
         service.ensure_unlocked(&keys)?;
         let updated = service
-            .mutate_state(move |config| crate::artwork::settings::apply(&values, config))
+            .mutate_state(&keys, move |config| {
+                crate::artwork::settings::apply(&values, config)
+            })
             .await?;
-        self.session.set_config(
-            updated.clone(),
-            keys.iter().map(|key| key.to_string()).collect(),
-        );
         Ok(crate::artwork::settings::fields(&updated))
     }
 }
@@ -558,20 +563,7 @@ impl api::ConfigApi for LocalApi {
                 "this daemon runs without a config service",
             ));
         };
-        let (view, updated, changed) = service.set(config).await?;
-        // A settings write can move where the library reads from, so the
-        // source is rebuilt before anything loads against the old one.
-        if let Some(sources) = &self.sources
-            && changed.iter().any(|key| {
-                matches!(
-                    key.as_str(),
-                    "active_source" | "local_sources" | "music_directory" | "server_folders"
-                )
-            })
-        {
-            sources.refresh_active(&updated);
-        }
-        self.session.set_config(updated, changed);
+        let (view, _, _) = service.set(config).await?;
         Ok(view)
     }
 
@@ -579,13 +571,16 @@ impl api::ConfigApi for LocalApi {
         &self,
         equalizer: config::EqualizerSettings,
     ) -> Result<(), ApiError> {
-        // Not a config write: the engine hears it, nothing is stored, and
-        // the session keeps the settings it already had.
-        let mut preview = self.session.config_watch().borrow().clone();
-        preview.equalizer = equalizer;
-        self.session
-            .set_config(preview, vec!["equalizer".to_string()]);
+        self.session.preview_equalizer(equalizer);
         Ok(())
+    }
+
+    async fn daemon_status(&self) -> Result<api::DaemonStatus, ApiError> {
+        Ok(api::DaemonStatus {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime_secs: self.started.elapsed().as_secs(),
+            proto_revision: api::WIRE_REVISION,
+        })
     }
 }
 
@@ -629,6 +624,13 @@ impl api::JobApi for LocalApi {
             ));
         };
         service.start(runner, url, format).await
+    }
+
+    async fn search_downloads(
+        &self,
+        query: String,
+    ) -> Result<Vec<api::DownloadCandidate>, ApiError> {
+        self.downloader()?.search(&query).await
     }
 
     async fn download_formats(&self) -> Result<Vec<api::ChoiceOption>, ApiError> {
@@ -737,11 +739,11 @@ impl api::SourceApi for LocalApi {
         Ok(self.sources()?.services().await)
     }
 
-    async fn check_server_draft(
+    async fn check_source_draft(
         &self,
-        draft: api::ServerDraft,
+        draft: api::SourceDraft,
     ) -> Result<api::DraftCheck, ApiError> {
-        self.sources()?.check_server_draft(draft).await
+        self.sources()?.check_source_draft(draft).await
     }
 
     async fn set_source_settings(
@@ -756,33 +758,12 @@ impl api::SourceApi for LocalApi {
         self.sources()?.switch_source(&id).await
     }
 
-    async fn upsert_local_source(
-        &self,
-        draft: api::LocalSourceDraft,
-    ) -> Result<api::SourceInfo, ApiError> {
-        self.sources()?.upsert_local_source(draft).await
+    async fn upsert_source(&self, draft: api::SourceDraft) -> Result<api::SourceInfo, ApiError> {
+        self.sources()?.upsert_source(draft).await
     }
 
-    async fn delete_local_source(&self, id: String) -> Result<(), ApiError> {
-        self.sources()?.delete_local_source(&id).await
-    }
-
-    async fn set_source_directories(
-        &self,
-        id: String,
-        directories: Vec<String>,
-    ) -> Result<api::SourceInfo, ApiError> {
-        self.sources()?
-            .set_source_directories(&id, directories)
-            .await
-    }
-
-    async fn upsert_server(&self, draft: api::ServerDraft) -> Result<api::SourceInfo, ApiError> {
-        self.sources()?.upsert_server(draft).await
-    }
-
-    async fn delete_server(&self, id: String) -> Result<(), ApiError> {
-        self.sources()?.delete_server(&id).await
+    async fn delete_source(&self, id: String) -> Result<(), ApiError> {
+        self.sources()?.delete_source(&id).await
     }
 
     async fn provision_credentials(

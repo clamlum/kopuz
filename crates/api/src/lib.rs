@@ -28,16 +28,18 @@ pub use catalog::{
 };
 pub use error::{ApiError, ErrorBody, ErrorCode};
 pub use events::{ApiEvent, JobKind, JobProgress, NoticeLevel, SourceState, Table};
-pub use jobs::{DownloadHistoryEntry, DownloadItemState, DownloadItemStatus, DownloadState};
+pub use jobs::{
+    DownloadCandidate, DownloadHistoryEntry, DownloadItemState, DownloadItemStatus, DownloadState,
+};
 pub use library::{
-    AlbumInfo, AlbumPage, ArtistInfo, ArtistPage, DEFAULT_PAGE_LIMIT, LyricChunkView,
-    LyricLineView, LyricsView, Page, SearchResults, StatsView, TrackFilter, TrackInfo, TrackPage,
-    TrackSort,
+    AlbumInfo, AlbumPage, ArtistCredit, ArtistDetail, ArtistInfo, ArtistPage, DEFAULT_PAGE_LIMIT,
+    LyricChunkView, LyricLineView, LyricsView, Page, SearchResults, StatsView, TrackFilter,
+    TrackInfo, TrackPage, TrackSort,
 };
 pub use mutations::{ArtworkChange, ArtworkUpload, TrackMetadataPatch};
 pub use player::{
-    BufferedRange, ExternalDevice, ExternalPlayback, FadingState, Intent, LoopMode, NowPlaying,
-    Phase, PlayerCommand, PlayerState, PositionAnchor, QueueSummary, TrackKind,
+    BufferedRange, ExternalDevice, ExternalPlayback, FadingState, Intent, LoopMode, Phase,
+    PlayerCommand, PlayerState, PositionAnchor, QueueSummary, TrackKind,
 };
 pub use playlists::{PlaylistCatalog, PlaylistFolderInfo, PlaylistInfo, PlaylistReorder};
 pub use queue::{
@@ -45,14 +47,13 @@ pub use queue::{
 };
 pub use radio::{RadioStationInfo, RadioStreamInfo};
 pub use schema::{
-    ChoiceOption, FieldKind, FieldSpec, FieldValue, Icon, Problem, Text, spec_value, toggle_of,
-    value_of,
+    ChoiceOption, FieldKind, FieldSpec, FieldValue, Icon, Problem, Text, decode_directories,
+    encode_directories, spec_value, toggle_of, value_of,
 };
 pub use sources::{
     AlbumPresentation, ArtistPresentation, ConnectKind, CredentialProvision, DraftCheck,
-    FavoritesSyncMode, IntegrationInfo, LocalSourceDraft, PlaylistCapability, ServerDraft,
-    ServiceInfo, ServiceRef, SignInKind, SourceCapabilities, SourceFolderEntry, SourceInfo,
-    SourceKind, SourceLoginRequest,
+    FavoritesSyncMode, IntegrationInfo, PlaylistCapability, ServiceInfo, ServiceRef, SignInKind,
+    SourceCapabilities, SourceDraft, SourceFolderEntry, SourceInfo, SourceLoginRequest,
 };
 
 /// The config view: the layered config with credential keys
@@ -62,6 +63,20 @@ pub use sources::{
 pub struct ConfigView {
     pub config: config::AppConfig,
     pub locked_keys: Vec<String>,
+    /// Rises with every saved change, so a client can tell an older view from a newer one.
+    pub revision: u64,
+}
+
+/// What this build speaks: bump it with any wire change a mismatched peer would misread, never for an added field.
+pub const WIRE_REVISION: u32 = 1;
+
+/// What a daemon says it is, for a frontend that was not built beside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonStatus {
+    pub version: String,
+    pub uptime_secs: u64,
+    /// The wire contract it speaks; see [`WIRE_REVISION`].
+    pub proto_revision: u32,
 }
 
 /// Returned by every command; `rev` names the state revision that includes
@@ -142,7 +157,7 @@ pub trait PlayerApi: Send + Sync {
 pub trait LibraryApi: Send + Sync {
     async fn tracks(&self, filter: TrackFilter, page: Page) -> Result<TrackPage, ApiError>;
 
-    /// Local tracks under a directory prefix, path-ordered.
+    /// Tracks under a directory prefix, path-ordered.
     async fn folder_tracks(&self, prefix: String, page: Page) -> Result<TrackPage, ApiError>;
 
     /// Rows for specific keys, in the order asked for. Keys the library does
@@ -164,6 +179,9 @@ pub trait LibraryApi: Send + Sync {
     async fn artists(&self, page: Page) -> Result<ArtistPage, ApiError>;
 
     async fn artist_tracks(&self, artist: String, page: Page) -> Result<TrackPage, ApiError>;
+
+    /// One artist's name, photo, count and billed albums.
+    async fn artist(&self, artist: String) -> Result<ArtistDetail, ApiError>;
 
     /// One track per artist, for the artist grid's tiles.
     async fn artist_sample_tracks(&self, page: Page) -> Result<TrackPage, ApiError>;
@@ -219,11 +237,8 @@ pub trait LibraryApi: Send + Sync {
     /// this is how it can refuse a bad URL without fetching one itself.
     async fn validate_radio_registry(&self, url: String) -> Result<u32, ApiError>;
 
-    /// Look for photos for these artists, storing what it finds. Names already
-    /// resolved, and names whose last search definitively found nothing, are
-    /// skipped -- so calling it on every visit is cheap. Results arrive as a
-    /// `Tracks` invalidation, not in the answer.
-    async fn refresh_artist_artwork(&self, names: Vec<String>) -> Result<(), ApiError>;
+    /// Look for photos for these artists, skipping found and recently missed ones; results arrive as a `Tracks` invalidation.
+    async fn refresh_artist_artwork(&self, artists: Vec<String>) -> Result<(), ApiError>;
 
     async fn lyrics(&self, key: String) -> Result<LyricsView, ApiError>;
 
@@ -242,7 +257,7 @@ pub trait LibraryApi: Send + Sync {
     /// it holds for the track, so the local favorite row is cleared with it.
     async fn dont_recommend(&self, key: String) -> Result<(), ApiError>;
 
-    /// Rewrite one track's tags, and its embedded cover with them. Only local
+    /// Rewrite one track's tags, and its embedded cover with them. Only
     /// files have tags to edit; a server track answers `unsupported`.
     async fn update_track_metadata(&self, patch: TrackMetadataPatch)
     -> Result<TrackInfo, ApiError>;
@@ -263,7 +278,7 @@ pub trait LibraryApi: Send + Sync {
 /// Playlists and the folders they sit in.
 ///
 /// Every mutation goes through the active source, so a server playlist is
-/// pushed to the server and a local one is not, without the caller knowing
+/// pushed to the server and one held only here is not, without the caller knowing
 /// which it holds. The daemon reports the change as a `Playlists` (or
 /// `Folders`) invalidation.
 #[async_trait::async_trait]
@@ -285,7 +300,7 @@ pub trait PlaylistApi: Send + Sync {
 
     async fn reorder_playlist(&self, id: String, reorder: PlaylistReorder) -> Result<(), ApiError>;
 
-    /// Pull a server playlist's contents again. A no-op for a local one.
+    /// Pull a server playlist's contents again. A no-op for a playlist held only here.
     async fn refresh_playlist(&self, id: String) -> Result<(), ApiError>;
 
     async fn create_playlist_folder(&self, name: String) -> Result<String, ApiError>;
@@ -348,6 +363,11 @@ pub trait JobApi: Send + Sync {
     /// the outcome joins [`Self::downloader_history`].
     async fn download_url(&self, url: String, format: String) -> Result<JobRef, ApiError>;
 
+    /// Songs to download for `query`: what YouTube Music finds for a name, or
+    /// the tracks a pasted link stands for. Each comes back with the URL
+    /// [`Self::download_url`] takes.
+    async fn search_downloads(&self, query: String) -> Result<Vec<DownloadCandidate>, ApiError>;
+
     /// The formats a download can be asked for, picked per download rather
     /// than kept in the settings.
     async fn download_formats(&self) -> Result<Vec<ChoiceOption>, ApiError>;
@@ -381,10 +401,11 @@ pub trait SourceApi: Send + Sync {
 
     /// What a draft would do if it were saved, and what is wrong with it.
     /// Cheap enough to call as a form is typed into.
-    async fn check_server_draft(&self, draft: ServerDraft) -> Result<DraftCheck, ApiError>;
+    async fn check_source_draft(&self, draft: SourceDraft) -> Result<DraftCheck, ApiError>;
 
-    /// Answer a source's own options. Absent keys are left alone, and an empty
-    /// secret is not a request to clear one.
+    /// Answer a source's own options, a folder source's folders included.
+    /// Absent keys are left alone, and an empty secret is not a request to
+    /// clear one.
     async fn set_source_settings(
         &self,
         id: String,
@@ -397,21 +418,10 @@ pub trait SourceApi: Send + Sync {
     /// library.
     async fn switch_source(&self, id: String) -> Result<SourceInfo, ApiError>;
 
-    /// Create or update a local library. Absent `id` creates.
-    async fn upsert_local_source(&self, draft: LocalSourceDraft) -> Result<SourceInfo, ApiError>;
+    /// Create or update a source from the answers to its service's form. Absent `id` creates.
+    async fn upsert_source(&self, draft: SourceDraft) -> Result<SourceInfo, ApiError>;
 
-    async fn delete_local_source(&self, id: String) -> Result<(), ApiError>;
-
-    /// Replace a source's scan roots, or a server's selected folders.
-    async fn set_source_directories(
-        &self,
-        id: String,
-        directories: Vec<String>,
-    ) -> Result<SourceInfo, ApiError>;
-
-    async fn upsert_server(&self, draft: ServerDraft) -> Result<SourceInfo, ApiError>;
-
-    async fn delete_server(&self, id: String) -> Result<(), ApiError>;
+    async fn delete_source(&self, id: String) -> Result<(), ApiError>;
 
     /// Store a secret obtained elsewhere. Write-only.
     async fn provision_credentials(
@@ -477,7 +487,29 @@ pub trait ConfigApi: Send + Sync {
     async fn preview_equalizer(&self, equalizer: config::EqualizerSettings)
     -> Result<(), ApiError>;
 
+    /// What this daemon is, including the wire contract it speaks.
+    async fn daemon_status(&self) -> Result<DaemonStatus, ApiError>;
+
+    /// Run on every connect: nothing else may be read from a daemon on another wire revision.
+    async fn handshake(&self) -> Result<Handshake, ApiError> {
+        let status = self.daemon_status().await?;
+        Ok(match status.proto_revision == WIRE_REVISION {
+            true => Handshake::Ready(status),
+            false => Handshake::Mismatched {
+                daemon: status.proto_revision,
+                client: WIRE_REVISION,
+            },
+        })
+    }
+
     // Switching sources lives on `SourceApi`, which is where sources are.
+}
+
+/// What a connect found: a daemon to talk to, or one whose fields this build would misread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handshake {
+    Ready(DaemonStatus),
+    Mismatched { daemon: u32, client: u32 },
 }
 
 /// Subscribe to the state stream. Every subscriber gets every event from the
@@ -528,4 +560,60 @@ pub mod prelude {
         ArtworkApi, ConfigApi, EventApi, JobApi, KopuzApi, LibraryApi, PlayerApi, PlaylistApi,
         SourceApi,
     };
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+
+    struct Daemon(Result<u32, ApiError>);
+
+    #[async_trait::async_trait]
+    impl ConfigApi for Daemon {
+        async fn config(&self) -> Result<ConfigView, ApiError> {
+            unreachable!()
+        }
+        async fn set_config(&self, _: config::AppConfig) -> Result<ConfigView, ApiError> {
+            unreachable!()
+        }
+        async fn preview_equalizer(&self, _: config::EqualizerSettings) -> Result<(), ApiError> {
+            unreachable!()
+        }
+        async fn daemon_status(&self) -> Result<DaemonStatus, ApiError> {
+            self.0.clone().map(|proto_revision| DaemonStatus {
+                proto_revision,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_daemon_on_this_revision_is_ready() {
+        let ready = Daemon(Ok(WIRE_REVISION)).handshake().await.unwrap();
+        assert!(matches!(ready, Handshake::Ready(_)));
+
+        // A daemon that predates the field sends nothing, which reads as revision 0.
+        for daemon in [0, WIRE_REVISION + 1] {
+            assert_eq!(
+                Daemon(Ok(daemon)).handshake().await.unwrap(),
+                Handshake::Mismatched {
+                    daemon,
+                    client: WIRE_REVISION
+                }
+            );
+        }
+    }
+
+    /// A status that never arrived proves nothing, so it is the caller's error, not a match.
+    #[tokio::test]
+    async fn a_failed_status_is_an_error_not_a_match() {
+        let gone = ApiError {
+            code: ErrorCode::DaemonGone,
+            message: "gone".into(),
+        };
+
+        let result = Daemon(Err(gone.clone())).handshake().await;
+
+        assert_eq!(result, Err(gone));
+    }
 }

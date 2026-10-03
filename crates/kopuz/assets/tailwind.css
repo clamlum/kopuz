@@ -521,9 +521,6 @@
   .mb-12 {
     margin-bottom: calc(var(--spacing) * 12);
   }
-  .mb-\[env\(safe-area-inset-bottom\)\] {
-    margin-bottom: env(safe-area-inset-bottom);
-  }
   .ml-0\.5 {
     margin-left: calc(var(--spacing) * 0.5);
   }
@@ -901,6 +898,9 @@
   .cursor-grabbing {
     cursor: grabbing;
   }
+  .cursor-not-allowed {
+    cursor: not-allowed;
+  }
   .cursor-ns-resize {
     cursor: ns-resize;
   }
@@ -925,8 +925,8 @@
   .grid-cols-\[repeat\(auto-fill\,minmax\(180px\,1fr\)\)\] {
     grid-template-columns: repeat(auto-fill,minmax(180px,1fr));
   }
-  .grid-cols-\[repeat\(auto-fill\,minmax\(350px\,1fr\)\)\] {
-    grid-template-columns: repeat(auto-fill,minmax(350px,1fr));
+  .grid-cols-\[repeat\(auto-fill\,minmax\(min\(350px\,100\%\)\,1fr\)\)\] {
+    grid-template-columns: repeat(auto-fill,minmax(min(350px, 100%),1fr));
   }
   .flex-col {
     flex-direction: column;
@@ -1066,6 +1066,14 @@
       border-top-style: var(--tw-border-style);
       border-top-width: calc(1px * var(--tw-divide-y-reverse));
       border-bottom-width: calc(1px * calc(1 - var(--tw-divide-y-reverse)));
+    }
+  }
+  .divide-white\/5 {
+    :where(& > :not(:last-child)) {
+      border-color: color-mix(in srgb, #fff 5%, transparent);
+      @supports (color: color-mix(in lab, red, red)) {
+        border-color: color-mix(in oklab, var(--color-white) 5%, transparent);
+      }
     }
   }
   .divide-white\/\[0\.07\] {
@@ -1251,6 +1259,9 @@
   }
   .bg-\[\#0a0a0a\] {
     background-color: #0a0a0a;
+  }
+  .bg-\[\#0a0a0a\]\/95 {
+    background-color: color-mix(in oklab, #0a0a0a 95%, transparent);
   }
   .bg-\[\#0a0a0a\]\/97 {
     background-color: color-mix(in oklab, #0a0a0a 97%, transparent);
@@ -1789,6 +1800,9 @@
   .pb-\[calc\(env\(safe-area-inset-bottom\)_\+_1\.5rem\)\] {
     padding-bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
   }
+  .pb-\[env\(safe-area-inset-bottom\)\] {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
   .pl-1 {
     padding-left: calc(var(--spacing) * 1);
   }
@@ -1883,6 +1897,9 @@
   }
   .text-\[15px\] {
     font-size: 15px;
+  }
+  .text-\[17px\] {
+    font-size: 17px;
   }
   .text-\[28px\] {
     font-size: 28px;
@@ -3031,6 +3048,11 @@
       width: 320px;
     }
   }
+  .md\:min-w-64 {
+    @media (width >= 48rem) {
+      min-width: calc(var(--spacing) * 64);
+    }
+  }
   .md\:grid-cols-2 {
     @media (width >= 48rem) {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3049,6 +3071,11 @@
   .md\:flex-row {
     @media (width >= 48rem) {
       flex-direction: row;
+    }
+  }
+  .md\:flex-wrap {
+    @media (width >= 48rem) {
+      flex-wrap: wrap;
     }
   }
   .md\:items-start {

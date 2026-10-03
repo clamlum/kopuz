@@ -48,6 +48,20 @@
   </screenshots>
 
   <releases>
+    <release version="0.19.0" date="2026-10-03">
+      <description>
+        <p>
+          Android gains bottom navigation, sort controls, and smoother player sheets. System Back gestures navigate within the app, settings swipes no longer open the sidebar, and startup, rotation, sign-in, and artwork loading are more reliable. YouTube Music gains native downloads and starts a radio when playing a search result, and Windows media controls stay available when the daemon starts first.
+        </p>
+      </description>
+    </release>
+    <release version="0.18.0" date="2026-10-03">
+      <description>
+        <p>
+          Artists are identified by their source IDs, replaying a track resets its progress correctly, and Jellyfin uses modern authentication. Browser sign-in supports the system default browser, including Firefox, remote cover images are resized, and translations gain new interface labels.
+        </p>
+      </description>
+    </release>
     <release version="0.17.0" date="2026-09-17">
       <description>
         <p>

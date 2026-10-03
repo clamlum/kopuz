@@ -91,10 +91,6 @@ impl PlayerController {
         }
     }
 
-    pub fn get_current_track_index(&self) -> Option<usize> {
-        self.get_queue_index(*self.current_queue_index.peek())
-    }
-
     pub fn get_track_at(&self, idx: usize) -> Option<Track> {
         let idx = self.get_queue_index(idx)?;
         self.queue.peek().get(idx).cloned()
@@ -405,32 +401,6 @@ impl PlayerController {
         });
     }
 
-    pub fn swap_queue_item(&mut self, from: usize, to: usize) {
-        self.move_queue_item(from, to);
-    }
-
-    /// Hard reset when the active server changes: stop everything and clear
-    /// the queue so a queued remote track cannot replay through the wrong
-    /// backend.
-    pub fn reset_for_backend_switch(&mut self) {
-        self.playback_error.set(None);
-        self.clear_current_track_metadata();
-        self.queue.write().clear();
-        self.history.write().clear();
-        self.current_queue_index.set(0);
-        let handle = self.handle();
-        spawn(async move {
-            let _ = handle.player_command(api::PlayerCommand::Stop).await;
-            let request = api::SetQueueRequest {
-                mode: api::QueueMode::Replace,
-                context: api::QueueContext::Tracks { keys: Vec::new() },
-                start_index: None,
-                shuffle: None,
-            };
-            let _ = handle.set_queue(request).await;
-        });
-    }
-
     pub fn output_latency_secs(&self) -> f64 {
         *self.output_latency_ms.peek() as f64 / 1000.0
     }
@@ -469,6 +439,7 @@ impl PlayerController {
         self.current_song_duration.set(0);
         self.current_song_progress.set(0);
         self.buffered_ranges.set(Vec::new());
+        self.current_artwork.set(None);
         self.current_track_snapshot.set(None);
     }
 }

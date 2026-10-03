@@ -48,6 +48,7 @@ fn song_to_track(
         Some(cover_tag.as_deref().unwrap_or(reader::CoverRef::NO_COVER)),
     );
     let artist = item.artist.clone().unwrap_or_default();
+    let artist_id = item.artist_id.clone().filter(|id| !id.is_empty());
     reader::models::Track {
         id: reader::models::TrackId::Server {
             service,
@@ -67,6 +68,10 @@ fn song_to_track(
         musicbrainz_recording_id: None,
         musicbrainz_track_id: None,
         playlist_item_id: None,
+        credits: match artist_id {
+            Some(id) => vec![reader::ArtistCredit::linked(&artist, id)],
+            None => vec![reader::ArtistCredit::unlinked(&artist)],
+        },
         artists: vec![artist],
     }
 }
@@ -132,7 +137,10 @@ impl MediaSource for SubsonicSource {
                 if let Some(cover_art_id) = &artist.cover_art
                     && let Ok(url) = self.client.cover_art_url(cover_art_id, Some(512))
                 {
-                    artist_images.push((artist.name, url));
+                    artist_images.push((
+                        reader::ArtistCredit::linked(artist.name, artist.id.clone()),
+                        url,
+                    ));
                 }
             }
         }
@@ -170,6 +178,8 @@ impl MediaSource for SubsonicSource {
                     year: album.year.unwrap_or(0),
                     cover_path: Some(PathBuf::from(album_id_prefixed.clone())),
                     manual_cover: false,
+                    artist_id: album.artist_id.clone(),
+                    artist_key: album.artist_id.clone(),
                 });
 
                 let songs = self.client.get_album_songs(&album.id).await.map_err(|e| {
@@ -210,6 +220,13 @@ impl MediaSource for SubsonicSource {
                         musicbrainz_recording_id: None,
                         musicbrainz_track_id: None,
                         playlist_item_id: None,
+                        credits: {
+                            let name = song.artist.clone().unwrap_or_else(|| album_artist.clone());
+                            match song.artist_id.filter(|id| !id.is_empty()) {
+                                Some(id) => vec![reader::ArtistCredit::linked(name, id)],
+                                None => vec![reader::ArtistCredit::unlinked(name)],
+                            }
+                        },
                         artists: vec![song.artist.unwrap_or_else(|| album_artist.clone())],
                     });
                 }
@@ -277,16 +294,13 @@ impl MediaSource for SubsonicSource {
     async fn remove_from_playlist(
         &self,
         playlist_id: &str,
-        track: &reader::Track,
+        _track: &reader::Track,
         position: usize,
     ) -> Result<(), SourceError> {
         self.client
             .remove_from_playlist(playlist_id, position)
             .await?;
-        self.db
-            .remove_playlist_tracks(&self.source, playlist_id, &[track.id.key().into_owned()])
-            .await
-            .map_err(SourceError::from)
+        self.remove_playlist_entry(playlist_id, position).await
     }
 
     async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError> {
@@ -333,16 +347,16 @@ impl MediaSource for SubsonicSource {
     async fn reorder_playlist(
         &self,
         playlist_id: &str,
-        ordered_refs: &[String],
+        ordered: &[reader::PlaylistEntry],
         _moved: &reader::Track,
         _new_index: usize,
     ) -> Result<(), SourceError> {
-        let ids: Vec<&str> = ordered_refs.iter().map(String::as_str).collect();
+        let ids: Vec<&str> = ordered.iter().map(|entry| entry.key.as_str()).collect();
         self.client
             .reorder_playlist(playlist_id, &ids, ids.len())
             .await?;
         self.db
-            .set_playlist_tracks(&self.source, playlist_id, ordered_refs)
+            .set_playlist_tracks(&self.source, playlist_id, ordered)
             .await
             .map_err(SourceError::from)
     }
@@ -408,14 +422,16 @@ impl MediaSource for SubsonicSource {
             .collect())
     }
 
-    async fn fetch_artist_images(&self) -> Result<Vec<(String, String)>, SourceError> {
+    async fn fetch_artist_images(
+        &self,
+    ) -> Result<Vec<(reader::ArtistCredit, String)>, SourceError> {
         let artists = self.client.get_artists().await?;
         let mut out = Vec::new();
         for artist in artists {
             if let Some(cover_art_id) = &artist.cover_art
                 && let Ok(url) = self.client.cover_art_url(cover_art_id, Some(512))
             {
-                out.push((artist.name.clone(), url));
+                out.push((reader::ArtistCredit::linked(&artist.name, &artist.id), url));
             }
         }
         Ok(out)

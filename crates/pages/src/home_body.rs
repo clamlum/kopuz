@@ -9,7 +9,6 @@ use hooks::use_db_queries::{
 use rand::rng;
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
-use utils::artist::normalize_artist_key;
 
 type AlbumCard = (String, String, String, Option<String>);
 
@@ -53,8 +52,8 @@ fn track_cover_url(track: &Track) -> Option<String> {
 /// window has to be wide enough to still fill it.
 const RECENTLY_ADDED_WINDOW: u32 = 64;
 
-/// The source-agnostic Home body (sections + hero). Rendered for local and any
-/// server; the active source decides the data, covers (via the source seam), the
+/// The source-agnostic Home body (sections + hero). Rendered for any
+/// source; the active source decides the data, covers (via the source seam), the
 /// recently-played list, and offline/sync gating.
 #[component]
 pub fn HomeBody(
@@ -62,7 +61,7 @@ pub fn HomeBody(
     on_select_album: EventHandler<String>,
     on_play_album: EventHandler<String>,
     on_select_playlist: EventHandler<String>,
-    on_search_artist: EventHandler<String>,
+    on_open_artist: EventHandler<String>,
 ) -> Element {
     let is_offline = use_context::<Signal<bool>>();
     let mut config = use_context::<Signal<AppConfig>>();
@@ -77,8 +76,7 @@ pub fn HomeBody(
     let albums_res = use_albums(source);
     let recently_added_res = use_recently_added_albums(source, RECENTLY_ADDED_WINDOW);
     let artists_res = use_artists(source);
-    // Photos by normalized name, so the Top Artists row renders exactly the
-    // ones the daemon actually holds a picture for.
+    // Photos by artist key, so the Top Artists row shows the picture the daemon holds for each.
     let artist_covers = use_memo(move || {
         artists_res
             .read()
@@ -88,7 +86,7 @@ pub fn HomeBody(
             .filter_map(|artist| {
                 let cover =
                     hooks::artwork::url(artist.artwork.as_ref(), hooks::artwork::Size::Thumb)?;
-                Some((normalize_artist_key(&artist.name), cover))
+                Some((artist.key.clone(), cover))
             })
             .collect::<HashMap<String, utils::CoverUrl>>()
     });
@@ -111,7 +109,7 @@ pub fn HomeBody(
     let top_genre_res = use_top_genre(source);
     let artist_samples_res = use_artist_sample_tracks(source, 30);
 
-    // Servers fill an empty cache by syncing; local is populated by the scan.
+    // Catalog sources fill an empty cache by syncing; folder sources are populated by the scan.
     let mut fetch_remote = move || {
         has_fetched.set(true);
         hooks::jobs::start(hooks::JobKind::LibrarySync);
@@ -343,20 +341,25 @@ pub fn HomeBody(
         let mut unique_artists = std::collections::HashSet::new();
         let mut artist_list = Vec::new();
         for track in &tracks {
-            if is_unknown_artist(&track.artist) {
+            // The row's own credit, so the tile is the artist the source named
+            // rather than the billed string it happens to show.
+            let Some(credit) = track.primary_credit() else {
+                continue;
+            };
+            if is_unknown_artist(&credit.name) {
                 continue;
             }
-            if unique_artists.insert(track.artist.clone()) {
-                // The same image chain the Artists grid uses: photo where one
-                // exists, the track's album cover as the Library last resort
+            let Some(key) = &credit.key else {
+                continue;
+            };
+            if unique_artists.insert(key.clone()) {
                 // The daemon walks override, then photo, then an album cover
-                // for a library source; a missing photo answers 404 and the
-                // tile falls back to its placeholder.
+                // for a library source; no picture renders the placeholder.
                 let cover_url = artist_covers
                     .read()
-                    .get(&normalize_artist_key(&track.artist))
+                    .get(key)
                     .map(|cover: &utils::CoverUrl| cover.as_ref().to_string());
-                artist_list.push((track.artist.clone(), cover_url));
+                artist_list.push((credit.name.clone(), cover_url, key.clone()));
             }
             if artist_list.len() >= 10 {
                 break;
@@ -529,7 +532,7 @@ pub fn HomeBody(
                                     on_select_album,
                                     on_play_album,
                                     on_select_playlist,
-                                    on_search_artist,
+                                    on_open_artist,
                                     active_card_menu,
                                     scroll_container,
                                 )}

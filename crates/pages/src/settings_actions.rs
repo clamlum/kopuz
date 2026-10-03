@@ -119,6 +119,7 @@ async fn activate(
             return;
         }
     };
+    hooks::sources::show_active(&source);
     // Which sign-in a source takes belongs to the service, and the daemon runs
     // it -- this only asks for whichever it named.
     match source.sign_in {
@@ -134,8 +135,8 @@ pub fn draft(
     service: Signal<String>,
     values: Signal<Vec<api::FieldValue>>,
     secrets: Signal<Vec<api::FieldValue>>,
-) -> api::ServerDraft {
-    api::ServerDraft {
+) -> api::SourceDraft {
+    api::SourceDraft {
         id: None,
         name: name(),
         service: service(),
@@ -146,20 +147,20 @@ pub fn draft(
 
 /// Ask the daemon what is wrong with a draft. A service it does not have is
 /// simply nothing to say yet -- the form has not been filled in.
-pub fn check_draft(draft: api::ServerDraft, mut check: Signal<Option<api::DraftCheck>>) {
+pub fn check_draft(draft: api::SourceDraft, mut check: Signal<Option<api::DraftCheck>>) {
     let api = hooks::consume_api();
     spawn(async move {
-        check.set(api.check_server_draft(draft).await.ok());
+        check.set(api.check_source_draft(draft).await.ok());
     });
 }
 
-pub fn add_server(
-    draft: api::ServerDraft,
-    mut server_name: Signal<String>,
+pub fn add_source(
+    draft: api::SourceDraft,
+    mut source_name: Signal<String>,
     mut values: Signal<Vec<api::FieldValue>>,
     mut secrets: Signal<Vec<api::FieldValue>>,
     mut error: Signal<Option<String>>,
-    mut show_add_server: Signal<bool>,
+    mut show_add_source: Signal<bool>,
     show_login: Signal<bool>,
     playback_error: Signal<Option<String>>,
 ) {
@@ -168,7 +169,7 @@ pub fn add_server(
         async move {
             // The daemon owns what each service's form needs, so it is what
             // says whether these answers are enough.
-            match api.check_server_draft(draft.clone()).await {
+            match api.check_source_draft(draft.clone()).await {
                 Ok(check) => {
                     if let Some(problem) = check.problems.first() {
                         error.set(Some(components::forms::text(&problem.label)));
@@ -180,7 +181,7 @@ pub fn add_server(
                     return;
                 }
             }
-            let saved = match api.upsert_server(draft).await {
+            let saved = match api.upsert_source(draft).await {
                 Ok(saved) => saved,
                 Err(failure) => {
                     error.set(Some(failure.to_string()));
@@ -188,20 +189,20 @@ pub fn add_server(
                 }
             };
 
-            server_name.set(String::new());
+            source_name.set(String::new());
             values.set(Vec::new());
             // Cleared with the rest of the form: it has been handed over, and
-            // a credential left in a live signal is one the next server can
+            // a credential left in a live signal is one the next source can
             // pick up.
             secrets.set(Vec::new());
             error.set(None);
-            show_add_server.set(false);
+            show_add_source.set(false);
 
-            // A server is added to be used, so it becomes the active source
+            // A source is added to be used, so it becomes the active one
             // and picks up whichever sign-in it still needs.
             activate(api, saved.id, error, show_login, playback_error).await;
         }
-        .instrument(tracing::info_span!("source.add_server")),
+        .instrument(tracing::info_span!("source.add")),
     );
 }
 
@@ -220,7 +221,7 @@ pub fn switch_server(
 pub fn delete_saved(id: String) {
     let api = hooks::consume_api();
     spawn(async move {
-        if let Err(error) = api.delete_server(id).await {
+        if let Err(error) = api.delete_source(id).await {
             tracing::warn!(%error, "deleting a server failed");
             hooks::toast::toast_error(&error.to_string());
         }

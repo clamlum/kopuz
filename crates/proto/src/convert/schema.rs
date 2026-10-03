@@ -40,6 +40,7 @@ pub fn choice_option_to_proto(value: &api::ChoiceOption) -> ChoiceOption {
     ChoiceOption {
         value: value.value.clone(),
         label: Some(text_to_proto(&value.label)),
+        unavailable: value.unavailable.as_ref().map(text_to_proto),
     }
 }
 
@@ -51,6 +52,7 @@ pub fn choice_option_from_proto(value: &ChoiceOption) -> api::ChoiceOption {
             .as_ref()
             .map(text_from_proto)
             .unwrap_or_default(),
+        unavailable: value.unavailable.as_ref().map(text_from_proto),
     }
 }
 
@@ -61,6 +63,7 @@ pub fn field_kind_to_proto(value: &api::FieldKind) -> FieldKind {
         api::FieldKind::Url => FieldKindTag::Url,
         api::FieldKind::Toggle => FieldKindTag::Toggle,
         api::FieldKind::Directory => FieldKindTag::Directory,
+        api::FieldKind::Directories => FieldKindTag::Directories,
         api::FieldKind::Choice { .. } => FieldKindTag::Choice,
         api::FieldKind::Radio { .. } => FieldKindTag::Radio,
         api::FieldKind::Note => FieldKindTag::Note,
@@ -91,6 +94,7 @@ pub fn field_kind_from_proto(value: &FieldKind) -> api::FieldKind {
         FieldKindTag::Url => api::FieldKind::Url,
         FieldKindTag::Toggle => api::FieldKind::Toggle,
         FieldKindTag::Directory => api::FieldKind::Directory,
+        FieldKindTag::Directories => api::FieldKind::Directories,
         FieldKindTag::Choice => api::FieldKind::Choice {
             options: options(),
             custom: value.custom,
@@ -198,10 +202,12 @@ mod tests {
             api::ChoiceOption {
                 value: "us".into(),
                 label: api::Text::literal("United States"),
+                ..Default::default()
             },
             api::ChoiceOption {
                 value: "tr".into(),
                 label: api::Text::key("storefront-tr"),
+                unavailable: Some(api::Text::key("downloader_needs_ffmpeg")),
             },
         ];
         let kinds = [
@@ -210,6 +216,7 @@ mod tests {
             api::FieldKind::Url,
             api::FieldKind::Toggle,
             api::FieldKind::Directory,
+            api::FieldKind::Directories,
             api::FieldKind::Choice {
                 options: options.clone(),
                 custom: true,

@@ -9,8 +9,8 @@ mod source;
 pub mod store;
 mod views;
 pub use source::{
-    Browser, BrowserEngine, JellyfinServer, MusicServer, MusicService, SavedLocalSource,
-    SavedServer, Source,
+    Browser, BrowserEngine, DEFAULT_LOCAL_ID, DEFAULT_LOCAL_NAME, JellyfinServer, MusicServer,
+    MusicService, SavedLocalSource, SavedServer, Source,
 };
 pub use views::{IntegrationConfig, LibraryConfig, PlaybackConfig, ServerAuth, UiConfig};
 
@@ -42,82 +42,30 @@ pub fn default_radio_registries() -> Vec<RegistryEntry> {
         is_default: true,
     }]
 }
+/// How the URL downloader writes what it fetches. Options the earlier yt-dlp
+/// downloader stored are ignored when read back.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct YtdlpOptions {
+pub struct DownloaderOptions {
     #[serde(default = "default_true")]
     pub embed_metadata: bool,
     #[serde(default = "default_true")]
     pub embed_thumbnail: bool,
     #[serde(default)]
-    pub postprocess_thumbnail_square: bool,
-    #[serde(default)]
-    pub embed_chapters: bool,
-    #[serde(default)]
-    pub embed_subs: bool,
-    #[serde(default)]
-    pub embed_info_json: bool,
-    #[serde(default)]
     pub write_thumbnail: bool,
+    #[serde(default = "default_true")]
+    pub organize_by_album: bool,
     #[serde(default)]
-    pub write_description: bool,
-    #[serde(default)]
-    pub write_info_json: bool,
-    #[serde(default)]
-    pub write_subs: bool,
-    #[serde(default)]
-    pub write_auto_subs: bool,
-    #[serde(default)]
-    pub write_comments: bool,
-    #[serde(default)]
-    pub sponsorblock: bool,
-    #[serde(default)]
-    pub sponsorblock_mark: bool,
-    #[serde(default)]
-    pub split_chapters: bool,
-    #[serde(default)]
-    pub convert_thumbnail: String,
-    #[serde(default)]
-    pub no_playlist: bool,
-    #[serde(default)]
-    pub xattrs: bool,
-    #[serde(default)]
-    pub no_mtime: bool,
-    #[serde(default)]
-    pub rate_limit: String,
-    #[serde(default)]
-    pub cookies_from_browser: String,
-    #[serde(default)]
-    pub js_runtimes: String,
-    #[serde(default = "default_audio_quality")]
-    pub audio_quality: u8,
+    pub overwrite_existing: bool,
 }
 
-impl Default for YtdlpOptions {
+impl Default for DownloaderOptions {
     fn default() -> Self {
         Self {
             embed_metadata: true,
             embed_thumbnail: true,
-            postprocess_thumbnail_square: false,
-            embed_chapters: false,
-            embed_subs: false,
-            embed_info_json: false,
             write_thumbnail: false,
-            write_description: false,
-            write_info_json: false,
-            write_subs: false,
-            write_auto_subs: false,
-            write_comments: false,
-            sponsorblock: false,
-            sponsorblock_mark: false,
-            split_chapters: false,
-            convert_thumbnail: String::new(),
-            no_playlist: false,
-            xattrs: false,
-            no_mtime: false,
-            rate_limit: String::new(),
-            cookies_from_browser: String::new(),
-            js_runtimes: String::new(),
-            audio_quality: 0,
+            organize_by_album: true,
+            overwrite_existing: false,
         }
     }
 }
@@ -129,12 +77,9 @@ fn default_depth_blur_strength() -> u8 {
 fn default_true() -> bool {
     true
 }
-fn default_audio_quality() -> u8 {
-    0
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct YtdlpHistoryEntry {
+pub struct DownloaderHistoryEntry {
     pub url: String,
     pub title: String,
     pub format: String,
@@ -518,35 +463,6 @@ impl OfflineQuality {
             _ => Self::Original,
         }
     }
-
-    pub fn jellyfin_bitrate_bps(self) -> Option<u32> {
-        match self {
-            Self::Kbps128 => Some(128_000),
-            Self::Kbps160 => Some(160_000),
-            Self::Kbps192 => Some(192_000),
-            Self::Kbps256 => Some(256_000),
-            Self::Kbps320 => Some(320_000),
-            Self::Original => None,
-        }
-    }
-
-    pub fn subsonic_max_bitrate_kbps(self) -> u32 {
-        match self {
-            Self::Kbps128 => 128,
-            Self::Kbps160 => 160,
-            Self::Kbps192 => 192,
-            Self::Kbps256 => 256,
-            Self::Kbps320 => 320,
-            Self::Original => 0,
-        }
-    }
-
-    pub fn file_extension(self) -> &'static str {
-        match self {
-            Self::Original => "bin",
-            _ => "mp3",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
@@ -624,11 +540,10 @@ pub struct AppConfig {
     pub server: Option<MusicServer>,
     #[serde(default)]
     pub servers: Vec<SavedServer>,
-    /// Named, isolated filesystem libraries. The legacy `music_directory`
-    /// remains the built-in Local source for backwards compatibility.
+    /// Isolated filesystem libraries; the one under `DEFAULT_LOCAL_ID` is the install's own.
     #[serde(default)]
     pub local_sources: Vec<SavedLocalSource>,
-    /// The active source: built-in Local, a named local library, or Server(id).
+    /// The active source: a folder library or Server(id).
     /// `server` is hydrated only for the active remote source.
     #[serde(default)]
     pub active_source: Source,
@@ -649,8 +564,6 @@ pub struct AppConfig {
     /// playback on this app's in-app device.
     #[serde(default = "default_true")]
     pub spotify_prefer_active_device: bool,
-    #[serde(default, deserialize_with = "deserialize_music_directories")]
-    pub music_directory: Vec<PathBuf>,
     #[serde(default = "default_theme")]
     pub theme: String,
     /// Palette file matugen or pywal writes, polled for changes while the live
@@ -766,12 +679,14 @@ pub struct AppConfig {
     pub device_change_behavior: DeviceChangeBehavior,
     #[serde(default)]
     pub sample_rate_mode: SampleRateMode,
-    #[serde(default)]
-    pub ytdlp_output_dir: String,
-    #[serde(default)]
-    pub ytdlp_options: YtdlpOptions,
-    #[serde(default)]
-    pub ytdlp_history: Vec<YtdlpHistoryEntry>,
+    /// Stored under the names the yt-dlp downloader gave these, so existing
+    /// settings and history carry over.
+    #[serde(default, rename = "ytdlp_output_dir")]
+    pub downloader_output_dir: String,
+    #[serde(default, rename = "ytdlp_options")]
+    pub downloader_options: DownloaderOptions,
+    #[serde(default, rename = "ytdlp_history")]
+    pub downloader_history: Vec<DownloaderHistoryEntry>,
     #[serde(default)]
     pub titlebar_mode: TitlebarMode,
     #[serde(default)]
@@ -910,22 +825,6 @@ fn default_language() -> String {
     "en".to_string()
 }
 
-fn deserialize_music_directories<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany {
-        One(PathBuf),
-        Many(Vec<PathBuf>),
-    }
-    match OneOrMany::deserialize(deserializer)? {
-        OneOrMany::One(p) => Ok(vec![p]),
-        OneOrMany::Many(v) => Ok(v),
-    }
-}
-
 /// Slider bound for `lyrics_offset_ms`; also enforced here since config files
 /// and env vars can set it without going through the UI.
 pub const LYRICS_OFFSET_LIMIT_MS: i32 = 1000;
@@ -955,13 +854,12 @@ impl Default for AppConfig {
         Self {
             server: None,
             servers: Vec::new(),
-            local_sources: Vec::new(),
-            active_source: Source::Local,
+            local_sources: vec![SavedLocalSource::default_library(vec![music_directory])],
+            active_source: Source::default(),
             source_explicitly_set: false,
             server_folders: HashMap::new(),
             spotify_browser: None,
             spotify_prefer_active_device: true,
-            music_directory: vec![music_directory],
             theme: default_theme(),
             live_theme_path: String::new(),
             device_id: default_device_id(),
@@ -1009,9 +907,9 @@ impl Default for AppConfig {
             equalizer: EqualizerSettings::default(),
             device_change_behavior: DeviceChangeBehavior::Pause,
             sample_rate_mode: SampleRateMode::System,
-            ytdlp_output_dir: String::new(),
-            ytdlp_options: YtdlpOptions::default(),
-            ytdlp_history: Vec::new(),
+            downloader_output_dir: String::new(),
+            downloader_options: DownloaderOptions::default(),
+            downloader_history: Vec::new(),
             titlebar_mode: TitlebarMode::Custom,
             offline_quality: OfflineQuality::default(),
             offline_tracks: HashMap::new(),
@@ -1055,39 +953,6 @@ impl AppConfig {
         }
     }
 
-    pub fn migrate_servers(&mut self) {
-        if let Some(server) = self.server.as_mut()
-            && server.id.is_none()
-        {
-            server.id = Some(uuid::Uuid::new_v4().to_string());
-        }
-        if let Some(server) = self.server.clone() {
-            let already = self.servers.iter().any(|s| s.matches(&server));
-            if !already {
-                let id = server
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                self.servers.push(SavedServer {
-                    id,
-                    name: server.name.clone(),
-                    url: server.url.clone(),
-                    service: server.service,
-                    yt_browser: server.yt_browser,
-                    yt_anonymous: server.yt_anonymous,
-                    apple_music_storefront: server.apple_music_storefront.clone(),
-                    apple_music_language: server.apple_music_language.clone(),
-                });
-            }
-        }
-    }
-
-    pub fn add_saved_server(&mut self, entry: SavedServer) {
-        if !self.servers.iter().any(|s| s.id == entry.id) {
-            self.servers.push(entry);
-        }
-    }
-
     pub fn remove_saved_server(&mut self, id: &str) {
         self.servers.retain(|s| s.id != id);
         if let Some(active) = &self.server
@@ -1097,16 +962,18 @@ impl AppConfig {
         }
     }
 
-    pub fn add_local_source(&mut self, source: SavedLocalSource) {
-        if !self.local_sources.iter().any(|saved| saved.id == source.id) {
-            self.local_sources.push(source);
-        }
-    }
-
     pub fn remove_local_source(&mut self, id: &str) {
         self.local_sources.retain(|source| source.id != id);
         if self.active_source.local_library_id() == Some(id) {
             self.clear_active_server();
+        }
+    }
+
+    /// Whether `source` is one this config still has, as opposed to one just deleted.
+    pub fn has_source(&self, source: &Source) -> bool {
+        match source {
+            Source::LocalLibrary(id) => self.local_sources.iter().any(|saved| &saved.id == id),
+            Source::Server(id) => self.servers.iter().any(|saved| &saved.id == id),
         }
     }
 
@@ -1155,25 +1022,6 @@ impl AppConfig {
             .unwrap_or_default()
     }
 
-    /// Library roots of the active source, empty for a local one.
-    pub fn active_server_folders(&self) -> Vec<String> {
-        self.active_source
-            .server_id()
-            .map(|id| self.folders_for(id))
-            .unwrap_or_default()
-    }
-
-    /// Replace the active server's library roots. Does nothing when the active
-    /// source is local, since roots are keyed by server id.
-    pub fn edit_active_server_folders(&mut self, edit: impl FnOnce(&mut Vec<String>)) {
-        let Some(id) = self.active_source.server_id().map(String::from) else {
-            return;
-        };
-        let mut folders = self.folders_for(&id);
-        edit(&mut folders);
-        self.set_folders_for(&id, folders);
-    }
-
     /// Replace a server's library roots, dropping the entry when the list empties
     /// so the backend goes back to auto-detecting.
     pub fn set_folders_for(&mut self, server_id: &str, folders: Vec<String>) {
@@ -1185,7 +1033,7 @@ impl AppConfig {
     }
 
     pub fn clear_active_server(&mut self) {
-        self.active_source = Source::Local;
+        self.active_source = Source::default();
         self.server = None;
         self.source_explicitly_set = true;
     }
@@ -1198,7 +1046,7 @@ impl AppConfig {
     }
 
     pub fn set_active_server_snapshot(&mut self, server: MusicServer) {
-        let source = server.id.clone().map_or(Source::Local, Source::Server);
+        let source = server.id.clone().map_or(Source::default(), Source::Server);
         self.active_source = source;
         self.server = Some(server);
         self.source_explicitly_set = true;
@@ -1208,21 +1056,6 @@ impl AppConfig {
         self.active_source.server_id()?;
         self.server.as_ref().map(|server| server.service)
     }
-
-    pub fn uses_jellyfin_server(&self) -> bool {
-        self.active_service() == Some(MusicService::Jellyfin)
-    }
-
-    /// The server to activate when toggling into server mode: the current server
-    /// if already on one, else the first saved server. `None` ⇒ no servers, so
-    /// the toggle is a no-op.
-    pub fn server_toggle_target(&self) -> Option<Source> {
-        self.active_source
-            .server_id()
-            .map(String::from)
-            .or_else(|| self.servers.first().map(|s| s.id.clone()))
-            .map(Source::Server)
-    }
 }
 
 #[cfg(test)]
@@ -1231,7 +1064,6 @@ mod tests {
         AppConfig, BackBehavior, Browser, EqualizerSettings, MusicServer, ServerAuth,
         SettingsLayout,
     };
-    use std::path::PathBuf;
 
     #[test]
     fn legacy_five_band_custom_eq_migrates_to_nearest_slots() {
@@ -1263,31 +1095,6 @@ mod tests {
         let eq: EqualizerSettings = serde_json::from_str(&json).unwrap();
 
         assert_eq!(eq.bands, bands);
-    }
-
-    #[test]
-    fn config_deserializes_legacy_single_music_directory() {
-        let json = r#"{
-            "music_directory": "/music"
-        }"#;
-
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-
-        assert_eq!(config.music_directory, vec![PathBuf::from("/music")]);
-    }
-
-    #[test]
-    fn config_deserializes_multiple_music_directories() {
-        let json = r#"{
-            "music_directory": ["/music", "/archive"]
-        }"#;
-
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-
-        assert_eq!(
-            config.music_directory,
-            vec![PathBuf::from("/music"), PathBuf::from("/archive")]
-        );
     }
 
     #[test]

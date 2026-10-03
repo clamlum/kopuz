@@ -146,13 +146,6 @@ impl FavoritesService {
         Ok(())
     }
 
-    /// Ask the reconciler to push soon (debounced): called after an
-    /// in-process favorite mutation by the embedded frontend.
-    pub fn nudge_after_mutation(&self) {
-        self.mutation_nudge.store(true, Ordering::Relaxed);
-        self.nudge.notify_one();
-    }
-
     /// Ask the reconciler to run soon without the after-mutation marker
     /// (the app window regained focus).
     pub fn nudge_activate(&self) {
@@ -165,11 +158,20 @@ impl FavoritesService {
     pub fn spawn_sync(self: &Arc<Self>, runner: &JobRunner) -> Result<JobRef, ApiError> {
         let service = self.clone();
         runner.start(JobKind::FavoritesSync, move |ctx| async move {
+            let source = service
+                .session
+                .config_watch()
+                .borrow()
+                .active_source
+                .clone();
             ctx.progress("reconciling", None, None, None);
             let reconciled = service.reconcile(SyncReason::Manual).await;
             // An explicit sync imports even when the staleness gate would
             // have skipped it; that is what the user asked for.
             service.pull(Some(&ctx), true).await?;
+            if !ctx.cancelled() {
+                crate::auto_sync::mark_synced(&service.db, JobKind::FavoritesSync, &source).await;
+            }
             reconciled
         })
     }
