@@ -9,7 +9,28 @@ pub(super) enum SettingsCategory {
     Downloads,
     Metadata,
     Player,
+    Equalizer,
     Tools,
+}
+
+impl SettingsCategory {
+    pub(super) fn title(self) -> String {
+        i18n::t(self.title_key())
+    }
+
+    pub(super) fn title_key(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Customization => "appearance",
+            Self::Library => "library",
+            Self::Connectivity => "connectivity",
+            Self::Downloads => "offline_downloads",
+            Self::Metadata => "metadata",
+            Self::Player => "player_settings",
+            Self::Equalizer => "equalizer",
+            Self::Tools => "logs",
+        }
+    }
 }
 
 #[component]

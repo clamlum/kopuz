@@ -148,23 +148,26 @@ pub fn PlaylistsPage(
                     }
                 }
             } else {
-                div { class: if is_vaxry { "flex items-center justify-between mb-6" } else { "flex items-center justify-between mb-8" },
-                    if is_vaxry {
-                        div {
-                            p {
-                                class: "text-[10px] font-bold mb-0.5",
-                                style: "color: rgba(255,255,255,0.35);",
-                                "{i18n::t(\"library\")}"
+                div { class: if cfg!(target_os = "android") { "flex items-center justify-end mb-2" } else if is_vaxry { "flex items-center justify-between mb-6" } else { "flex items-center justify-between mb-8" },
+                    // The app header already names the page on Android.
+                    if !cfg!(target_os = "android") {
+                        if is_vaxry {
+                            div {
+                                p {
+                                    class: "text-[10px] font-bold mb-0.5",
+                                    style: "color: rgba(255,255,255,0.35);",
+                                    "{i18n::t(\"library\")}"
+                                }
+                                h1 { class: "text-2xl font-semibold tracking-tight text-white", "{i18n::t(\"playlists\")}" }
                             }
-                            h1 { class: "text-2xl font-semibold tracking-tight text-white", "{i18n::t(\"playlists\")}" }
+                        } else {
+                            h1 { class: "text-3xl font-semibold tracking-tight text-white", "{i18n::t(\"playlists\")}" }
                         }
-                    } else {
-                        h1 { class: "text-3xl font-semibold tracking-tight text-white", "{i18n::t(\"playlists\")}" }
                     }
                     div { class: "flex items-center gap-1",
                         if caps().folders {
                             button {
-                                class: "w-10 h-10 flex items-center justify-center text-white/60 hover:text-white rounded-full hover:bg-white/10 transition-colors active:scale-95",
+                                class: "app-icon-button w-10 h-10 flex items-center justify-center text-white/60 hover:text-white rounded-full hover:bg-white/10 transition-colors active:scale-95",
                                 title: i18n::t("new_folder").to_string(),
                                 onclick: move |_| {
                                     hooks::playlist_actions::create_folder(
@@ -175,7 +178,7 @@ pub fn PlaylistsPage(
                             }
                         }
                         button {
-                            class: "w-10 h-10 flex items-center justify-center text-white/60 hover:text-white rounded-full hover:bg-white/10 transition-colors active:scale-95",
+                            class: "app-icon-button w-10 h-10 flex items-center justify-center text-white/60 hover:text-white rounded-full hover:bg-white/10 transition-colors active:scale-95",
                             title: i18n::t("add_playlist").to_string(),
                             aria_label: i18n::t("add_playlist").to_string(),
                             onclick: move |_| {
@@ -374,7 +377,7 @@ fn PlaylistsGrid(
                                 }
                             }
                             button {
-                                class: "px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white/80 transition-colors disabled:opacity-50",
+                                class: "app-button-tonal px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white/80 transition-colors disabled:opacity-50",
                                 disabled: syncing,
                                 onclick: move |_| {
                                     hooks::jobs::start(hooks::JobKind::PlaylistSync);
@@ -405,11 +408,19 @@ fn PlaylistsGrid(
                         let is_dl = playlist.track_keys.iter().any(|key| downloads.read().is_active(key));
                         let all_downloaded = !playlist.track_keys.is_empty()
                             && playlist.track_keys.iter().all(|key| downloads.read().is_stored(key));
+                        let ctx_pid = playlist.id.clone();
                         rsx! {
                             div {
                                 key: "{playlist.id}",
                                 class: "bg-white/5 border border-white/5 rounded-xl p-6 hover:bg-white/10 transition-all cursor-pointer group relative",
                                 onclick: move |_| selected_playlist_id.set(Some(playlist_id_nav.clone())),
+                                oncontextmenu: move |evt: Event<MouseData>| {
+                                    evt.prevent_default();
+                                    if can_radio {
+                                        components::dots_menu::open_at_pointer(&evt);
+                                        active_menu.set(Some(ctx_pid.clone()));
+                                    }
+                                },
                                 div { class: "mb-4 w-full aspect-square rounded-xl flex items-center justify-center overflow-hidden transition-all bg-white/5",
                                     if let Some(url) = cover_url {
                                         img { src: "{url}", class: "w-full h-full object-cover", decoding: "async", loading: "lazy" }
@@ -438,6 +449,7 @@ fn PlaylistsGrid(
                                                         is_open: is_menu_open,
                                                         on_open: move |_| active_menu.set(Some(pid_menu.clone())),
                                                         on_close: move |_| active_menu.set(None),
+                                                        aria_label: i18n::t_with("more_actions_for", &[("name", playlist.name.clone())]),
                                                         button_class: "opacity-0 group-hover:opacity-100 focus:opacity-100".to_string(),
                                                         anchor: "right".to_string(),
                                                         on_action: move |_: usize| {
@@ -591,11 +603,17 @@ fn folders_layout(ctx: FoldersCtx<'_>) -> Element {
         // Resolved during render, like the track rows' radio: the handler reads
         // context, which an event closure can't do.
         let start_radio = components::radio_actions::playlist_radio_handler(playlist.id.clone());
+        let pid_ctx = playlist.id.clone();
         rsx! {
             div {
                 key: "{pid}",
                 class: "bg-white/5 border border-white/5 rounded-xl p-4 hover:bg-white/10 transition-all cursor-pointer group relative",
                 onclick: move |_| selected_playlist_id.set(Some(pid_click.clone())),
+                oncontextmenu: move |evt| {
+                    evt.prevent_default();
+                    components::dots_menu::open_at_pointer(&evt);
+                    active_menu.set(Some(pid_ctx.clone()));
+                },
                 div { class: "mb-4 w-full h-32 rounded-xl flex items-center justify-center overflow-hidden transition-all bg-white/5",
                     if let Some(url) = cover_url {
                         img {
@@ -626,6 +644,7 @@ fn folders_layout(ctx: FoldersCtx<'_>) -> Element {
                             is_open: is_menu_open,
                             on_open: move |_| active_menu.set(Some(pid_menu.clone())),
                             on_close: move |_| active_menu.set(None),
+                            aria_label: i18n::t_with("more_actions_for", &[("name", name.clone())]),
                             button_class: "opacity-0 group-hover:opacity-100 focus:opacity-100".to_string(),
                             anchor: "right".to_string(),
                             on_action: move |idx: usize| {
@@ -764,11 +783,17 @@ fn folders_layout(ctx: FoldersCtx<'_>) -> Element {
                                         .and_then(|pid| all_playlists.iter().find(|p| p.id == *pid))
                                         .and_then(cover_for);
                                     let folder_actions = folder_actions.clone();
+                                    let fid_ctx = folder.id.clone();
                                     rsx! {
                                         div {
                                             key: "{fid}",
                                             class: "bg-white/5 border border-white/5 rounded-xl p-4 hover:bg-white/10 transition-all cursor-pointer group relative",
                                             onclick: move |_| open_folder_id.set(Some(fid_open.clone())),
+                                            oncontextmenu: move |evt| {
+                                                evt.prevent_default();
+                                                components::dots_menu::open_at_pointer(&evt);
+                                                active_menu.set(Some(fid_ctx.clone()));
+                                            },
                                             div { class: "mb-4 w-full h-32 rounded-xl flex items-center justify-center overflow-hidden transition-all bg-white/5",
                                                 if let Some(url) = cover_url {
                                                     img {
@@ -796,6 +821,7 @@ fn folders_layout(ctx: FoldersCtx<'_>) -> Element {
                                                         is_open: is_menu_open,
                                                         on_open: move |_| active_menu.set(Some(fid_menu.clone())),
                                                         on_close: move |_| active_menu.set(None),
+                                                        aria_label: i18n::t_with("more_actions_for", &[("name", fname.clone())]),
                                                         button_class: "opacity-0 group-hover:opacity-100 focus:opacity-100".to_string(),
                                                         anchor: "right".to_string(),
                                                         on_action: move |idx: usize| {

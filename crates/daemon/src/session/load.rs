@@ -298,6 +298,7 @@ impl Session {
                 )
             });
         let (reply_tx, reply_rx) = oneshot::channel();
+        let service_replay_gain = prepared.track.replay_gain;
         self.player.load(LoadArgs {
             token: prepared.token,
             factory: prepared.factory,
@@ -310,6 +311,8 @@ impl Session {
             },
             transition: prepared.transition,
             start_at: prepared.start_at,
+            album_context: self.album_context_for_token(prepared.token),
+            service_replay_gain,
             reply: Some(reply_tx),
         });
         let token = prepared.token;

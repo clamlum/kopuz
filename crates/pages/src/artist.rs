@@ -4,7 +4,6 @@
 //! delete-from-disk, downloads, playlist mutation) gate on
 //! [`api::SourceCapabilities`] — never on `is_server()`.
 
-use components::dots_menu::{DotsMenu, MenuAction};
 use components::metadata_modal::MetadataModal;
 use components::playlist_modal::PlaylistModal;
 use components::selection_bar::SelectionBar;
@@ -18,16 +17,6 @@ use hooks::use_db_queries::{
     use_active_source, use_albums, use_artist, use_artist_tracks, use_artists, use_tracks_by_keys,
 };
 use std::collections::{HashMap, HashSet};
-
-/// One album-card menu entry, tagged so dispatch survives the entry set being
-/// built dynamically from capabilities (indices shift as entries are gated in).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AlbumAction {
-    Queue,
-    Playlist,
-    DeleteAlbum,
-    Download { downloaded: bool },
-}
 
 #[component]
 pub fn Artist(
@@ -132,8 +121,6 @@ pub fn Artist(
     let mut selected_tracks = use_signal(HashSet::<String>::new);
 
     let mut open_album_menu = use_signal(|| None::<String>);
-    let mut show_album_playlist_modal = use_signal(|| false);
-    let mut pending_album_id_for_playlist = use_signal(|| None::<String>);
 
     // The artist grid: one uniform, source-agnostic image chain per tile
     // (override → photo → pending-placeholder → own album cover → placeholder),
@@ -487,31 +474,6 @@ pub fn Artist(
                         }
 
                         if *sort_order.read() == ArtistViewOrder::Albums {
-                            if *show_album_playlist_modal.read() {
-                                PlaylistModal {
-                                    overlay_class: Some("absolute inset-0 bg-black/80 flex items-center justify-center z-50".to_string()),
-                                    on_close: move |_| show_album_playlist_modal.set(false),
-                                    on_add_to_playlist: move |playlist_id: String| {
-                                        if let Some(album_id) = pending_album_id_for_playlist.read().clone() {
-                                            hooks::library_actions::with_album_keys(album_id, move |keys| {
-                                                hooks::playlist_actions::add_tracks(playlist_id.clone(), keys);
-                                            });
-                                        }
-                                        show_album_playlist_modal.set(false);
-                                        pending_album_id_for_playlist.set(None);
-                                    },
-                                    on_create_playlist: move |playlist_name: String| {
-                                        if let Some(album_id) = pending_album_id_for_playlist.read().clone() {
-                                            hooks::library_actions::with_album_keys(album_id, move |keys| {
-                                                hooks::playlist_actions::create_with(playlist_name.clone(), keys);
-                                            });
-                                        }
-                                        show_album_playlist_modal.set(false);
-                                        pending_album_id_for_playlist.set(None);
-                                    },
-                                }
-                            }
-
                             div { class: "flex items-center justify-between mb-4",
                                 SortOrderToggle { sort_order }
                                 div { class: "flex items-center gap-2",
@@ -545,24 +507,6 @@ pub fn Artist(
                                                         .unwrap_or(false)
                                                 })
                                             };
-                                            // Build the menu from capabilities — entries are tagged so
-                                            // dispatch survives the gating.
-                                            let mut entries: Vec<(MenuAction, AlbumAction)> = vec![
-                                                (MenuAction::new(i18n::t("add_all_to_queue").as_str(), "fa-solid fa-list-ul"), AlbumAction::Queue),
-                                            ];
-                                            if cap.playlists != api::PlaylistCapability::None {
-                                                entries.push((MenuAction::new(i18n::t("add_all_to_playlist").as_str(), "fa-solid fa-plus"), AlbumAction::Playlist));
-                                            }
-                                            if cap.delete_from_disk {
-                                                entries.push((MenuAction::new(i18n::t("delete_album").as_str(), "fa-solid fa-trash").destructive(), AlbumAction::DeleteAlbum));
-                                            }
-                                            if cap.downloads {
-                                                let label = if downloaded { "Remove downloads" } else { "Download Album" };
-                                                let icon = if downloaded { "fa-solid fa-trash" } else { "fa-solid fa-download" };
-                                                entries.push((MenuAction::new(label, icon), AlbumAction::Download { downloaded }));
-                                            }
-                                            let menu_actions: Vec<MenuAction> = entries.iter().map(|(m, _)| m.clone()).collect();
-                                            let action_tags: Vec<AlbumAction> = entries.iter().map(|(_, a)| *a).collect();
                                             rsx! {
                                                 div {
                                                     key: "{album.id}",
@@ -573,6 +517,7 @@ pub fn Artist(
                                                         let id = id_for_menu.clone();
                                                         move |evt| {
                                                             evt.prevent_default();
+                                                            components::dots_menu::open_at_pointer(&evt);
                                                             open_album_menu.set(Some(id.clone()));
                                                         }
                                                     },
@@ -605,51 +550,42 @@ pub fn Artist(
                                                     }
 
                                                     div { class: "vcard-menu absolute bottom-3 right-3",
-                                                        DotsMenu {
-                                                            actions: menu_actions,
-                                                            is_open,
+                                                        components::album_actions::AlbumActionsMenu {
+                                                            album_id: id_for_menu.clone(),
+                                                            album_title: album.title.clone(),
+                                                            artist_key: album.artist_key.clone(),
+                                                            is_open: Some(is_open),
                                                             on_open: {
                                                                 let id = id_for_menu.clone();
-                                                                move |_| open_album_menu.set(Some(id.clone()))
+                                                                Some(EventHandler::new(move |_| open_album_menu.set(Some(id.clone()))))
                                                             },
-                                                            on_close: move |_| open_album_menu.set(None),
+                                                            on_close: Some(EventHandler::new(move |_| open_album_menu.set(None))),
                                                             button_class: "opacity-0 group-hover:opacity-100 focus:opacity-100 bg-black/40".to_string(),
                                                             anchor: "right".to_string(),
-                                                            on_action: {
+                                                            is_downloaded: downloaded,
+                                                            on_delete: cap.delete_from_disk.then(|| {
                                                                 let id = id_for_menu.clone();
-                                                                let tags = action_tags.clone();
-                                                                move |idx: usize| {
+                                                                EventHandler::new(move |_| {
                                                                     open_album_menu.set(None);
-                                                                    let Some(tag) = tags.get(idx).copied() else { return };
-                                                                    match tag {
-                                                                        AlbumAction::Queue => {
-                                                                            hooks::library_actions::with_album_keys(id.clone(), move |keys| {
-                                                                                let mut ctrl = ctrl;
-                                                                                ctrl.set_queue_keys(keys, api::QueueMode::Append, None);
-                                                                            });
+                                                                    hooks::library_actions::delete_album(
+                                                                        id.clone(),
+                                                                        true,
+                                                                    );
+                                                                })
+                                                            }),
+                                                            on_download: cap.downloads.then(|| {
+                                                                let id = id_for_menu.clone();
+                                                                EventHandler::new(move |_| {
+                                                                    open_album_menu.set(None);
+                                                                    hooks::library_actions::with_album_keys(id.clone(), move |keys| {
+                                                                        if downloaded {
+                                                                            hooks::downloads::remove(keys);
+                                                                        } else {
+                                                                            hooks::downloads::start(keys);
                                                                         }
-                                                                        AlbumAction::Playlist => {
-                                                                            pending_album_id_for_playlist.set(Some(id.clone()));
-                                                                            show_album_playlist_modal.set(true);
-                                                                        }
-                                                                        AlbumAction::DeleteAlbum => {
-                                                                            hooks::library_actions::delete_album(
-                                                                                id.clone(),
-                                                                                caps().delete_from_disk,
-                                                                            );
-                                                                        }
-                                                                        AlbumAction::Download { downloaded } => {
-                                                                            hooks::library_actions::with_album_keys(id.clone(), move |keys| {
-                                                                                if downloaded {
-                                                                                    hooks::downloads::remove(keys);
-                                                                                } else {
-                                                                                    hooks::downloads::start(keys);
-                                                                                }
-                                                                            });
-                                                                        }
-                                                                    }
-                                                                }
-                                                            },
+                                                                    });
+                                                                })
+                                                            }),
                                                         }
                                                     }
                                                 }
@@ -753,12 +689,6 @@ pub fn Artist(
                                     if let Some(track) = artist_tracks().get(idx) {
                                         selected_track_for_playlist.set(Some(track.key.clone()));
                                         show_playlist_modal.set(true);
-                                        active_menu_track.set(None);
-                                    }
-                                },
-                                on_queue: move |idx: usize| {
-                                    if let Some(track) = artist_tracks().get(idx) {
-                                        ctrl.add_to_queue(vec![track.clone()]);
                                         active_menu_track.set(None);
                                     }
                                 },

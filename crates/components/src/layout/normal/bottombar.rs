@@ -25,6 +25,18 @@ pub fn BottombarNormal(
     is_devices_open: Signal<bool>,
 ) -> Element {
     let mut ctrl = use_context::<PlayerController>();
+    let mut track_menu_open = use_signal(|| false);
+    // A menu left open across a track change would act on the new track.
+    let menu_track_key = use_memo(move || {
+        ctrl.current_track_snapshot
+            .read()
+            .as_ref()
+            .map(|track| track.key.clone())
+    });
+    use_effect(move || {
+        menu_track_key.read();
+        track_menu_open.set(false);
+    });
     let nav_ctrl = use_context::<NavigationController>();
     let fav_track = use_memo(move || ctrl.current_track_snapshot.read().clone());
     let is_fav = hooks::use_db_queries::use_track_is_favorite(fav_track);
@@ -57,7 +69,7 @@ pub fn BottombarNormal(
             div {
                 // The tab bar underneath owns the bottom safe area; the pill
                 // only needs to clear it.
-                class: "shrink-0 mx-2 mb-2 h-[68px] bg-[#121212]/95 backdrop-blur-3xl border border-white/10 rounded-[24px] flex items-center px-3 gap-3 relative overflow-hidden shadow-[0_12px_40px_rgba(0,0,0,0.8)]",
+                class: "player-bar player-bar-mobile shrink-0 mx-2 mb-2 h-[68px] bg-(--surface-chrome-raised)/95 backdrop-blur-3xl border border-white/10 rounded-[24px] flex items-center px-3 gap-3 relative overflow-hidden shadow-[0_12px_40px_rgba(0,0,0,0.8)]",
                 onclick: move |_| is_fullscreen.set(true),
                 ontouchstart: move |evt| bar_swipe.start(&evt),
                 ontouchmove: move |evt| bar_swipe.update(&evt),
@@ -84,7 +96,7 @@ pub fn BottombarNormal(
                 }
                 div { class: "flex items-center gap-1 pr-1", dir: "ltr",
                     button {
-                        class: "w-12 h-12 flex items-center justify-center text-white text-xl active:scale-90 transition-transform",
+                        class: "playback-play w-12 h-12 flex items-center justify-center text-white text-xl active:scale-90 transition-transform",
                         onclick: move |evt| { evt.stop_propagation(); ctrl.toggle(); },
                         i { class: if *is_playing.read() { "fa-solid fa-pause" } else { "fa-solid fa-play ml-1" } }
                     }
@@ -124,6 +136,12 @@ pub fn BottombarNormal(
         PlayerBarPosition::Top => "border-b border-white/5",
     };
 
+    // The bar sits against one edge of the window, so the menu has to open
+    // away from it.
+    let menu_placement = match position {
+        PlayerBarPosition::Bottom => "top",
+        PlayerBarPosition::Top => "bottom",
+    };
     let bar_as_fullscreen = *is_fullscreen.read() && config.read().fullscreen_use_player_bar;
     let lift_class = if bar_as_fullscreen {
         "relative z-[60]"
@@ -139,13 +157,20 @@ pub fn BottombarNormal(
 
     rsx! {
         div {
-            class: "h-24 {bg_class} {border_class} {lift_class} px-4 flex items-center justify-between select-text shrink-0",
+            class: "player-bar h-24 {bg_class} {border_class} {lift_class} px-4 flex items-center justify-between select-text shrink-0",
 
             div {
-                class: "flex items-center gap-4 w-1/4",
+                class: "player-track flex items-center gap-4 w-1/4",
+                oncontextmenu: move |evt| {
+                    evt.prevent_default();
+                    if ctrl.current_track_snapshot.peek().is_some() {
+                        crate::dots_menu::open_at_pointer(&evt);
+                        track_menu_open.set(true);
+                    }
+                },
                 if !bar_as_fullscreen {
                     div {
-                        class: "w-14 h-14 bg-white/5 rounded-md flex-shrink-0 overflow-hidden",
+                        class: "player-cover w-14 h-14 bg-white/5 rounded-md flex-shrink-0 overflow-hidden",
                         if cover.is_empty() {
                             div {
                                 class: "w-full h-full flex items-center justify-center",
@@ -198,7 +223,7 @@ pub fn BottombarNormal(
             }
 
             div {
-                class: "flex items-center justify-end gap-4 w-1/4",
+                class: "player-tools flex items-center justify-end gap-4 w-1/4",
                 VolumeSlider { config, volume, persisted_volume, variant: ControlsVariant::Bar }
                 button {
                     class: "w-9 h-9 rounded-full flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-colors active:scale-95",
@@ -209,15 +234,15 @@ pub fn BottombarNormal(
                     is_rightbar_open,
                     is_devices_open,
                 }
-                button {
-                    class: "w-9 h-9 rounded-full flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-colors active:scale-95",
-                    title: i18n::t("share_musicbrainz").to_string(),
-                    onclick: move |_| {
-                        if let Some(t) = ctrl.current_track_snapshot.read().clone() {
-                            crate::track_row::share_track(t);
-                        }
-                    },
-                    i { class: "fa-solid fa-share-nodes text-xs" }
+                if let Some(track) = ctrl.current_track_snapshot.read().clone() {
+                    crate::track_actions::TrackActionsMenu {
+                        track,
+                        is_open: Some(track_menu_open()),
+                        on_open: Some(EventHandler::new(move |_| track_menu_open.set(true))),
+                        on_close: Some(EventHandler::new(move |_| track_menu_open.set(false))),
+                        placement: menu_placement.to_string(),
+                        button_class: "w-9 h-9 hover:bg-white/10 active:scale-95 text-xs".to_string(),
+                    }
                 }
                 if cfg!(not(target_os = "android")) {
                     button {

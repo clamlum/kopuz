@@ -158,10 +158,8 @@ pub fn LibraryPage(
                 let idx = row_offset + i;
                 let track_menu = track.clone();
                 let track_add = track.clone();
-                let track_queue = track.clone();
                 let track_meta = track.clone();
                 let track_delete = track.clone();
-                let track_radio = track.clone();
                 let track_path = track.key.clone();
                 let track_select = track.key.clone();
                 let track_key = track.uid.clone();
@@ -230,10 +228,6 @@ pub fn LibraryPage(
                                 show_playlist_modal.set(true);
                                 active_menu_track.set(None);
                             },
-                            on_queue: move |_| {
-                                ctrl.add_to_queue(vec![track_queue.clone()]);
-                                active_menu_track.set(None);
-                            },
                             on_close_menu: move |_| active_menu_track.set(None),
                             on_view_metadata: caps().edit_tags.then(|| EventHandler::new(move |_| {
                                 metadata_track.set(Some(track_meta.clone()));
@@ -254,7 +248,6 @@ pub fn LibraryPage(
                                     );
                                 }
                             })),
-                            on_start_radio: components::track_row::radio_handler(track_radio.key.clone()),
                             on_play: move |_| {
                                 let api = hooks::consume_api();
                                 let f = filter();
@@ -385,7 +378,7 @@ pub fn LibraryPage(
                     h1 { class: "text-3xl font-semibold tracking-tight text-white", "{i18n::t(\"your_library\")}" }
                 }
                 button {
-                    class: "w-9 h-9 flex items-center justify-center text-white/60 hover:text-white rounded-full hover:bg-white/10 transition-colors active:scale-95",
+                    class: "app-icon-button w-9 h-9 flex items-center justify-center text-white/60 hover:text-white rounded-full hover:bg-white/10 transition-colors active:scale-95",
                     title: if caps().scan_folders { i18n::t("rescan_library").to_string() } else { i18n::t("refresh_music_library").to_string() },
                     onclick: move |_| {
                         if caps().scan_folders {

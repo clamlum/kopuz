@@ -77,6 +77,14 @@ pub fn Radio(props: RadioProps) -> Element {
     let mut ctrl = use_context::<PlayerController>();
     let config = props.config;
     let is_vaxry = config.read().ui_style == UiStyle::Vaxry;
+    // A phone has no room for the description column, so a row is the
+    // station and its play controls.
+    let phone = cfg!(target_os = "android");
+    let station_cols = if phone {
+        "40px minmax(0, 1fr) auto"
+    } else {
+        "48px 1fr 1.5fr 180px"
+    };
     let api = hooks::use_api();
 
     // Search / filter
@@ -151,19 +159,21 @@ pub fn Radio(props: RadioProps) -> Element {
 
                 if is_vaxry {
                     div { class: "mb-6 flex items-end justify-between",
-                        div {
-                            p {
-                                class: "text-[10px] font-bold mb-1",
-                                style: "color: rgba(255,255,255,0.35);",
-                                "{i18n::t(\"discover\")}"
-                            }
-                            h1 {
-                                class: "text-2xl font-semibold tracking-tight text-white",
-                                "{i18n::t(\"radio\")}"
+                        if !cfg!(target_os = "android") {
+                            div {
+                                p {
+                                    class: "text-[10px] font-bold mb-1",
+                                    style: "color: rgba(255,255,255,0.35);",
+                                    "{i18n::t(\"discover\")}"
+                                }
+                                h1 {
+                                    class: "text-2xl font-semibold tracking-tight text-white",
+                                    "{i18n::t(\"radio\")}"
+                                }
                             }
                         }
                         // Search — Vaxry
-                        div { class: "relative w-64",
+                        div { class: if cfg!(target_os = "android") { "relative w-full" } else { "relative w-64" },
                             i {
                                 class: "fa-solid fa-magnifying-glass absolute top-1/2 -translate-y-1/2 text-xs",
                                 style: "left: 12px; color: rgba(255,255,255,0.3);",
@@ -217,7 +227,7 @@ pub fn Radio(props: RadioProps) -> Element {
                             input {
                                 r#type: "text",
                                 placeholder: "{i18n::t(\"radio_search_stations\")}",
-                                class: "w-full bg-white/10 border border-white/10 rounded-full py-2.5 pl-12 pr-4 text-sm text-white focus:outline-none focus:border-white/25 transition-colors",
+                                class: "app-search-field w-full bg-white/10 border border-white/10 rounded-full py-2.5 pl-12 pr-4 text-sm text-white focus:outline-none focus:border-white/25 transition-colors",
                                 oninput: {
                                     let debounce_gen = debounce_gen.clone();
                                     move |evt| {
@@ -241,7 +251,7 @@ pub fn Radio(props: RadioProps) -> Element {
                 // ── Custom registry stations (user-added registries) ────────────
                 if has_custom {
                     h2 {
-                        class: if is_vaxry { "text-[10px] font-bold mb-2" } else { "text-sm font-bold mb-3 uppercase tracking-wider" },
+                        class: if is_vaxry { "text-[10px] font-bold mb-2" } else { "app-section-label text-sm font-bold mb-3 uppercase tracking-wider" },
                         style: if is_vaxry { "color: rgba(255,255,255,0.35);" } else { "color: var(--color-slate-400);" },
                         "{i18n::t(\"radio_selected\")}"
                     }
@@ -252,8 +262,8 @@ pub fn Radio(props: RadioProps) -> Element {
                     if has_custom {
                         div { class: "flex flex-col mb-8",
                             div {
-                                class: "grid px-4 py-2 text-[10px] font-bold border-b mb-1",
-                                style: "grid-template-columns: 48px 1fr 1.5fr 180px; color: rgba(255,255,255,0.25); border-color: rgba(255,255,255,0.06);",
+                                class: if phone { "hidden" } else { "grid px-4 py-2 text-[10px] font-bold border-b mb-1" },
+                                style: "grid-template-columns: {station_cols}; color: rgba(255,255,255,0.25); border-color: rgba(255,255,255,0.06);",
                                 div {}
                                 div { class: "text-left", "{i18n::t(\"radio_station_col\")}" }
                                 div { class: "text-left", "{i18n::t(\"radio_description_col\")}" }
@@ -274,7 +284,7 @@ pub fn Radio(props: RadioProps) -> Element {
 
                                     div {
                                         class: "grid items-center px-4 py-2.5",
-                                        style: "grid-template-columns: 48px 1fr 1.5fr 180px;",
+                                        style: "grid-template-columns: {station_cols};",
 
                                         div { class: "flex items-center justify-center",
                                             div {
@@ -294,7 +304,7 @@ pub fn Radio(props: RadioProps) -> Element {
                                             }
                                         }
 
-                                        div { class: "flex items-center justify-start text-left min-w-0 pr-4 gap-2",
+                                        div { class: if phone { "hidden" } else { "flex items-center justify-start text-left min-w-0 pr-4 gap-2" },
                                             span {
                                                 class: "text-sm truncate",
                                                 style: "color: rgba(255,255,255,0.4);",
@@ -326,7 +336,7 @@ pub fn Radio(props: RadioProps) -> Element {
                                                     i { class: "fa-solid fa-play text-xs" }
                                                 }
                                             } else {
-                                                if station.streams.len() == 2 {
+                                                if station.streams.len() == 2 && !phone {
                                                     for stream in &station.streams {
                                                         button {
                                                             class: "inline-flex items-center gap-2 h-8 px-4 rounded-full text-sm font-medium transition-all hover:opacity-90 active:scale-95 whitespace-nowrap",
@@ -468,7 +478,7 @@ pub fn Radio(props: RadioProps) -> Element {
                                             div { class: "flex flex-wrap items-center gap-2 mt-2.5",
                                                 for stream in &station.streams {
                                                     button {
-                                                        class: "px-3 py-1 rounded-lg text-xs font-medium bg-white/10 hover:bg-white/20 transition-colors hover:text-white",
+                                                        class: "app-chip px-3 py-1 rounded-lg text-xs font-medium bg-white/10 hover:bg-white/20 transition-colors hover:text-white",
                                                         style: "color: var(--color-slate-300);",
                                                         onclick: {
                                                             let station_id = station.id.clone();
@@ -493,7 +503,7 @@ pub fn Radio(props: RadioProps) -> Element {
                 // radio-browser.info directory
                 div { class: "flex items-end justify-between mb-3",
                     h2 {
-                        class: if is_vaxry { "text-[10px] font-bold" } else { "text-sm font-bold uppercase tracking-wider" },
+                        class: if is_vaxry { "text-[10px] font-bold" } else { "app-section-label text-sm font-bold uppercase tracking-wider" },
                         style: if is_vaxry { "color: rgba(255,255,255,0.35);" } else { "color: var(--color-slate-400);" },
                         if searching {
                             "{i18n::t(\"radio_search_results\")}"
@@ -561,7 +571,7 @@ pub fn Radio(props: RadioProps) -> Element {
                                         div {
                                             key: "{st.id}",
                                             class: "grid items-center px-4 py-2.5 rounded-lg mx-1 group cursor-pointer transition-colors hover:bg-white/[0.04]",
-                                            style: "grid-template-columns: 48px 1fr 1.5fr 180px;",
+                                            style: "grid-template-columns: {station_cols};",
                                             onclick: {
                                                 let st = st.clone();
                                                 move |_| {
@@ -596,7 +606,7 @@ pub fn Radio(props: RadioProps) -> Element {
                                                 }
                                             }
 
-                                            div { class: "flex items-center justify-start text-left min-w-0 pr-4 gap-2",
+                                            div { class: if phone { "hidden" } else { "flex items-center justify-start text-left min-w-0 pr-4 gap-2" },
                                                 span {
                                                     class: "text-sm truncate",
                                                     style: "color: rgba(255,255,255,0.4);",

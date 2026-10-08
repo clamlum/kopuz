@@ -37,6 +37,11 @@ const TABS: &[Tab] = &[
     },
 ];
 
+/// i18n key of the Settings category open as a page on Android; a key so the
+/// header follows a language change.
+#[derive(Clone, Copy)]
+pub struct SettingsSubpage(pub Signal<Option<&'static str>>);
+
 /// Whether the tab bar already offers this route. The drawer drops these on
 /// Android so the two bars never list the same destination twice.
 pub fn is_tab_route(route: Route) -> bool {
@@ -68,7 +73,7 @@ pub fn TabBar(current_route: Signal<Route>, on_navigate: EventHandler<Route>) ->
 
     rsx! {
         nav {
-            class: "shrink-0 flex items-stretch bg-[#0a0a0a]/95 backdrop-blur-3xl border-t border-white/10 pb-[env(safe-area-inset-bottom)]",
+            class: "app-tabbar shrink-0 flex items-stretch bg-(--surface-chrome)/95 backdrop-blur-3xl border-t border-white/10 pb-[env(safe-area-inset-bottom)]",
             dir: "ltr",
             for tab in TABS {
                 {

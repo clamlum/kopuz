@@ -34,23 +34,14 @@ mod desktop_shell;
 #[cfg(not(target_os = "android"))]
 mod exit_flush;
 mod logging;
+mod material3;
+mod static_assets;
 #[cfg(not(target_os = "android"))]
 mod ui_profile;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows_titlebar;
 
-const FAVICON: &str = include_str!(concat!(env!("OUT_DIR"), "/favicon.uri"));
-// CSS/fonts are compiled in (not `asset!()`-collected) so styling works under a
-// bare `cargo run` — see `build.rs::embed_fonts`, which bakes the font data: URIs.
-// The `OUT_DIR` ones pass through it; main.css does too, for its nasin-nanpa
-// @font-face (themes/tailwind/reduced have no font refs, so they're verbatim).
-const MAIN_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/main.css"));
-const THEME_CSS: &str = include_str!("../assets/themes.css");
-const TAILWIND_CSS: &str = include_str!("../assets/tailwind.css");
-const REDUCED_ANIMATIONS_CSS: &str = include_str!("../assets/reduced-animations.css");
-const FONT_AWESOME_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/fontawesome.css"));
-const JETBRAINS_MONO_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/jetbrains-mono.css"));
 #[cfg(target_os = "windows")]
 const TOOLBAR_ICONS: Asset = asset!("../assets/toolbar_icons", AssetOptions::folder());
 /// Store saves (config/library/playlists/favorites) are full-replace and
@@ -128,20 +119,6 @@ fn WindowsToolbarIconAssets() -> Element {
 #[component]
 fn WindowsToolbarIconAssets() -> Element {
     rsx! {}
-}
-
-#[component]
-fn StaticHeadAssets() -> Element {
-    rsx! {
-        document::Link { rel: "icon", href: FAVICON }
-        document::Style { {MAIN_CSS} }
-        document::Style { {THEME_CSS} }
-        document::Style { {TAILWIND_CSS} }
-        document::Style { {REDUCED_ANIMATIONS_CSS} }
-        // fonts
-        document::Style { {JETBRAINS_MONO_CSS} }
-        document::Style { {FONT_AWESOME_CSS} }
-    }
 }
 
 /// Hand the Android trust store to rustls before anything opens a TLS
@@ -246,7 +223,9 @@ fn main() -> std::process::ExitCode {
         let config = dioxus::desktop::Config::new()
             .with_custom_head(
                 "<style>html,body{background:#000;margin:0;padding:0}body{opacity:0}</style>"
-                    .to_string(),
+                    .to_string()
+                    + &static_assets::head()
+                    + desktop_shell::UNGATE_EDITS_FROM_FRAME_CLOCK,
             )
             .with_background_color((0, 0, 0, 255))
             .with_data_directory(webview_data_dir)
@@ -357,7 +336,7 @@ fn main() -> std::process::ExitCode {
 </script>"#;
 
         let config = dioxus::mobile::Config::new()
-            .with_custom_head(APPLY_EDITS_WITHOUT_RAF.to_string())
+            .with_custom_head(static_assets::head() + APPLY_EDITS_WITHOUT_RAF)
             .with_background_color((0, 0, 0, 255));
 
         dioxus::LaunchBuilder::mobile().with_cfg(config).launch(App);
@@ -1033,6 +1012,8 @@ fn App() -> Element {
     ));
     provide_context(scroll_positions);
     provide_context(components::source_switcher::SettingsAnchor(settings_anchor));
+    let mut settings_subpage = use_signal(|| None::<&'static str>);
+    provide_context(components::tabbar::SettingsSubpage(settings_subpage));
     let mut nav_history = use_signal(Vec::<components::NavSnapshot>::new);
     let mut nav_restoring = use_signal(|| false);
     let mut nav_last = use_signal(|| None::<components::NavSnapshot>);
@@ -1249,7 +1230,7 @@ fn App() -> Element {
         let theme = config.read().theme.clone();
         if theme == "album-art" {
             "theme-default".to_string()
-        } else if theme == utils::live_theme::THEME_ID {
+        } else if theme == utils::live_theme::THEME_ID || theme == "system" {
             // A palette can be partial, or not written yet, so the default sits
             // underneath to keep every var resolving. The injected `.theme-live`
             // block lands later in <head>, so it still wins.
@@ -1277,7 +1258,7 @@ fn App() -> Element {
         {
             utils::color::get_background_style(palette.read().as_deref())
         } else {
-            "background-color: var(--color-black); background-image: none;".to_string()
+            "background-color: var(--md-sys-color-surface, var(--color-black)); background-image: none;".to_string()
         }
     });
 
@@ -1301,8 +1282,12 @@ fn App() -> Element {
     use_future(move || async move {
         let mut is_devices_open = is_devices_open;
         let mut is_rightbar_open = is_rightbar_open;
+        let mut settings_subpage = settings_subpage;
         loop {
             player::systemint::wait_back_pressed().await;
+            if components::dots_menu::close_open_sheet().await {
+                continue;
+            }
             if *show_quick_search.peek() {
                 show_quick_search.set(false);
             } else if *is_devices_open.peek() {
@@ -1313,6 +1298,9 @@ fn App() -> Element {
                 is_fullscreen.set(false);
             } else if !*is_sidebar_collapsed.peek() {
                 is_sidebar_collapsed.set(true);
+            } else if *current_route.peek() == Route::Settings && settings_subpage.peek().is_some()
+            {
+                settings_subpage.set(None);
             } else if !nav_history.peek().is_empty() {
                 nav_ctrl.go_back();
             } else {
@@ -1367,9 +1355,8 @@ fn App() -> Element {
     });
 
     rsx! {
-        // we use this component here to prevent re-diffing to prevent warns in console
-        StaticHeadAssets {}
         WindowsToolbarIconAssets {}
+        material3::SystemColors { config, artwork: palette }
 
         div {
             id: "app-root",
@@ -1383,6 +1370,7 @@ fn App() -> Element {
             },
             dir: "{dir}",
             "data-platform": if cfg!(target_os = "android") { "android" } else { "desktop" },
+            "data-ui-style": config.read().ui_style.as_str(),
             "data-reduce-animations": "{reduce_animations}",
             tabindex: "0",
             autofocus: true,
@@ -1567,7 +1555,7 @@ fn App() -> Element {
                 }
             }
             div {
-                class: "{content_row_class}",
+                class: "app-content {content_row_class}",
                 ontouchstart: move |evt| open_swipe.start(&evt),
                 ontouchmove: move |evt| open_swipe.update(&evt),
                 ontouchend: on_open_swipe,
@@ -1610,6 +1598,10 @@ fn App() -> Element {
                                 Route::Playlists => selected_playlist_id.read().is_some(),
                                 _ => false,
                             };
+                            let settings_title = (*current_route.read() == Route::Settings)
+                                .then(|| *settings_subpage.read())
+                                .flatten()
+                                .map(i18n::t);
                             let page_title = match *current_route.read() {
                                 Route::Home => i18n::t("home"),
                                 Route::Search => i18n::t("search"),
@@ -1618,30 +1610,42 @@ fn App() -> Element {
                                 Route::Artist => if is_details { i18n::t("artist") } else { i18n::t("artists") },
                                 Route::Playlists => i18n::t("playlists"),
                                 Route::Favorites => i18n::t("favorites"),
-                                Route::Settings => i18n::t("settings"),
-                                _ => i18n::t("home"),
+                                Route::Discover | Route::DiscoverPlaylist => i18n::t("discover"),
+                                Route::Radio => i18n::t("radio"),
+                                Route::Activity => i18n::t("activity"),
+                                Route::Settings => settings_title.clone().unwrap_or_else(|| i18n::t("settings")),
+                                #[cfg(not(target_os = "android"))]
+                                Route::Downloader | Route::ThemeEditor => i18n::t("home"),
                             };
                             let has_image_background = config.read().cover_art_background
                                 || !config.read().custom_background_path.is_empty();
                             rsx! {
-                                div { class: if has_image_background { "shrink-0 z-[60] bg-black/30 backdrop-blur-xl border-b border-white/5 flex items-center h-11 px-3" } else { "shrink-0 z-[60] bg-black/60 backdrop-blur-2xl border-b border-white/5 flex items-center h-11 px-3 shadow-xl" },
+                                div { class: if has_image_background { "app-topbar shrink-0 z-[60] bg-black/30 backdrop-blur-xl border-b border-white/5 flex items-center h-11 px-3" } else { "app-topbar shrink-0 z-[60] bg-black/60 backdrop-blur-2xl border-b border-white/5 flex items-center h-11 px-3 shadow-xl" },
                                     if is_details {
                                         button {
-                                            class: "w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
+                                            class: "app-icon-button w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
+                                            aria_label: i18n::t("go_back"),
                                             onclick: move |_| nav_ctrl.go_back(),
+                                            i { class: "fa-solid fa-arrow-left text-lg" }
+                                        }
+                                    } else if settings_title.is_some() {
+                                        button {
+                                            class: "app-icon-button w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
+                                            aria_label: i18n::t("go_back"),
+                                            onclick: move |_| settings_subpage.set(None),
                                             i { class: "fa-solid fa-arrow-left text-lg" }
                                         }
                                     } else {
                                         button {
-                                            class: "w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
+                                            class: "app-icon-button w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
                                             onclick: move |_| is_sidebar_collapsed.toggle(),
                                             i { class: "fa-solid fa-bars text-lg" }
                                         }
                                     }
                                     div { class: "flex-1 flex justify-center pr-10",
                                         h2 {
-                                            class: "text-[13px] font-black tracking-[0.2em] text-white/90 uppercase",
-                                            style: "font-family: 'kopuz-custom-font', 'JetBrains Mono', monospace;",
+                                            class: "app-topbar-title text-[13px] font-black tracking-[0.2em] text-white/90 uppercase",
+                                            style: if config.read().ui_style != config::UiStyle::Material3 { "font-family: 'kopuz-custom-font', 'JetBrains Mono', monospace;" },
                                             "{page_title}"
                                         }
                                     }

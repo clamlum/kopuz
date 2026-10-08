@@ -1,4 +1,6 @@
-use config::{AppConfig, BackBehavior, ChannelMode, DeviceChangeBehavior, SampleRateMode};
+use config::{
+    AppConfig, BackBehavior, ChannelMode, DeviceChangeBehavior, ReplayGainMode, SampleRateMode,
+};
 use dioxus::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -22,14 +24,16 @@ pub fn SettingItem(
     /// for controls too wide for a row (the equalizer graph).
     #[props(default)]
     stacked: bool,
+    #[props(default)] nested: bool,
 ) -> Element {
     let locked = try_consume_context::<hooks::config_view::LockedKeys>().is_some_and(|layers| {
         (!config_key.is_empty() && layers.is_locked(&config_key))
             || extra_config_keys.iter().any(|key| layers.is_locked(key))
     });
+    let nested_class = if nested { "settings-row-nested" } else { "" };
     rsx! {
         div {
-            class: if stacked { "settings-row px-5 py-4" } else { "settings-row flex items-center justify-between gap-5 px-5 py-2.5" },
+            class: if stacked { "settings-row {nested_class} px-5 py-4" } else { "settings-row {nested_class} flex items-center justify-between gap-5 px-5 py-2.5" },
             div {
                 class: if stacked { "flex items-center gap-2 mb-3" } else { "min-w-0 flex items-center gap-2" },
                 p { class: "min-w-0 text-sm text-white/90 font-medium", "{title}" }
@@ -64,6 +68,14 @@ pub fn SettingItem(
 pub fn SettingsSection(title: String, children: Element) -> Element {
     let mut expanded = use_signal(|| true);
 
+    if cfg!(target_os = "android") {
+        return rsx! {
+            section { class: "settings-section rounded-xl overflow-visible",
+                div { class: "settings-section-body divide-y divide-white/[0.07]", {children} }
+            }
+        };
+    }
+
     rsx! {
         section { class: "settings-section rounded-xl overflow-visible",
             button {
@@ -80,6 +92,13 @@ pub fn SettingsSection(title: String, children: Element) -> Element {
                 div { class: "settings-section-body divide-y divide-white/[0.07]", {children} }
             }
         }
+    }
+}
+
+#[component]
+pub fn SettingsGroup(label: String) -> Element {
+    rsx! {
+        div { class: "settings-subsection-label", "{label}" }
     }
 }
 
@@ -115,6 +134,14 @@ pub fn AppSelect(
         .map(|(_, label)| label.as_str())
         .unwrap_or(value.as_str());
     let open_class = if open() { "z-[70]" } else { "z-0" };
+    let (backdrop_class, menu_class) = if cfg!(target_os = "android") {
+        (
+            "app-select-sheet-backdrop",
+            "app-select-menu app-select-sheet kopuz-sheet-in",
+        )
+    } else {
+        ("fixed inset-0 z-0 cursor-default", "app-select-menu")
+    };
     let active_option_id = format!("app-select-option-{instance_id}-{}", active_index());
     let keyboard_options = options.clone();
     let keyboard_trigger_id = trigger_id.clone();
@@ -236,7 +263,7 @@ pub fn AppSelect(
             if open() {
                 button {
                     r#type: "button",
-                    class: "fixed inset-0 z-0 cursor-default",
+                    class: "{backdrop_class}",
                     aria_label: "Close menu",
                     onclick: move |_| {
                         open.set(false);
@@ -251,7 +278,7 @@ pub fn AppSelect(
                     id: "{menu_id}",
                     role: "listbox",
                     aria_labelledby: "{trigger_id}",
-                    class: "app-select-menu",
+                    class: "{menu_class}",
                     onwheel: move |event| event.stop_propagation(),
                     for (index, (option_value, label)) in options.iter().enumerate() {
                         {
@@ -319,6 +346,7 @@ pub fn ThemeSelector(current_theme: String, on_change: EventHandler<String>) -> 
         .collect();
     custom.sort_by(|a, b| a.1.cmp(&b.1));
     let mut options = vec![
+        ("system".into(), i18n::t("system_colors")),
         ("album-art".into(), i18n::t("album_art_gradient")),
         ("default".into(), i18n::t("default_theme")),
         ("amoled".into(), i18n::t("amoled_black")),
@@ -390,7 +418,7 @@ pub fn ToggleSetting(enabled: bool, on_change: EventHandler<bool>) -> Element {
 
     rsx! {
         div {
-            class: "bg-white/5 p-1 rounded-xl flex relative h-10 items-center border border-white/5 w-48",
+            class: "settings-toggle bg-white/5 p-1 rounded-xl flex relative h-10 items-center border border-white/5 w-48",
             div {
                 class: "absolute h-8 bg-white/10 rounded-lg transition-all duration-300 ease-out",
                 style: "{slider_style}"
@@ -398,11 +426,13 @@ pub fn ToggleSetting(enabled: bool, on_change: EventHandler<bool>) -> Element {
             button {
                 class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {enable_class}",
                 onclick: move |_| on_change.call(true),
+                aria_pressed: enabled,
                 "{i18n::t(\"enabled\")}"
             }
             button {
                 class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {disable_class}",
                 onclick: move |_| on_change.call(false),
+                aria_pressed: !enabled,
                 "{i18n::t(\"disabled\")}"
             }
         }
@@ -440,7 +470,7 @@ pub fn BackBehaviorSelector(
 
     rsx! {
         div {
-            class: "bg-white/5 p-1 rounded-xl flex relative h-10 items-center border border-white/5 w-48",
+            class: "settings-toggle bg-white/5 p-1 rounded-xl flex relative h-10 items-center border border-white/5 w-48",
             div {
                 class: "absolute h-8 bg-white/10 rounded-lg transition-all duration-300 ease-out",
                 style: "{slider_style}"
@@ -449,12 +479,14 @@ pub fn BackBehaviorSelector(
                 class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {rewind_class}",
                 title: "{i18n::t(\"back_behavior_rewind\")}",
                 onclick: move |_| on_change.call(BackBehavior::RewindThenPrev),
+                aria_pressed: is_rewind,
                 "{i18n::t(\"back_behavior_rewind\")}"
             }
             button {
                 class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {always_class}",
                 title: "{i18n::t(\"back_behavior_always_prev\")}",
                 onclick: move |_| on_change.call(BackBehavior::AlwaysPrev),
+                aria_pressed: !is_rewind,
                 "{i18n::t(\"back_behavior_always_prev\")}"
             }
         }
@@ -509,6 +541,64 @@ pub fn SampleRateModeSelector(
             options,
             on_change: move |value: String| on_change.call(SampleRateMode::from_value_str(&value)),
             class: "settings-select",
+        }
+    }
+}
+
+#[component]
+pub fn ReplayGainModeSelector(
+    current: ReplayGainMode,
+    on_change: EventHandler<ReplayGainMode>,
+) -> Element {
+    let options = ReplayGainMode::ALL
+        .iter()
+        .map(|mode| (mode.value_str().to_string(), i18n::t(mode.i18n_key())))
+        .collect();
+    rsx! {
+        AppSelect {
+            value: current.value_str().to_string(),
+            options,
+            on_change: move |value: String| on_change.call(ReplayGainMode::from_value_str(&value)),
+            class: "settings-select",
+        }
+    }
+}
+
+/// Inline style for a settings range input: the accent colour, plus how far
+/// along the value sits as `--fill`. A native range input exposes no fill of
+/// its own, and the Material 3 style paints its active track from this.
+pub fn range_style(value: f64, min: f64, max: f64) -> String {
+    let fill = if max > min {
+        ((value - min) / (max - min)).clamp(0.0, 1.0) * 100.0
+    } else {
+        0.0
+    };
+    format!("accent-color: var(--color-indigo-500); --fill: {fill:.1}%;")
+}
+
+/// A dB slider with a signed monospace readout, for the two ReplayGain trims.
+#[component]
+pub fn GainSlider(value: f32, min: f32, max: f32, on_change: EventHandler<f32>) -> Element {
+    rsx! {
+        div { class: "settings-slider flex items-center gap-3 min-w-[220px]",
+            input {
+                r#type: "range",
+                min: "{min}",
+                max: "{max}",
+                step: "0.5",
+                value: format!("{value:.1}"),
+                class: "w-40",
+                style: range_style(f64::from(value), f64::from(min), f64::from(max)),
+                oninput: move |evt| {
+                    if let Ok(parsed) = evt.value().parse::<f32>() {
+                        on_change.call(parsed.clamp(min, max));
+                    }
+                }
+            }
+            span {
+                class: "text-xs font-mono text-white/80 w-16 text-right",
+                {format!("{value:+.1} dB")}
+            }
         }
     }
 }
@@ -618,7 +708,7 @@ pub fn RadioRegistryDropdown(
                                     if !is_default {
                                         button {
                                             onclick: move |_| on_delete.call(i),
-                                            class: "text-red-400 hover:text-red-300 text-xs px-2 py-0.5 rounded transition-colors shrink-0",
+                                            class: "app-button-text app-button-danger text-red-400 hover:text-red-300 text-xs px-2 py-0.5 rounded transition-colors shrink-0",
                                             "{delete_text}"
                                         }
                                     }
@@ -628,7 +718,7 @@ pub fn RadioRegistryDropdown(
                     }
                     button {
                         onclick: move |_| on_add.call(()),
-                        class: "bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start mt-1",
+                        class: "app-button-tonal bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start mt-1",
                         "{add_text}"
                     }
                 }

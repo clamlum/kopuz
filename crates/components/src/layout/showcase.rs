@@ -133,7 +133,6 @@ pub struct ShowcaseProps {
     pub tracks: Vec<Track>,
     pub on_play_all: EventHandler<()>,
     pub on_play: EventHandler<usize>,
-    pub on_queue: Option<EventHandler<usize>>,
     pub on_add_to_playlist: Option<EventHandler<usize>>,
     pub on_delete_track: Option<EventHandler<usize>>,
     pub on_remove_from_playlist: Option<EventHandler<usize>>,
@@ -180,7 +179,7 @@ pub fn Showcase(props: ShowcaseProps) -> Element {
         config::UiStyle::Vaxry => rsx! {
             crate::vaxry::showcase::ShowcaseVaxry { ..props }
         },
-        config::UiStyle::Normal => rsx! {
+        config::UiStyle::Normal | config::UiStyle::Material3 => rsx! {
             crate::normal::showcase::ShowcaseNormal { ..props }
         },
     }
