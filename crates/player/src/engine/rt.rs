@@ -26,6 +26,50 @@ pub(crate) struct RtSession {
     /// preamp tweak is heard on the current track without a reload. Per session
     /// because a crossfade has two tracks in flight, each with its own gain.
     pub gain: Arc<AtomicU32>,
+    /// An empty ring with this set is the end of the track, not an underrun.
+    pub eof: Arc<AtomicBool>,
+    pub applied_gain: GainRamp,
+}
+
+/// A step change of gain mid-stream is an audible click.
+const GAIN_RAMP_SECONDS: f32 = 0.05;
+
+/// The gain the callback applies, walked towards the session's gain cell.
+pub(crate) struct GainRamp {
+    current: f32,
+    target: f32,
+    step: f32,
+}
+
+impl GainRamp {
+    pub(crate) fn new(gain: f32) -> Self {
+        let gain = if gain.is_finite() { gain } else { 1.0 };
+        Self {
+            current: gain,
+            target: gain,
+            step: 0.0,
+        }
+    }
+
+    fn apply(&mut self, samples: &mut [f32], target: f32, channels: usize, ramp_frames: f32) {
+        let target = if target.is_finite() { target } else { 1.0 };
+        if target != self.target {
+            self.target = target;
+            self.step = (target - self.current).abs() / ramp_frames.max(1.0);
+        }
+        if self.current == self.target {
+            apply_gain(samples, self.current);
+            return;
+        }
+        for frame in samples.chunks_mut(channels.max(1)) {
+            self.current = if self.current < self.target {
+                (self.current + self.step).min(self.target)
+            } else {
+                (self.current - self.step).max(self.target)
+            };
+            apply_gain(frame, self.current);
+        }
+    }
 }
 
 pub(crate) enum RtCmd {
@@ -39,6 +83,15 @@ pub(crate) enum RtCmd {
         session: RtSession,
         fade: Option<(u64, u64)>,
     },
+    /// Takes over on the same block the active one plays its last sample.
+    Queue {
+        session: RtSession,
+        id: u64,
+    },
+    /// Drop the queued session `id`. If it already took over, drop the active
+    /// session instead: the actor never adopted it, and the outgoing session's
+    /// drain then ends the track the usual way.
+    Unqueue(u64),
     DropAll,
     SetEqualizer(EqualizerSettings),
     SetChannelMode(ChannelMode),
@@ -51,6 +104,7 @@ pub(crate) enum Retired {
     /// The crossfade of this generation ran to completion; the actor reacts by
     /// tearing down the fading worker and emitting `TrackSwitched`.
     FadeComplete(#[allow(dead_code)] rtrb::Consumer<f32>, u64),
+    Advanced(#[allow(dead_code)] rtrb::Consumer<f32>, u64),
 }
 
 struct Fade {
@@ -69,6 +123,9 @@ pub(crate) struct RtState {
     active: Option<RtSession>,
     fading: Option<RtSession>,
     fade: Option<Fade>,
+    next: Option<(RtSession, u64)>,
+    /// Kept so a late `Unqueue` can still find a promoted session.
+    promoted: Option<u64>,
     eq: Equalizer,
     channel_mode: ChannelMode,
     volume: Arc<AtomicU32>,
@@ -76,6 +133,7 @@ pub(crate) struct RtState {
     scratch_active: Vec<f32>,
     scratch_fading: Vec<f32>,
     channels: usize,
+    gain_ramp_frames: f32,
 }
 
 pub(crate) fn volume_bits(volume: f32) -> u32 {
@@ -103,6 +161,8 @@ impl RtState {
             active: None,
             fading: None,
             fade: None,
+            next: None,
+            promoted: None,
             eq,
             channel_mode,
             volume,
@@ -110,6 +170,7 @@ impl RtState {
             scratch_active: vec![0.0; SCRATCH_FRAMES * channels],
             scratch_fading: vec![0.0; SCRATCH_FRAMES * channels],
             channels,
+            gain_ramp_frames: sample_rate as f32 * GAIN_RAMP_SECONDS,
         }
     }
 
@@ -121,18 +182,23 @@ impl RtState {
             return;
         }
 
+        let channels = self.channels;
+        let ramp_frames = self.gain_ramp_frames;
         let read = if self.fade.is_some() && self.fading.is_some() {
             self.process_fade(data)
         } else {
-            self.active
+            let mut read = self
+                .active
                 .as_mut()
-                .map(|session| {
-                    let read = read_into(&mut session.consumer, data);
-                    session.played.fetch_add(read as u64, Ordering::Relaxed);
-                    apply_gain(&mut data[..read], session_gain(session));
-                    read
-                })
-                .unwrap_or(0)
+                .map(|session| read_session(session, data, channels, ramp_frames))
+                .unwrap_or(0);
+            if read < data.len()
+                && self.advance_to_next()
+                && let Some(session) = self.active.as_mut()
+            {
+                read += read_session(session, &mut data[read..], channels, ramp_frames);
+            }
+            read
         };
 
         if read > 0 {
@@ -147,10 +213,39 @@ impl RtState {
         data[read..].fill(0.0);
     }
 
+    /// The flag is read before the ring, so samples written before the worker's
+    /// EOF are never mistaken for the end.
+    fn advance_to_next(&mut self) -> bool {
+        let drained = self.active.as_ref().is_some_and(|session| {
+            session.eof.load(Ordering::Acquire) && session.consumer.is_empty()
+        });
+        if !drained {
+            return false;
+        }
+        let Some((next, id)) = self.next.take() else {
+            return false;
+        };
+        if let Some(outgoing) = self.active.replace(next) {
+            let _ = self
+                .retire_tx
+                .send(Retired::Advanced(outgoing.consumer, id));
+        }
+        self.promoted = Some(id);
+        true
+    }
+
+    fn drop_next(&mut self) {
+        if let Some((next, _)) = self.next.take() {
+            let _ = self.retire_tx.send(Retired::Ring(next.consumer));
+        }
+    }
+
     fn drain_commands(&mut self) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             match cmd {
                 RtCmd::Swap { session, fade } => {
+                    self.drop_next();
+                    self.promoted = None;
                     if let Some(old_fading) = self.fading.take() {
                         let _ = self.retire_tx.send(Retired::Ring(old_fading.consumer));
                     }
@@ -172,7 +267,27 @@ impl RtState {
                     }
                     self.active = Some(session);
                 }
+                RtCmd::Queue { session, id } => {
+                    self.drop_next();
+                    self.next = Some((session, id));
+                }
+                RtCmd::Unqueue(id) => {
+                    if self
+                        .next
+                        .as_ref()
+                        .is_some_and(|(_, next_id)| *next_id == id)
+                    {
+                        self.drop_next();
+                    } else if self.promoted == Some(id) {
+                        self.promoted = None;
+                        if let Some(active) = self.active.take() {
+                            let _ = self.retire_tx.send(Retired::Ring(active.consumer));
+                        }
+                    }
+                }
                 RtCmd::DropAll => {
+                    self.drop_next();
+                    self.promoted = None;
                     if let Some(fading) = self.fading.take() {
                         let _ = self.retire_tx.send(Retired::Ring(fading.consumer));
                     }
@@ -191,6 +306,7 @@ impl RtState {
     /// Returns the number of samples written from the start of `data`.
     fn process_fade(&mut self, data: &mut [f32]) -> usize {
         let channels = self.channels;
+        let ramp_frames = self.gain_ramp_frames;
         let chunk_capacity = SCRATCH_FRAMES * channels;
         let mut written = 0;
         let mut fade_completed: Option<u64> = None;
@@ -210,7 +326,7 @@ impl RtState {
                 .map(|s| {
                     let read = read_into(&mut s.consumer, active_scratch);
                     s.played.fetch_add(read as u64, Ordering::Relaxed);
-                    apply_gain(&mut active_scratch[..read], session_gain(s));
+                    apply_session_gain(s, &mut active_scratch[..read], channels, ramp_frames);
                     read
                 })
                 .unwrap_or(0);
@@ -224,7 +340,7 @@ impl RtState {
                     // session, and a seek-cancelled fade installs a fresh ring.
                     let read = read_into(&mut s.consumer, fading_scratch);
                     s.played.fetch_add(read as u64, Ordering::Relaxed);
-                    apply_gain(&mut fading_scratch[..read], session_gain(s));
+                    apply_session_gain(s, &mut fading_scratch[..read], channels, ramp_frames);
                     read
                 })
                 .unwrap_or(0);
@@ -289,8 +405,28 @@ impl RtState {
     }
 }
 
-fn session_gain(session: &RtSession) -> f32 {
-    f32::from_bits(session.gain.load(Ordering::Relaxed))
+fn read_session(
+    session: &mut RtSession,
+    out: &mut [f32],
+    channels: usize,
+    ramp_frames: f32,
+) -> usize {
+    let read = read_into(&mut session.consumer, out);
+    session.played.fetch_add(read as u64, Ordering::Relaxed);
+    apply_session_gain(session, &mut out[..read], channels, ramp_frames);
+    read
+}
+
+fn apply_session_gain(
+    session: &mut RtSession,
+    samples: &mut [f32],
+    channels: usize,
+    ramp_frames: f32,
+) {
+    let target = f32::from_bits(session.gain.load(Ordering::Relaxed));
+    session
+        .applied_gain
+        .apply(samples, target, channels, ramp_frames);
 }
 
 fn apply_gain(samples: &mut [f32], gain: f32) {
@@ -393,7 +529,93 @@ fn apply_channel_mode_in_place(samples: &mut [f32], channels: usize, mode: Chann
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_gain, soft_limit};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::sync::mpsc;
+
+    use config::{ChannelMode, EqualizerSettings};
+
+    use super::{GainRamp, Retired, RtCmd, RtSession, RtState, apply_gain, soft_limit};
+
+    #[test]
+    fn gapless_switch_preserves_each_tracks_gain_ramp() {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (retire_tx, retire_rx) = mpsc::channel();
+        let mut state = RtState::new(
+            cmd_rx,
+            retire_tx,
+            Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            Arc::new(AtomicBool::new(false)),
+            2,
+            80,
+            EqualizerSettings::default(),
+            ChannelMode::Stereo,
+        );
+        let session = |initial: f32, target: f32| {
+            let (mut producer, consumer) = rtrb::RingBuffer::new(8);
+            for _ in 0..8 {
+                producer.push(1.0).unwrap();
+            }
+            RtSession {
+                consumer,
+                played: Arc::new(AtomicU64::new(0)),
+                gain: Arc::new(AtomicU32::new(target.to_bits())),
+                applied_gain: GainRamp::new(initial),
+                eof: Arc::new(AtomicBool::new(true)),
+            }
+        };
+        let outgoing = session(1.0, 0.5);
+        let incoming = session(0.25, 0.75);
+        let outgoing_played = outgoing.played.clone();
+        let incoming_played = incoming.played.clone();
+        cmd_tx
+            .send(RtCmd::Swap {
+                session: outgoing,
+                fade: None,
+            })
+            .unwrap();
+        cmd_tx
+            .send(RtCmd::Queue {
+                session: incoming,
+                id: 2,
+            })
+            .unwrap();
+
+        let mut samples = [0.0; 16];
+        state.process(&mut samples);
+
+        assert_eq!(
+            samples,
+            [
+                0.875, 0.875, 0.75, 0.75, 0.625, 0.625, 0.5, 0.5, 0.375, 0.375, 0.5, 0.5, 0.625,
+                0.625, 0.75, 0.75,
+            ]
+        );
+        assert_eq!(outgoing_played.load(Ordering::Relaxed), 8);
+        assert_eq!(incoming_played.load(Ordering::Relaxed), 8);
+        assert!(matches!(retire_rx.try_recv(), Ok(Retired::Advanced(_, 2))));
+    }
+
+    #[test]
+    fn a_gain_change_ramps_instead_of_stepping() {
+        let mut ramp = GainRamp::new(1.0);
+        let mut samples = [1.0_f32; 8];
+        ramp.apply(&mut samples, 0.5, 2, 4.0);
+        assert_eq!(samples, [0.875, 0.875, 0.75, 0.75, 0.625, 0.625, 0.5, 0.5]);
+
+        let mut settled = [1.0_f32; 4];
+        ramp.apply(&mut settled, 0.5, 2, 4.0);
+        assert_eq!(settled, [0.5; 4]);
+    }
+
+    #[test]
+    fn unity_gain_leaves_samples_untouched() {
+        let mut ramp = GainRamp::new(1.0);
+        let mut samples = [0.25_f32, -0.75, 0.999, -1.0];
+        let original = samples;
+        ramp.apply(&mut samples, 1.0, 2, 4.0);
+        assert_eq!(samples, original);
+    }
 
     #[test]
     fn a_boost_never_pushes_past_full_scale() {

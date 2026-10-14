@@ -15,6 +15,7 @@ use player::engine::{Event as EngineEvent, Phase as EnginePhase, SourceFactory, 
 use player::player::{LoadArgs, NowPlayingMeta, Player, PlayerInitError};
 use reader::Track;
 use server::playback_ref::{PlaybackItemRef, ResolvedStreamRef};
+use server::source::RadioPage;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -22,15 +23,18 @@ use crate::playback::network_factory;
 use crate::queue_model::{NextOutcome, QueueModel};
 
 mod load;
+mod radio_feed;
 mod reconciler;
 
 use load::{LoadFailure, LoadFinished, PreparedLoad};
+use radio_feed::RadioFeed;
 
 /// Events buffered per subscriber before it is considered lagged.
 pub const EVENT_BUFFER: usize = 512;
 const POSITION_CORRECTION_INTERVAL: Duration = Duration::from_secs(10);
 const MATERIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
+const REMOTE_PUSH_TIMEOUT: Duration = Duration::from_secs(3);
 const PROGRESS_STEP_SECS: u64 = 5;
 
 /// The embedded frontend's raw view of the queue model.
@@ -46,6 +50,15 @@ pub(crate) struct QueueMirrorSnapshot {
 #[async_trait::async_trait]
 pub trait QueueMaterializer: Send + Sync {
     async fn materialize(&self, context: &QueueContext) -> Result<Vec<Track>, ApiError>;
+
+    /// The tracks, and for a radio that can go on, the cursor of its next page.
+    async fn materialize_queue(&self, context: &QueueContext) -> Result<RadioPage, ApiError> {
+        Ok(RadioPage::last(self.materialize(context).await?))
+    }
+
+    async fn more_radio(&self, _cursor: &str) -> Result<RadioPage, ApiError> {
+        Ok(RadioPage::default())
+    }
 
     /// Make a restored queue's rows addressable by key, since some were listed once and never stored.
     fn register_restored(&self, _tracks: &[Track]) {}
@@ -85,6 +98,94 @@ impl Default for PlaybackServices {
     }
 }
 
+/// Only a move to another track or a stop is worth a network call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemoteQueueMark {
+    queue_rev: u64,
+    current_key: Option<String>,
+    playing: bool,
+}
+
+/// The mark of the last push the server took, set by the writer once it has.
+type SyncedMark = Arc<std::sync::Mutex<Option<RemoteQueueMark>>>;
+
+struct RemoteQueuePush {
+    source: server::source::ActiveSource,
+    /// Whose server this is, for the fingerprint the adopt at boot compares against.
+    store_key: config::Source,
+    queue: Vec<Track>,
+    current_index: usize,
+    position_ms: u64,
+    mark: RemoteQueueMark,
+}
+
+impl RemoteQueuePush {
+    async fn send(self, synced: &SyncedMark, store: Option<&dyn crate::persistence::QueueStore>) {
+        let saved = match self
+            .source
+            .save_play_queue(&self.queue, self.current_index, self.position_ms)
+            .await
+        {
+            Ok(saved) => saved,
+            Err(error) => {
+                tracing::debug!(%error, "play queue push failed");
+                return;
+            }
+        };
+        if saved && let Some(store) = store {
+            let current = self
+                .queue
+                .get(self.current_index)
+                .map(|track| track.id.key());
+            let fingerprint = match self.queue.is_empty() {
+                true => crate::persistence::empty_queue_fingerprint(),
+                false => crate::persistence::queue_fingerprint(
+                    self.queue.iter().map(|track| track.id.key()),
+                    current.as_deref(),
+                    self.position_ms,
+                ),
+            };
+            store.set_synced_remote(&self.store_key, &fingerprint).await;
+        }
+        if let Ok(mut synced) = synced.lock() {
+            *synced = Some(self.mark);
+        }
+    }
+}
+
+enum RemoteQueueJob {
+    Push(RemoteQueuePush),
+    /// Answered once every push sent before it has been tried.
+    Flush(oneshot::Sender<()>),
+}
+
+/// The only task that writes the server's queue, so a slow push can never land after a newer one.
+async fn write_remote_queue(
+    mut jobs: mpsc::UnboundedReceiver<RemoteQueueJob>,
+    synced: SyncedMark,
+    store: Option<Arc<dyn crate::persistence::QueueStore>>,
+) {
+    while let Some(job) = jobs.recv().await {
+        // Pushes that queued up behind a slow one are stale; only the newest is sent.
+        let mut latest = None;
+        let mut flushes = Vec::new();
+        let mut next = Some(job);
+        while let Some(job) = next {
+            match job {
+                RemoteQueueJob::Push(push) => latest = Some(push),
+                RemoteQueueJob::Flush(done) => flushes.push(done),
+            }
+            next = jobs.try_recv().ok();
+        }
+        if let Some(push) = latest {
+            push.send(&synced, store.as_deref()).await;
+        }
+        for done in flushes {
+            let _ = done.send(());
+        }
+    }
+}
+
 pub type FactoryOverride = Arc<dyn Fn(&Track) -> Option<SourceFactory> + Send + Sync>;
 
 enum SessionCmd {
@@ -95,6 +196,11 @@ enum SessionCmd {
         title: String,
         artist: Option<String>,
     },
+    RadioTopUp {
+        feed: u64,
+        cursor: String,
+        result: Box<Result<RadioPage, ApiError>>,
+    },
     SetQueue(
         SetQueueRequest,
         oneshot::Sender<Result<CommandAck, ApiError>>,
@@ -104,6 +210,12 @@ enum SessionCmd {
         Box<db::QueueSnapshot>,
         oneshot::Sender<Result<CommandAck, ApiError>>,
     ),
+    AdoptQueue {
+        snapshot: Box<db::QueueSnapshot>,
+        source: config::Source,
+        queue_rev: u64,
+        reply: oneshot::Sender<Result<Option<CommandAck>, ApiError>>,
+    },
     SetConfig {
         config: Box<config::AppConfig>,
         changed: Vec<String>,
@@ -126,6 +238,10 @@ enum SessionCmd {
     LoadPrepared(Box<Result<PreparedLoad, LoadFailure>>),
     LoadFinished(LoadFinished),
     BufferProgress(BufferProgressEvent),
+    AlbumCovers {
+        source: config::Source,
+        covers: std::collections::HashMap<String, String>,
+    },
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ArtworkFetched {
         token: u64,
@@ -169,12 +285,22 @@ impl SessionHandle {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let (config_tx, config_rx) = watch::channel(services.config.clone());
         let engine_events = player.subscribe();
-        player.set_volume(services.config.volume);
+        player.set_volume(match services.config.muted {
+            true => 0.0,
+            false => services.config.volume,
+        });
         player.set_channel_mode(services.config.channel_mode);
         player.set_equalizer(services.config.equalizer.clone());
         player.set_replay_gain(services.config.replay_gain);
         player.set_device_change_behavior(services.config.device_change_behavior);
         player.set_sample_rate_mode(services.config.sample_rate_mode);
+        let remote_synced = SyncedMark::default();
+        let (remote_writer, remote_jobs) = mpsc::unbounded_channel();
+        tokio::spawn(write_remote_queue(
+            remote_jobs,
+            remote_synced.clone(),
+            services.queue_store.clone(),
+        ));
 
         let session = Session {
             model: QueueModel::default(),
@@ -187,6 +313,8 @@ impl SessionHandle {
             armed_transition: None,
             load_task: None,
             radio_task: None,
+            radio_feed: None,
+            next_feed_id: 0,
             phase: ApiPhase::Idle,
             position: None,
             position_token: None,
@@ -195,6 +323,7 @@ impl SessionHandle {
             rev: 0,
             queue_rev: 0,
             volume: services.config.volume,
+            muted: services.config.muted,
             epoch: Instant::now(),
             events: events.clone(),
             materializer: materializer.clone(),
@@ -202,6 +331,8 @@ impl SessionHandle {
             queue_dirty: false,
             queue_unread: false,
             persisting: None,
+            remote_synced,
+            remote_writer,
             recorder: services.recorder,
             scrobbler: services.scrobbler,
             last_recent_key: None,
@@ -320,6 +451,24 @@ impl SessionHandle {
             .await
     }
 
+    /// Restore `snapshot`, fetched from `source`, only while that source is
+    /// still active and the queue is still at `queue_rev`, the revision read
+    /// before the fetch; `None` when either moved on.
+    pub async fn adopt_queue(
+        &self,
+        snapshot: db::QueueSnapshot,
+        source: &config::Source,
+        queue_rev: u64,
+    ) -> Result<Option<CommandAck>, ApiError> {
+        self.request(|reply| SessionCmd::AdoptQueue {
+            snapshot: Box::new(snapshot),
+            source: source.clone(),
+            queue_rev,
+            reply,
+        })
+        .await
+    }
+
     /// Emit an event through the session's sequenced stream (services use
     /// this for invalidations, job progress, and notices).
     pub fn emit_event(&self, event: ApiEvent) {
@@ -330,6 +479,22 @@ impl SessionHandle {
     /// goes through here, so there is one place to look for who dirties what.
     pub fn invalidate(&self, table: api::Table) {
         self.emit_event(ApiEvent::LibraryInvalidated { table });
+    }
+
+    pub fn update_album_covers(&self, source: &config::Source, albums: &[reader::Album]) {
+        let covers = albums
+            .iter()
+            .filter_map(|album| {
+                album
+                    .cover_path
+                    .as_ref()
+                    .map(|path| (album.id.clone(), path.to_string_lossy().into_owned()))
+            })
+            .collect();
+        let _ = self.cmd_tx.send(SessionCmd::AlbumCovers {
+            source: source.clone(),
+            covers,
+        });
     }
 
     /// Announce whether a source is reachable, so every client shows the same
@@ -430,7 +595,8 @@ enum PlaybackIntent {
     Loading {
         token: u64,
         idx: usize,
-        crossfade: bool,
+        /// A crossfade or gapless candidate; the outgoing track keeps playing.
+        deferred: bool,
         from_token: u64,
     },
     Committed {
@@ -476,6 +642,7 @@ struct PendingResumeState {
 enum TransitionStage {
     Loading,
     Fading,
+    Queued,
 }
 
 /// A crossfade in flight. The queue itself is not forked: only the logical
@@ -485,9 +652,12 @@ enum TransitionStage {
 /// remap `current`.
 struct PendingTransition {
     to_position: usize,
+    to_key: String,
     to_token: u64,
     from_token: u64,
     stage: TransitionStage,
+    /// Nothing is audible before the switch, so a queue edit re-arms it instead.
+    gapless: bool,
 }
 
 struct Session {
@@ -501,6 +671,8 @@ struct Session {
     armed_transition: Option<u64>,
     load_task: Option<(u64, JoinHandle<()>)>,
     radio_task: Option<JoinHandle<()>>,
+    radio_feed: Option<RadioFeed>,
+    next_feed_id: u64,
     phase: ApiPhase,
     position: Option<PositionAnchor>,
     position_token: Option<u64>,
@@ -509,6 +681,7 @@ struct Session {
     rev: u64,
     queue_rev: u64,
     volume: f32,
+    muted: bool,
     epoch: Instant,
     events: broadcast::Sender<ApiEvent>,
     materializer: Arc<dyn QueueMaterializer>,
@@ -518,6 +691,8 @@ struct Session {
     queue_unread: bool,
     /// The last queue save in flight; each waits for the one before, so awaiting this awaits them all.
     persisting: Option<tokio::task::JoinHandle<()>>,
+    remote_synced: SyncedMark,
+    remote_writer: mpsc::UnboundedSender<RemoteQueueJob>,
     recorder: Option<Arc<dyn PlaybackRecorder>>,
     scrobbler: Option<Arc<crate::scrobbler::Scrobbler>>,
     last_recent_key: Option<String>,
@@ -567,8 +742,9 @@ impl Session {
                 _ = correction.tick(), if self.phase == ApiPhase::Playing => {
                     self.publish_position_anchor(&state_tx, None, None, true);
                 }
-                _ = persist.tick(), if self.queue_dirty && self.queue_store.is_some() => {
+                _ = persist.tick(), if self.queue_dirty => {
                     self.persist_async();
+                    self.push_remote_queue(false);
                 }
             }
         }
@@ -596,8 +772,30 @@ impl Session {
                 title,
                 artist,
             } => self.apply_radio_metadata(token, title, artist, state_tx),
+            SessionCmd::RadioTopUp {
+                feed,
+                cursor,
+                result,
+            } => self.apply_radio_page(feed, cursor, *result, state_tx),
             SessionCmd::RestoreQueue(snapshot, reply) => {
                 let result = self.handle_restore(*snapshot, state_tx);
+                let _ = reply.send(result);
+            }
+            SessionCmd::AdoptQueue {
+                snapshot,
+                source,
+                queue_rev,
+                reply,
+            } => {
+                let current = self.queue_rev == queue_rev && self.config.active_source == source;
+                let result = match current {
+                    true => self.handle_restore(*snapshot, state_tx).map(|ack| {
+                        // Unlike a restore from disk, nothing has stored this queue here yet.
+                        self.queue_dirty = true;
+                        Some(ack)
+                    }),
+                    false => Ok(None),
+                };
                 let _ = reply.send(result);
             }
             SessionCmd::SetConfig { config, changed } => {
@@ -656,14 +854,23 @@ impl Session {
                     self.queue_dirty = false;
                     store.save(&self.config.active_source, snapshot).await;
                 }
+                if self.push_remote_queue(true) {
+                    let (done, flushed) = oneshot::channel();
+                    let _ = self.remote_writer.send(RemoteQueueJob::Flush(done));
+                    // A quit waits on this, so a dead server costs only the timeout.
+                    let _ = tokio::time::timeout(REMOTE_PUSH_TIMEOUT, flushed).await;
+                }
                 let _ = reply.send(());
             }
             SessionCmd::LoadPrepared(result) => self.handle_prepared_load(*result, state_tx),
             SessionCmd::LoadFinished(result) => self.handle_load_finished(result, state_tx),
             SessionCmd::BufferProgress(event) => self.handle_buffer_progress(event, state_tx),
+            SessionCmd::AlbumCovers { source, covers } => {
+                self.apply_album_covers(source, covers, state_tx)
+            }
             SessionCmd::ArtworkFetched { token, meta } => {
-                if self.intent.token() == token {
-                    self.player.update_metadata(*meta);
+                if self.intent.token() == token || self.is_outgoing(token) {
+                    self.player.update_metadata(token, *meta);
                 }
             }
         }
@@ -697,9 +904,21 @@ impl Session {
                 }
                 return Ok(self.publish(state_tx, shuffle.is_some()));
             }
-            if let PlayerCommand::SetVolume { volume } = command {
-                self.volume = volume.clamp(0.0, 1.0);
-            }
+            let command = match command {
+                PlayerCommand::SetVolume { volume } => {
+                    self.set_volume(volume);
+                    PlayerCommand::SetVolume {
+                        volume: self.output_volume(),
+                    }
+                }
+                PlayerCommand::SetMuted { muted } => {
+                    self.muted = muted;
+                    PlayerCommand::SetVolume {
+                        volume: self.output_volume(),
+                    }
+                }
+                other => other,
+            };
             self.dispatch_external(command);
             return Ok(self.publish(state_tx, false));
         }
@@ -719,8 +938,12 @@ impl Session {
             PlayerCommand::Stop => self.stop(state_tx),
             PlayerCommand::Seek { position_ms } => self.seek(position_ms, state_tx)?,
             PlayerCommand::SetVolume { volume } => {
-                self.volume = volume.clamp(0.0, 1.0);
-                self.player.set_volume(self.volume);
+                self.set_volume(volume);
+                self.player.set_volume(self.output_volume());
+            }
+            PlayerCommand::SetMuted { muted } => {
+                self.muted = muted;
+                self.player.set_volume(self.output_volume());
             }
             PlayerCommand::SetMode { shuffle, loop_mode } => {
                 queue_changed = shuffle.is_some();
@@ -749,6 +972,7 @@ impl Session {
                 if let Some(mode) = loop_mode {
                     self.model.set_loop_mode(mode);
                 }
+                self.rearm_gapless();
             }
         }
         Ok(self.publish(state_tx, queue_changed))
@@ -791,6 +1015,7 @@ impl Session {
                     return Err(ApiError::not_found("none of those keys are in the library"));
                 }
                 self.model.insert_at(index, tracks);
+                self.rearm_gapless();
                 Ok(self.publish(state_tx, true))
             }
             QueueEdit::Jump { index } => {
@@ -811,6 +1036,7 @@ impl Session {
                     pending.to_position =
                         QueueModel::remap_queue_index(pending.to_position, from, to);
                 }
+                self.rearm_gapless();
                 Ok(self.publish(state_tx, true))
             }
             QueueEdit::Remove { index } => {
@@ -829,7 +1055,7 @@ impl Session {
                 if self
                     .pending_transition
                     .as_ref()
-                    .is_some_and(|pending| pending.to_position == index)
+                    .is_some_and(|pending| !pending.gapless && pending.to_position == index)
                 {
                     return Err(ApiError::invalid_input(
                         "cannot remove the track being faded into; skip or stop first",
@@ -841,6 +1067,7 @@ impl Session {
                 {
                     pending.to_position -= 1;
                 }
+                self.rearm_gapless();
                 Ok(self.publish(state_tx, true))
             }
         }
@@ -890,9 +1117,9 @@ impl Session {
         }
         // Bounded so a hanging materializer (a slow source resolve) cannot
         // wedge the whole session command loop.
-        let tracks = tokio::time::timeout(
+        let RadioPage { tracks, more } = tokio::time::timeout(
             MATERIALIZE_TIMEOUT,
-            self.materializer.materialize(&request.context),
+            self.materializer.materialize_queue(&request.context),
         )
         .await
         .map_err(|_| {
@@ -920,9 +1147,11 @@ impl Session {
                     });
                     let idx = candidate.jump_to(start.min(len - 1));
                     self.start_immediate_load(candidate, idx)?;
+                    self.set_radio_feed(more);
                 } else {
                     self.model = candidate;
                     self.stop_playback();
+                    self.set_radio_feed(None);
                 }
             }
             // Appending lands past every existing position, so a pending
@@ -932,9 +1161,14 @@ impl Session {
                 // Mid-crossfade the queue still reads as the outgoing track,
                 // but "next" means after the one already fading in, or the
                 // insertion would be skipped the moment the fade commits.
-                Some(pending) => self.model.insert_at(pending.to_position + 1, tracks),
-                None => self.model.insert_next(tracks),
+                Some(pending) if !pending.gapless => {
+                    self.model.insert_at(pending.to_position + 1, tracks)
+                }
+                _ => self.model.insert_next(tracks),
             },
+        }
+        if request.mode != QueueMode::Replace {
+            self.rearm_gapless();
         }
         Ok(self.publish(state_tx, true))
     }
@@ -973,6 +1207,7 @@ impl Session {
                     self.phase = ApiPhase::Paused;
                 }
                 self.publish_position_anchor(state_tx, None, None, false);
+                self.resume_radio_when_extended();
             }
             NextOutcome::Empty => {}
         }
@@ -981,7 +1216,11 @@ impl Session {
 
     fn play_previous(&mut self, state_tx: &watch::Sender<PlayerState>) -> Result<(), ApiError> {
         let idx = self.model.current_position();
-        if self.revert_transition().is_some() {
+        let gapless = self
+            .pending_transition
+            .as_ref()
+            .is_some_and(|pending| pending.gapless);
+        if self.revert_transition().is_some() && !gapless {
             let candidate = self.model.clone();
             self.start_immediate_load(candidate, idx)?;
             return Ok(());
@@ -1007,7 +1246,11 @@ impl Session {
         // Pausing mid-load cancels it, else a cancelled reply leaves intent
         // stuck Loading. Resolving crossfades revert whole; immediate loads
         // record a resume point. A running fade is merely frozen.
-        if self.intent.is_loading() && self.revert_transition().is_none() {
+        let queued = self
+            .pending_transition
+            .as_ref()
+            .is_some_and(|pending| pending.stage == TransitionStage::Queued);
+        if (self.intent.is_loading() || queued) && self.revert_transition().is_none() {
             self.cancel_load_task();
             if !is_radio {
                 self.store_pending_resume();
@@ -1142,7 +1385,11 @@ impl Session {
             match key.as_str() {
                 "volume" => {
                     self.volume = config.volume.clamp(0.0, 1.0);
-                    self.player.set_volume(self.volume);
+                    self.player.set_volume(self.output_volume());
+                }
+                "muted" => {
+                    self.muted = config.muted;
+                    self.player.set_volume(self.output_volume());
                 }
                 "equalizer" => self.player.set_equalizer(config.equalizer.clone()),
                 "replay_gain" => self.player.set_replay_gain(config.replay_gain),
@@ -1267,6 +1514,19 @@ impl Session {
         );
     }
 
+    /// A new level also unmutes.
+    fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        self.muted = false;
+    }
+
+    fn output_volume(&self) -> f32 {
+        match self.muted {
+            true => 0.0,
+            false => self.volume,
+        }
+    }
+
     /// Send a transport command to the integration that owns playback. The
     /// call is a network round-trip, so it runs off the actor loop; the answer
     /// comes back as the integration's next report.
@@ -1284,6 +1544,7 @@ impl Session {
                 PlayerCommand::Next
                 | PlayerCommand::Previous
                 | PlayerCommand::Toggle
+                | PlayerCommand::SetMuted { .. }
                 | PlayerCommand::SetMode { .. } => Ok(()),
             };
             if let Err(error) = result {
@@ -1372,6 +1633,7 @@ impl Session {
         self.buffered.clear();
         self.last_recent_key = None;
 
+        self.set_radio_feed(snapshot.radio_cursor);
         let restored = self.model.restore(
             snapshot.queue,
             snapshot.current_queue_index,
@@ -1416,6 +1678,7 @@ impl Session {
             progress_secs,
             shuffle_order: self.model.shuffle_order().to_vec(),
             shuffle_enabled: self.model.shuffle(),
+            radio_cursor: self.radio_cursor(),
         }
     }
 
@@ -1477,6 +1740,47 @@ impl Session {
         self.queue_unread = unread;
     }
 
+    /// Hand the queue to the remote writer, unless the server already took this
+    /// mark; `force` skips that check, for the flush on quit. Whether it was sent.
+    fn push_remote_queue(&mut self, force: bool) -> bool {
+        let Some(source) = self.active_source.clone() else {
+            return false;
+        };
+        // An empty queue nobody touched yet is a fresh start, not a clear, and
+        // must not wipe what another device saved before the boot adopt reads it.
+        if !source.capabilities().play_queue || (self.model.is_empty() && self.queue_rev == 0) {
+            return false;
+        }
+        let mark = RemoteQueueMark {
+            queue_rev: self.queue_rev,
+            current_key: self.model.current_track().map(|track| track.id.uid()),
+            playing: self.phase == ApiPhase::Playing,
+        };
+        let synced = self
+            .remote_synced
+            .lock()
+            .is_ok_and(|synced| synced.as_ref() == Some(&mark));
+        if !force && synced {
+            return false;
+        }
+        // Play order, not storage order: another client reading this queue
+        // plays it top to bottom and has no shuffle permutation to apply.
+        let queue: Vec<Track> = (0..self.model.len())
+            .filter_map(|position| self.model.track_at(position).cloned())
+            .collect();
+        let push = RemoteQueuePush {
+            source,
+            store_key: self.config.active_source.clone(),
+            queue,
+            current_index: self.model.current_position(),
+            position_ms: crate::persistence::whole_seconds(
+                self.displayed_position().as_millis() as u64
+            ) * 1000,
+            mark,
+        };
+        self.remote_writer.send(RemoteQueueJob::Push(push)).is_ok()
+    }
+
     fn commit_transition_model(&mut self, token: u64) -> bool {
         let Some(pending) = self.pending_transition.take() else {
             return false;
@@ -1512,8 +1816,47 @@ impl Session {
         if !self.commit_transition_model(token) {
             return false;
         }
-        self.player.commit_now_playing();
+        self.player.commit_now_playing(token);
         true
+    }
+
+    /// A track shorter than the preload never reaches the next position event.
+    pub(super) fn arm_gapless_now(&mut self) -> bool {
+        let arm =
+            self.should_play_gapless() && self.should_arm_transition(self.player.get_position());
+        if arm {
+            self.arm_transition();
+        }
+        arm
+    }
+
+    fn rearm_gapless(&mut self) {
+        let Some(pending) = self
+            .pending_transition
+            .as_ref()
+            .filter(|pending| pending.gapless)
+        else {
+            return;
+        };
+        let (position, key) = (pending.to_position, pending.to_key.clone());
+        let still_next = matches!(self.model.peek_next(), NextOutcome::Play(next) if next == position)
+            && self
+                .model
+                .track_at(position)
+                .is_some_and(|track| track.id.uid() == key);
+        if still_next {
+            return;
+        }
+        let _ = self.revert_transition();
+        if self.should_arm_transition(self.player.get_position()) {
+            self.arm_transition();
+        }
+    }
+
+    pub(super) fn scrobble_committed(&self, track: Track, token: u64) {
+        if let Some(scrobbler) = self.scrobbler.clone() {
+            scrobbler.track_committed(track, token);
+        }
     }
 
     fn start_immediate_load(&mut self, model: QueueModel, idx: usize) -> Result<(), ApiError> {
@@ -1537,7 +1880,7 @@ impl Session {
     /// whole undo.
     fn revert_transition(&mut self) -> Option<u64> {
         let pending = self.pending_transition.take()?;
-        if pending.stage == TransitionStage::Loading {
+        if pending.stage != TransitionStage::Fading {
             self.cancel_load_task();
         }
         self.armed_transition = None;
@@ -1577,16 +1920,22 @@ impl Session {
         self.buffered.clear();
         match intent {
             PlaybackIntent::Loading {
-                crossfade: true,
+                deferred: true,
                 from_token,
                 ..
             } => {
-                self.pending_transition = None;
-                self.armed_transition = None;
+                self.armed_transition = self
+                    .pending_transition
+                    .take()
+                    .filter(|pending| pending.gapless)
+                    .map(|_| from_token);
                 self.set_intent(PlaybackIntent::Committed { token: from_token });
             }
             _ => {
                 self.set_intent(PlaybackIntent::Stopped);
+                if self.phase == ApiPhase::Ended {
+                    self.player.pause();
+                }
             }
         }
         true

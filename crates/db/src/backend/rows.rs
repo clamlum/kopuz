@@ -77,6 +77,7 @@ impl TrackRow {
                 track_peak: self.rg_track_peak.map(|v| v as f32),
                 album_gain_db: self.rg_album_gain.map(|v| v as f32),
                 album_peak: self.rg_album_peak.map(|v| v as f32),
+                loudness_db: None,
             },
         }
     }
@@ -172,6 +173,7 @@ impl QueueTrackRow {
                 track_peak: self.rg_track_peak.map(|v| v as f32),
                 album_gain_db: self.rg_album_gain.map(|v| v as f32),
                 album_peak: self.rg_album_peak.map(|v| v as f32),
+                loudness_db: None,
             },
         }
     }
@@ -209,6 +211,8 @@ pub fn parse_service(s: &str) -> config::MusicService {
         "AppleMusic" => config::MusicService::AppleMusic,
         "Spotify" => config::MusicService::Spotify,
         "Nextcloud" => config::MusicService::Nextcloud,
+        "Clippsly" => config::MusicService::Clippsly,
+        "Smb" => config::MusicService::Smb,
         _ => config::MusicService::Jellyfin,
     }
 }
@@ -223,6 +227,7 @@ mod tests {
 
         for service in [
             Jellyfin, Subsonic, Custom, YtMusic, AppleMusic, SoundCloud, Spotify, Nextcloud,
+            Clippsly, Smb,
         ] {
             let stored = crate::backend::writes::service_str(service);
             assert_eq!(parse_service(stored), service, "{stored} did not survive");

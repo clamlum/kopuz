@@ -177,6 +177,8 @@ fn icon(service: MusicService) -> Icon {
             Icon::Class("fa-solid fa-compact-disc".into())
         }
         MusicService::Nextcloud => Icon::Svg(NEXTCLOUD_MARK.into()),
+        MusicService::Clippsly => Icon::Class("fa-solid fa-cloud".into()),
+        MusicService::Smb => Icon::Class("fa-solid fa-server".into()),
     }
 }
 
@@ -189,6 +191,8 @@ fn accent(service: MusicService) -> &'static str {
         MusicService::Jellyfin => "#b277ee",
         MusicService::Subsonic | MusicService::Custom => "#f0a84b",
         MusicService::Nextcloud => "#0082c9",
+        MusicService::Clippsly => "#8064e9",
+        MusicService::Smb => "#6366f1",
     }
 }
 
@@ -369,10 +373,21 @@ pub fn add_fields(service: MusicService) -> Vec<FieldSpec> {
             },
             browser_field(None, None),
         ],
+        MusicService::Clippsly => vec![FieldSpec {
+            help: Some(Text::key("clippsly_help")),
+            ..note_field()
+        }],
         MusicService::Nextcloud => vec![
             url_field("nextcloud_url_placeholder"),
             FieldSpec {
                 help: Some(Text::key("nextcloud_help")),
+                ..note_field()
+            },
+        ],
+        MusicService::Smb => vec![
+            url_field("smb_url_placeholder"),
+            FieldSpec {
+                help: Some(Text::key("smb_help")),
                 ..note_field()
             },
         ],
@@ -547,7 +562,12 @@ pub fn check(service: MusicService, draft: &SourceDraft) -> (SignInKind, Vec<Pro
                 problems.push(Problem::on(TOKEN, Text::key("apple_music_token_required")));
             }
         }
-        MusicService::YtMusic | MusicService::SoundCloud => {}
+        MusicService::YtMusic | MusicService::SoundCloud | MusicService::Clippsly => {}
+        MusicService::Smb => {
+            if server::smb::Location::parse(value(URL)).is_err() {
+                problems.push(Problem::on(URL, Text::key("invalid_smb_url")));
+            }
+        }
         _ => {
             if !value(URL).starts_with("http") {
                 problems.push(Problem::on(URL, Text::key("invalid_server_url")));
@@ -570,6 +590,7 @@ pub fn apply(service: MusicService, draft: &SourceDraft, saved: &mut SavedServer
     saved.url = match service {
         // Spotify's address field holds the client id its PKCE flow needs.
         MusicService::Spotify => value(CLIENT_ID),
+        MusicService::Clippsly => server::clippsly::BASE_URL.to_string(),
         _ => value(URL).trim_end_matches('/').to_string(),
     };
     saved.yt_anonymous = anonymous_draft(draft);

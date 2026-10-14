@@ -10,6 +10,7 @@ impl Session {
         queue_changed: bool,
     ) -> CommandAck {
         self.rev += 1;
+        self.top_up_radio();
         if queue_changed {
             self.queue_rev = self.rev;
             self.refresh_album_context();
@@ -116,6 +117,12 @@ impl Session {
             && self.player.can_resume()
     }
 
+    pub(super) fn should_play_gapless(&self) -> bool {
+        self.config.crossfade_seconds == 0
+            && self.phase == ApiPhase::Playing
+            && self.player.can_resume()
+    }
+
     pub(super) fn now_ms(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
@@ -154,6 +161,7 @@ impl Session {
                 loop_mode: self.model.loop_mode(),
             },
             volume: self.volume,
+            muted: self.muted,
             output_latency_ms: Some(self.player.output_latency().as_millis() as u64),
             buffered: self.buffered.clone(),
             fading,

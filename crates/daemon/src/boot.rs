@@ -171,7 +171,12 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
     let playlists = crate::PlaylistService::new(database.clone(), session.clone());
     spawn_volume_persistence(&session, config_service.clone());
     crate::os_media::spawn(&session);
-    crate::integrations::spawn_jellyfin_reporter(&session, active_source, session.config_watch());
+    crate::integrations::spawn_jellyfin_reporter(
+        &session,
+        active_source.clone(),
+        session.config_watch(),
+    );
+    crate::integrations::spawn_youtube_reporter(&session, database.clone(), session.config_watch());
     crate::integrations::spawn_discord_presence(&session, session.config_watch());
     let restored_source = session.config_watch().borrow().active_source.clone();
     match queue_store.load(&restored_source).await {
@@ -191,6 +196,17 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
             tracing::warn!(%error, "the last session's queue could not be read");
             session.hold_unread_queue();
         }
+    }
+    // Asking the source for its queue costs a round trip, so startup does not wait on it.
+    {
+        let session = session.clone();
+        let library = library.clone();
+        let source = active_source.clone();
+        let store = queue_store.clone();
+        tokio::spawn(async move {
+            crate::persistence::adopt_remote_queue(&session, &library, &source, store.as_ref())
+                .await;
+        });
     }
     let artwork = crate::ArtworkService::new(
         database.clone(),
@@ -289,21 +305,22 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
 /// one that remembers it; the debounce keeps a drag off the database.
 fn spawn_volume_persistence(session: &SessionHandle, config: Arc<ConfigService>) {
     let mut events = session.subscribe();
-    let mut last = session.state().volume;
+    let state = session.state();
+    let mut last = (state.volume, state.muted);
     tokio::spawn(async move {
         loop {
-            let volume = match events.recv().await {
-                Ok(api::ApiEvent::PlayerState(state)) => state.volume,
+            let (volume, muted) = match events.recv().await {
+                Ok(api::ApiEvent::PlayerState(state)) => (state.volume, state.muted),
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             };
-            if (volume - last).abs() < f32::EPSILON {
+            if (volume - last.0).abs() < f32::EPSILON && muted == last.1 {
                 continue;
             }
-            last = volume;
+            last = (volume, muted);
             tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            if let Err(error) = config.set_volume(last).await {
+            if let Err(error) = config.set_volume(last.0, last.1).await {
                 tracing::warn!(%error, "volume persist failed");
             }
         }
@@ -318,7 +335,8 @@ fn spawn_volume_persistence(session: &SessionHandle, config: Arc<ConfigService>)
 /// also where a whole-config write reads volume back from, which is why the
 /// frontend's own copy cannot stand in for this.
 pub async fn flush_volume(session: &SessionHandle, config: &ConfigService) {
-    if let Err(error) = config.set_volume(session.state().volume).await {
+    let state = session.state();
+    if let Err(error) = config.set_volume(state.volume, state.muted).await {
         tracing::warn!(%error, "flushing the volume on shutdown failed");
     }
 }

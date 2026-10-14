@@ -467,6 +467,9 @@ pub struct ReplayGainInfo {
     pub album_gain_db: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album_peak: Option<f32>,
+    /// dB above the service's reference loudness (YouTube Music's `loudnessDb`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loudness_db: Option<f32>,
 }
 
 impl ReplayGainInfo {
@@ -489,9 +492,16 @@ pub struct ReplayGainSettings {
     /// Used in place of a gain for tracks that carry none.
     #[serde(default)]
     pub fallback_gain_db: f32,
+    /// Levels untagged tracks by their service loudness regardless of `mode`.
+    #[serde(default = "default_normalize_loudness")]
+    pub normalize_loudness: bool,
 }
 
 fn default_prevent_clipping() -> bool {
+    true
+}
+
+fn default_normalize_loudness() -> bool {
     true
 }
 
@@ -502,8 +512,22 @@ impl Default for ReplayGainSettings {
             prevent_clipping: true,
             preamp_db: 0.0,
             fallback_gain_db: 0.0,
+            normalize_loudness: true,
         }
     }
+}
+
+/// -20 dB: a track measured louder than that is more likely a bad value.
+const MIN_LOUDNESS_GAIN: f32 = 0.1;
+
+/// Only attenuates, like YouTube's web player: boosting would need a limiter.
+pub fn loudness_gain(loudness_db: f32) -> f32 {
+    if !loudness_db.is_finite() {
+        return 1.0;
+    }
+    10.0_f32
+        .powf(-loudness_db / 20.0)
+        .clamp(MIN_LOUDNESS_GAIN, 1.0)
 }
 
 /// Gains outside this range are a broken tag, not a mastering choice; ±15 dB
@@ -526,6 +550,14 @@ impl ReplayGainSettings {
         service: ReplayGainInfo,
         album_context: bool,
     ) -> f32 {
+        if self.normalize_loudness
+            && stream.is_empty()
+            && service.is_empty()
+            && let Some(db) = stream.loudness_db.or(service.loudness_db)
+        {
+            return loudness_gain(db);
+        }
+
         let prefer_album = match self.mode {
             ReplayGainMode::Off => return 1.0,
             ReplayGainMode::Track => false,
@@ -841,6 +873,8 @@ pub struct AppConfig {
     pub sidebar_order: Vec<String>,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    #[serde(default)]
+    pub muted: bool,
     #[serde(default = "default_volume_scroll_step")]
     pub volume_scroll_step: f32,
     #[serde(default = "default_crossfade_seconds")]
@@ -1079,6 +1113,7 @@ impl Default for AppConfig {
             show_row_images: true,
             sidebar_order: default_sidebar_order(),
             volume: default_volume(),
+            muted: false,
             volume_scroll_step: default_volume_scroll_step(),
             crossfade_seconds: default_crossfade_seconds(),
             custom_themes: HashMap::new(),
@@ -1243,7 +1278,7 @@ impl AppConfig {
 mod tests {
     use super::{
         AppConfig, BackBehavior, Browser, EqualizerSettings, MusicServer, ReplayGainInfo,
-        ReplayGainMode, ReplayGainSettings, ServerAuth, SettingsLayout,
+        ReplayGainMode, ReplayGainSettings, ServerAuth, SettingsLayout, loudness_gain,
     };
 
     fn tagged() -> ReplayGainInfo {
@@ -1252,6 +1287,7 @@ mod tests {
             track_peak: Some(0.5),
             album_gain_db: Some(-3.0),
             album_peak: Some(0.9),
+            loudness_db: None,
         }
     }
 
@@ -1314,6 +1350,7 @@ mod tests {
             prevent_clipping: false,
             preamp_db: 2.0,
             fallback_gain_db: -4.0,
+            normalize_loudness: true,
         };
         assert_close(
             settings.linear_gain(ReplayGainInfo::default(), false),
@@ -1328,6 +1365,7 @@ mod tests {
             track_peak: Some(0.5),
             album_gain_db: Some(6.0),
             album_peak: None,
+            loudness_db: None,
         };
         let settings = ReplayGainSettings {
             mode: ReplayGainMode::Album,
@@ -1398,6 +1436,67 @@ mod tests {
             unclamped.linear_gain(info, false),
             10.0_f32.powf(6.0 / 20.0),
         );
+    }
+
+    #[test]
+    fn loudness_maps_to_attenuation_only() {
+        assert_close(loudness_gain(6.0), 10.0_f32.powf(-6.0 / 20.0));
+        assert_close(loudness_gain(0.0), 1.0);
+        assert_close(loudness_gain(-4.0), 1.0);
+        assert_close(loudness_gain(40.0), 0.1);
+        assert_close(loudness_gain(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn service_loudness_levels_a_track_without_replay_gain() {
+        let loud = ReplayGainInfo {
+            loudness_db: Some(9.0),
+            ..Default::default()
+        };
+        let settings = ReplayGainSettings::default();
+        assert!(settings.normalize_loudness);
+        assert_close(
+            settings.linear_gain_with_fallback(ReplayGainInfo::default(), loud, false),
+            10.0_f32.powf(-9.0 / 20.0),
+        );
+        assert_close(
+            settings.linear_gain_with_fallback(
+                ReplayGainInfo::default(),
+                ReplayGainInfo::default(),
+                false,
+            ),
+            1.0,
+        );
+
+        let off = ReplayGainSettings {
+            normalize_loudness: false,
+            ..settings
+        };
+        assert_close(
+            off.linear_gain_with_fallback(ReplayGainInfo::default(), loud, false),
+            1.0,
+        );
+
+        // Tagged ReplayGain wins over the service measurement.
+        let track = ReplayGainSettings {
+            mode: ReplayGainMode::Track,
+            prevent_clipping: false,
+            ..settings
+        };
+        assert_close(
+            track.linear_gain_with_fallback(tagged(), loud, false),
+            10.0_f32.powf(-6.0 / 20.0),
+        );
+        assert_close(
+            track.linear_gain_with_fallback(ReplayGainInfo::default(), loud, false),
+            10.0_f32.powf(-9.0 / 20.0),
+        );
+    }
+
+    #[test]
+    fn settings_without_the_loudness_key_normalise() {
+        let settings: ReplayGainSettings = serde_json::from_str(r#"{"mode":"Off"}"#).unwrap();
+        assert!(settings.normalize_loudness);
     }
 
     #[test]

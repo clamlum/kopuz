@@ -35,6 +35,23 @@ use tower::service_fn;
 
 type Client = KopuzClient<InterceptedService<Channel, Auth>>;
 
+/// The default socket or named pipe served by the desktop app and `kopuzd`.
+#[cfg(windows)]
+pub fn default_socket_path() -> Option<PathBuf> {
+    proto::pipe::default_name().ok().map(PathBuf::from)
+}
+
+/// The default socket served by the desktop app and `kopuzd`.
+#[cfg(not(windows))]
+pub fn default_socket_path() -> Option<PathBuf> {
+    let base = directories::BaseDirs::new()?;
+    let dir = base
+        .runtime_dir()
+        .map(|runtime| runtime.join("kopuz"))
+        .unwrap_or_else(|| base.cache_dir().join("kopuz"));
+    Some(dir.join("kopuzd.sock"))
+}
+
 /// Where a daemon is reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Address {
@@ -193,6 +210,11 @@ impl api::PlayerApi for GrpcApi {
             PlayerCommand::SetVolume { volume } => {
                 self.client()
                     .set_volume(Request::new(proto::SetVolume { volume }))
+                    .await
+            }
+            PlayerCommand::SetMuted { muted } => {
+                self.client()
+                    .set_muted(Request::new(proto::SetMuted { muted }))
                     .await
             }
             PlayerCommand::SetMode { shuffle, loop_mode } => {
@@ -1119,6 +1141,48 @@ impl api::PlaylistApi for GrpcApi {
 
 #[async_trait::async_trait]
 impl api::SourceApi for GrpcApi {
+    async fn storage_quota(&self, id: String) -> Result<api::StorageQuota, ApiError> {
+        let quota = self
+            .client()
+            .get_storage_quota(Request::new(proto::SourceId { id }))
+            .await
+            .map_err(wire_error)?
+            .into_inner();
+        Ok(api::StorageQuota {
+            used_bytes: quota.used_bytes,
+            quota_bytes: quota.quota_bytes,
+            remaining_bytes: quota.remaining_bytes,
+        })
+    }
+
+    async fn upload_track(&self, upload: api::TrackUpload) -> Result<(), ApiError> {
+        if upload.content.is_empty() || upload.content.len() > api::MAX_MUSIC_UPLOAD_BYTES {
+            return Err(ApiError::invalid_input(
+                "audio files must be between 1 byte and 500 MiB",
+            ));
+        }
+        let header = proto::TrackUploadChunk {
+            source_id: upload.source_id,
+            filename: upload.filename,
+            total_bytes: upload.content.len() as u64,
+            content: Vec::new(),
+        };
+        let mut bytes = upload.content.into_iter();
+        let chunks = std::iter::from_fn(move || {
+            let content: Vec<u8> = bytes.by_ref().take(256 * 1024).collect();
+            (!content.is_empty()).then_some(proto::TrackUploadChunk {
+                content,
+                ..Default::default()
+            })
+        });
+        let stream = futures_util::stream::iter(std::iter::once(header).chain(chunks));
+        self.client()
+            .upload_track(Request::new(stream))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+
     async fn sources(&self) -> Result<Vec<api::SourceInfo>, ApiError> {
         let list = self
             .client()

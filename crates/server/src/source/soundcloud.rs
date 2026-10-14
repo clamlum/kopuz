@@ -47,9 +47,12 @@ impl MediaSource for SoundcloudSource {
             browser_playback: false,
             sync: true,
             downloads: false,
+            uploads: false,
+            storage_quota: false,
             discover: false,
             dont_recommend: false,
             radio: RadioSeeds::NONE,
+            play_queue: false,
             // No write side wired (api-v2 playlist mutation is DataDome-gated).
             playlists: PlaylistOps::None,
             artist_view: ArtistView::Library,
@@ -73,6 +76,7 @@ impl MediaSource for SoundcloudSource {
             duration_secs: None,
             bitrate: None,
             content_length: None,
+            loudness_db: None,
         })
     }
 

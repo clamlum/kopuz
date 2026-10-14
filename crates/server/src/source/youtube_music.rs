@@ -1,13 +1,17 @@
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use config::Source;
 use db::Db;
 
-use crate::{server_ops::ServerConn, ytmusic::YouTubeMusicClient};
+use crate::server_ops::ServerConn;
+use crate::ytmusic::tracking::{self, Watch};
+use crate::ytmusic::{YouTubeMusicClient, player};
 
 use super::{
     AlbumType, ArtistLookup, ArtistView, AuthOutcome, Capabilities, FavoritesPage, FavoritesSync,
-    MediaSource, PlaylistMeta, PlaylistOps, PlaylistPage, RadioSeeds, RemoteAlbum, SourceError,
-    StreamInfo, mirror_added, mirror_created,
+    MediaSource, PlaylistMeta, PlaylistOps, PlaylistPage, RadioPage, RadioSeeds, RemoteAlbum,
+    SourceError, StreamInfo, mirror_added, mirror_created,
 };
 
 /// YT Music's "Liked Music" auto-playlist. It is not browsed like the user's
@@ -18,10 +22,16 @@ use super::{
 /// source has such a playlist and the UI stays unaware of it.
 const LIKED_MUSIC_ID: &str = "LM";
 
+struct Reported {
+    item_id: String,
+    watch: Watch,
+}
+
 pub(super) struct YtSource {
     db: Db,
     source: Source,
     client: YouTubeMusicClient,
+    reported: Arc<Mutex<Option<Reported>>>,
 }
 
 impl YtSource {
@@ -30,6 +40,7 @@ impl YtSource {
             db,
             source,
             client: YouTubeMusicClient::with_cookies(conn.token.clone()),
+            reported: Arc::default(),
         }
     }
 
@@ -67,12 +78,15 @@ impl MediaSource for YtSource {
             browser_playback: false,
             sync: true,
             downloads: true,
+            uploads: false,
+            storage_quota: false,
             discover: true,
             dont_recommend: true,
             radio: RadioSeeds {
                 search: true,
                 ..RadioSeeds::ALL
             },
+            play_queue: false,
             playlists: PlaylistOps::AddRemove,
             artist_view: ArtistView::Remote,
             albums: AlbumType::YtMusic,
@@ -90,30 +104,35 @@ impl MediaSource for YtSource {
             .map_err(SourceError::from)
     }
 
-    async fn start_radio(&self, seed_ref: &str) -> Result<Vec<reader::Track>, SourceError> {
+    async fn start_radio(&self, seed_ref: &str) -> Result<RadioPage, SourceError> {
         if seed_ref.trim().is_empty() {
             return Err(SourceError::InvalidInput("track has no video id".into()));
         }
         // /next works anonymously (empty cookies), so no auth gate here.
-        self.client
-            .start_mix(seed_ref)
-            .await
-            .map_err(SourceError::from)
+        let page = self.client.start_mix(seed_ref).await?;
+        Ok(radio_page(page))
     }
 
-    async fn start_playlist_radio(
-        &self,
-        playlist_ref: &str,
-    ) -> Result<Vec<reader::Track>, SourceError> {
+    async fn start_playlist_radio(&self, playlist_ref: &str) -> Result<RadioPage, SourceError> {
         if playlist_ref.trim().is_empty() {
             return Err(SourceError::InvalidInput("playlist has no id".into()));
         }
         // Liked Music needs no special case here: YT builds `RDAMPLLM` like any
-        // other playlist mix — that is exactly what its own web client asks for.
-        self.client
-            .start_playlist_mix(playlist_ref)
-            .await
-            .map_err(SourceError::from)
+        // other playlist mix, which is exactly what its own web client asks for.
+        let page = self.client.start_playlist_mix(playlist_ref).await?;
+        Ok(radio_page(page))
+    }
+
+    async fn more_radio(&self, cursor: &str) -> Result<RadioPage, SourceError> {
+        let (playlist_id, token) = cursor
+            .split_once(RADIO_CURSOR_SEPARATOR)
+            .ok_or_else(|| SourceError::InvalidInput("not a YouTube Music radio cursor".into()))?;
+        let page = self.client.mix_continuation(playlist_id, token).await?;
+        // A continuation page may leave the playlist id out; the mix is the same one.
+        Ok(radio_page(crate::ytmusic::mix::MixPage {
+            playlist_id: page.playlist_id.clone().or(Some(playlist_id.to_string())),
+            ..page
+        }))
     }
 
     fn web_url(&self, track: &reader::Track) -> Option<String> {
@@ -371,7 +390,92 @@ impl MediaSource for YtSource {
             duration_secs: info.duration_secs,
             bitrate: info.bitrate,
             content_length: info.content_length,
+            loudness_db: info.loudness_db,
         })
+    }
+
+    /// Nothing here waits on the network: the tracking URLs and every ping go
+    /// out on their own tasks.
+    async fn report_playback_start(&self, item_id: &str) -> Result<(), SourceError> {
+        let Some(cookies) = self.client.cookies() else {
+            return Ok(());
+        };
+        let watch = Watch::new(0);
+        let cpn = watch.cpn().to_owned();
+        if let Ok(mut reported) = self.reported.lock() {
+            *reported = Some(Reported {
+                item_id: item_id.to_owned(),
+                watch,
+            });
+        }
+        let (reported, cookies, video_id) = (
+            self.reported.clone(),
+            cookies.to_owned(),
+            item_id.to_owned(),
+        );
+        tokio::spawn(async move {
+            let tracking = match player::playback_tracking(&video_id, &cookies).await {
+                Ok(tracking) => tracking,
+                Err(error) => {
+                    tracing::debug!(%error, "no playback tracking; the play goes unreported");
+                    return;
+                }
+            };
+            let url = reported.lock().ok().and_then(|mut reported| {
+                reported
+                    .as_mut()
+                    .filter(|r| r.watch.cpn() == cpn)
+                    .map(|r| r.watch.attach(tracking))
+            });
+            if let Some(url) = url {
+                send_report(cookies, url);
+            }
+        });
+        Ok(())
+    }
+
+    async fn report_playback_progress(
+        &self,
+        item_id: &str,
+        position_ticks: u64,
+        _is_paused: bool,
+    ) -> Result<(), SourceError> {
+        let Some(cookies) = self.client.cookies() else {
+            return Ok(());
+        };
+        let url = self.reported.lock().ok().and_then(|mut reported| {
+            reported
+                .as_mut()
+                .filter(|r| r.item_id == item_id)
+                .and_then(|r| r.watch.on_position(position_ticks / 10_000))
+        });
+        if let Some(url) = url {
+            send_report(cookies.to_owned(), url);
+        }
+        Ok(())
+    }
+
+    async fn report_playback_stopped(
+        &self,
+        item_id: &str,
+        position_ticks: u64,
+    ) -> Result<(), SourceError> {
+        let Some(cookies) = self.client.cookies() else {
+            return Ok(());
+        };
+        let taken = self
+            .reported
+            .lock()
+            .ok()
+            .and_then(|mut reported| reported.take_if(|r| r.item_id == item_id));
+        let Some(Reported { mut watch, .. }) = taken else {
+            return Ok(());
+        };
+        let due = watch.on_position(position_ticks / 10_000);
+        for url in due.into_iter().chain(watch.finish()) {
+            send_report(cookies.to_owned(), url);
+        }
+        Ok(())
     }
 
     async fn validate(&self) -> AuthOutcome {
@@ -473,5 +577,78 @@ impl MediaSource for YtSource {
     ) -> Result<FavoritesPage, SourceError> {
         let (tracks, next) = self.client.liked_songs_page(cursor.as_deref()).await?;
         Ok(FavoritesPage { tracks, next })
+    }
+}
+
+fn send_report(cookies: String, url: String) {
+    tokio::spawn(async move {
+        let visitor = player::signed_in_visitor(&cookies).await;
+        let endpoint = url.split('?').next().unwrap_or_default();
+        match tracking::ping(&url, &cookies, visitor).await {
+            Ok(status) => tracing::debug!(endpoint, status, "reported playback"),
+            Err(error) => tracing::debug!(endpoint, %error, "playback report failed"),
+        }
+    });
+}
+
+/// A continuation only answers alongside the mix's playlist id, so the cursor
+/// carries both. Neither an `RD…` id nor a token contains a space.
+const RADIO_CURSOR_SEPARATOR: char = ' ';
+
+fn radio_page(page: crate::ytmusic::mix::MixPage) -> RadioPage {
+    let more = page
+        .playlist_id
+        .zip(page.continuation)
+        .map(|(playlist_id, token)| format!("{playlist_id}{RADIO_CURSOR_SEPARATOR}{token}"));
+    RadioPage {
+        tracks: page.tracks,
+        more,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::MusicService;
+
+    async fn source(token: &str) -> (YtSource, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db::init(&dir.path().join("kopuz.db")).await.unwrap();
+        let conn = ServerConn {
+            service: MusicService::YtMusic,
+            url: String::new(),
+            token: token.to_string(),
+            user_id: String::new(),
+            device_id: "test".to_string(),
+            apple_music_storefront: String::new(),
+            apple_music_language: String::new(),
+            folders: Vec::new(),
+        };
+        let src = YtSource::new(db, Source::Server("test".to_string()), &conn);
+        (src, dir)
+    }
+
+    /// A ping as the anonymous identity would link it to whoever signs in next.
+    #[tokio::test]
+    async fn a_signed_out_source_reports_nothing() {
+        let (src, _dir) = source("").await;
+        src.report_playback_start("v").await.unwrap();
+        src.report_playback_progress("v", 15 * 10_000_000, false)
+            .await
+            .unwrap();
+        src.report_playback_stopped("v", 20 * 10_000_000)
+            .await
+            .unwrap();
+        assert!(src.reported.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stop_for_another_track_leaves_the_play_running() {
+        let (src, _dir) = source("SAPISID=abc").await;
+        src.report_playback_start("v").await.unwrap();
+        src.report_playback_stopped("w", 0).await.unwrap();
+        assert!(src.reported.lock().unwrap().is_some());
+        src.report_playback_stopped("v", 0).await.unwrap();
+        assert!(src.reported.lock().unwrap().is_none());
     }
 }

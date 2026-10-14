@@ -375,6 +375,7 @@ replay_gain_mode_auto = ona a
 replay_gain_prevent_clipping = o pini e pakala kalama
 replay_gain_preamp = wawa open
 replay_gain_fallback = wawa pi nasin open
+replay_gain_youtube_loudness = o sama e kalama pi YouTube Music
 move_to_folder = 󱥄󱤂 󱤉 󱤕
 no_folders_yet = 󱤕 󱤧 󱤬 󱤂.
 folder_name = 󱥂 󱤉 󱤕...
@@ -473,6 +474,11 @@ minimize_to_tray = lili tawa poki ilo
 update_available = sin namako li lon
 update_banner_message = Kopuz { $version } li lon.
 view_release = o lukin e lipu pi sin namako
+update_install = o sin e ona o open sin
+update_downloading = mi kama jo e Kopuz { $version }…
+update_restarting = mi open sin tawa pini pi sin ni…
+update_failed = mi ken ala pana e Kopuz { $version }.
+update_retry = o pali sin
 
 volume_scroll_step = nasin tawa kalama
 
@@ -867,3 +873,15 @@ settings_group_interface = Interface
 settings_group_output = Output
 settings_group_loudness = Loudness
 browse = Browse
+
+clippsly_help = Create an App Password at clippsly.app, then sign in with your Clippsly username and that App Password. Storage limits are set by your Clippsly account.
+cloud_storage_usage = Cloud storage: { $used } of { $total } used
+upload_music = Upload music
+uploading_music = Uploading { $name }…
+music_uploaded = Uploaded { $count } file(s).
+music_upload_too_large = Audio files must be no larger than 500 MiB.
+cloud_storage_loading = Loading storage usage…
+
+smb_url_placeholder = smb://nas/Music
+smb_help = Connect to an SMB 2/3 share or subfolder, then sign in with your NAS account. Domain accounts can use DOMAIN\username. Files are read without mounting the share.
+invalid_smb_url = Enter smb://host/share or smb://host/share/folder, without credentials in the URL.

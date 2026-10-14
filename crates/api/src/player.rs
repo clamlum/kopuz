@@ -117,6 +117,7 @@ pub struct PlayerState {
     pub position: Option<PositionAnchor>,
     pub queue: QueueSummary,
     pub volume: f32,
+    pub muted: bool,
     pub buffered: Vec<BufferedRange>,
     pub fading: Option<FadingState>,
     pub external: Option<ExternalPlayback>,
@@ -136,8 +137,12 @@ pub enum PlayerCommand {
     Seek {
         position_ms: u64,
     },
+    /// Also unmutes.
     SetVolume {
         volume: f32,
+    },
+    SetMuted {
+        muted: bool,
     },
     SetMode {
         shuffle: Option<bool>,

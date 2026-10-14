@@ -374,6 +374,7 @@ replay_gain_mode_auto = Automática
 replay_gain_prevent_clipping = Evitar distorção
 replay_gain_preamp = Pré-amplificação
 replay_gain_fallback = Ganho predefinido
+replay_gain_youtube_loudness = Normalizar YouTube Music
 move_to_folder = Mover para pasta
 no_folders_yet = Ainda não tens pastas.
 folder_name = Nome da pasta...
@@ -471,6 +472,11 @@ minimize_to_tray = Minimizar para a bandeja do sistema
 update_available = Atualização disponível
 update_banner_message = O Kopuz { $version } está disponível.
 view_release = Ver notas de lançamento
+update_install = Atualizar e reiniciar
+update_downloading = A transferir o Kopuz { $version }…
+update_restarting = A reiniciar para concluir a atualização…
+update_failed = Não foi possível instalar o Kopuz { $version }.
+update_retry = Tentar novamente
 
 volume_scroll_step = Passo de rolagem do volume
 
@@ -864,3 +870,15 @@ settings_group_interface = Interface
 settings_group_output = Saída
 settings_group_loudness = Volume
 browse = Explorar
+
+clippsly_help = Create an App Password at clippsly.app, then sign in with your Clippsly username and that App Password. Storage limits are set by your Clippsly account.
+cloud_storage_usage = Cloud storage: { $used } of { $total } used
+upload_music = Upload music
+uploading_music = Uploading { $name }…
+music_uploaded = Uploaded { $count } file(s).
+music_upload_too_large = Audio files must be no larger than 500 MiB.
+cloud_storage_loading = Loading storage usage…
+
+smb_url_placeholder = smb://nas/Music
+smb_help = Connect to an SMB 2/3 share or subfolder, then sign in with your NAS account. Domain accounts can use DOMAIN\username. Files are read without mounting the share.
+invalid_smb_url = Enter smb://host/share or smb://host/share/folder, without credentials in the URL.

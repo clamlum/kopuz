@@ -135,6 +135,8 @@ pub enum MusicService {
     SoundCloud,
     Spotify,
     Nextcloud,
+    Clippsly,
+    Smb,
 }
 
 impl MusicService {
@@ -147,6 +149,8 @@ impl MusicService {
         MusicService::AppleMusic,
         MusicService::Spotify,
         MusicService::Nextcloud,
+        MusicService::Clippsly,
+        MusicService::Smb,
     ];
 
     /// The stable slug a client names a service by. Unlike the enum, this
@@ -161,6 +165,8 @@ impl MusicService {
             Self::SoundCloud => "soundcloud",
             Self::Spotify => "spotify",
             Self::Nextcloud => "nextcloud",
+            Self::Clippsly => "clippsly",
+            Self::Smb => "smb",
         }
     }
 
@@ -178,6 +184,8 @@ impl MusicService {
             Self::SoundCloud => "SoundCloud",
             Self::Spotify => "Spotify",
             Self::Nextcloud => "Nextcloud",
+            Self::Clippsly => "Clippsly",
+            Self::Smb => "SMB / NAS",
         }
     }
 
@@ -248,6 +256,14 @@ impl MusicServer {
 
     pub fn yt_browser(&self) -> Option<Browser> {
         self.yt_browser
+    }
+
+    /// An anonymous source sends no cookies even if an old sign-in's token is stored.
+    pub fn ytmusic_cookies(&self) -> Option<&str> {
+        if self.service != MusicService::YtMusic || self.yt_anonymous {
+            return None;
+        }
+        self.access_token.as_deref()
     }
 }
 

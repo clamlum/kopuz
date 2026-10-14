@@ -472,6 +472,7 @@ pub fn replay_gain_to_proto(value: config::ReplayGainSettings) -> ReplayGainSett
         prevent_clipping: value.prevent_clipping,
         preamp_db: value.preamp_db,
         fallback_gain_db: value.fallback_gain_db,
+        normalize_loudness: Some(value.normalize_loudness),
     }
 }
 
@@ -484,6 +485,7 @@ pub fn replay_gain_from_proto(value: Option<&ReplayGainSettings>) -> config::Rep
         prevent_clipping: value.prevent_clipping,
         preamp_db: value.preamp_db,
         fallback_gain_db: value.fallback_gain_db,
+        normalize_loudness: value.normalize_loudness.unwrap_or(true),
     }
 }
 
@@ -600,6 +602,7 @@ pub fn config_to_proto(value: &config::AppConfig) -> Config {
         show_row_images: value.show_row_images,
         sidebar_order: value.sidebar_order.clone(),
         volume: value.volume,
+        muted: value.muted,
         volume_scroll_step: value.volume_scroll_step,
         crossfade_seconds: u32::from(value.crossfade_seconds),
         custom_themes: value
@@ -705,6 +708,7 @@ pub fn config_from_proto(value: &Config) -> config::AppConfig {
         show_row_images: value.show_row_images,
         sidebar_order: value.sidebar_order.clone(),
         volume: value.volume,
+        muted: value.muted,
         volume_scroll_step: value.volume_scroll_step,
         crossfade_seconds: value.crossfade_seconds.min(u32::from(u8::MAX)) as u8,
         custom_themes: value

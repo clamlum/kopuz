@@ -296,12 +296,14 @@ fn replay_gain_settings_scale_the_playing_track() {
         prevent_clipping: false,
         preamp_db: 0.0,
         fallback_gain_db: -6.0,
+        normalize_loudness: true,
     }));
 
+    // The change ramps in, so wait for a block past the ramp.
     let mut gained = ungained;
     wait_until("gain applied to the live session", || {
         gained = peak(&sink);
-        gained > 0.0 && gained < ungained * 0.75
+        gained > 0.0 && gained < ungained * 0.6
     });
     assert!(
         (gained - ungained * 0.5).abs() < ungained * 0.15,
@@ -319,6 +321,7 @@ fn service_replay_gain_levels_a_stream_without_tags() {
         prevent_clipping: false,
         preamp_db: 0.0,
         fallback_gain_db: 0.0,
+        normalize_loudness: true,
     }));
 
     // A bare WAV, as a transcoding server would serve it: no tags at all, so
@@ -361,6 +364,59 @@ fn service_replay_gain_levels_a_stream_without_tags() {
     );
 
     engine.shutdown();
+}
+
+#[test]
+fn service_loudness_attenuates_and_its_absence_is_unity() {
+    let peak_with = |loudness_db: Option<f32>| {
+        let (sink, engine) = spawn_engine();
+        let (factory, duration) = wav_factory(5.0);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        engine.send(Command::Load(LoadRequest {
+            token: 1,
+            factory,
+            duration,
+            transition: Transition::Immediate,
+            start_at: None,
+            album_context: false,
+            service_replay_gain: config::ReplayGainInfo {
+                loudness_db,
+                ..Default::default()
+            },
+            reply: Some(reply_tx),
+        }));
+        reply_rx
+            .blocking_recv()
+            .expect("load reply")
+            .expect("load ok");
+        let mut peak = 0.0_f32;
+        wait_until("non-silent audio", || {
+            peak = sink
+                .pull(4410)
+                .into_iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+            peak > 0.0
+        });
+        engine.shutdown();
+        peak
+    };
+
+    let full = 10_000.0 / 32_768.0;
+    let untouched = peak_with(None);
+    assert!(
+        (untouched - full).abs() < 1e-4,
+        "expected {full}, got {untouched}"
+    );
+
+    let attenuated = peak_with(Some(6.0));
+    let expected = full * 10.0_f32.powf(-6.0 / 20.0);
+    assert!(
+        (attenuated - expected).abs() < expected * 0.05,
+        "expected ~{expected}, got {attenuated}"
+    );
+
+    let quiet = peak_with(Some(-6.0));
+    assert!((quiet - full).abs() < 1e-4, "expected {full}, got {quiet}");
 }
 
 #[test]
@@ -2005,4 +2061,77 @@ fn an_unbuffered_slow_source_cannot_even_probe() {
         err.contains("stalled"),
         "expected the probe to stall on unavailable bytes, got: {err}"
     );
+}
+
+#[test]
+fn gapless_load_starts_on_the_sample_after_the_last_one() {
+    let (sink, engine) = spawn_engine();
+    let mut events = engine_subscribe(&engine);
+    let mut seen = Vec::new();
+
+    let (factory_a, duration_a) = wav_factory(0.5);
+    load(&engine, 1, factory_a, duration_a);
+    wait_until("phase Playing", || engine.status().phase == Phase::Playing);
+
+    let (factory_b, duration_b) = wav_factory(1.0);
+    let outcome = load_with(&engine, 2, factory_b, duration_b, Transition::Gapless);
+    assert!(outcome.gapless && !outcome.crossfaded);
+    // Queued behind A: nothing switches until A has been heard to the end.
+    assert_eq!(engine.status().token, 1);
+    // Let both decoders fill their rings, so an empty block can only be a gap.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let a_samples = (0.5 * TEST_CONFIG.sample_rate as f64) as usize * TEST_CONFIG.channels;
+    let mut samples = Vec::new();
+    while samples.len() < a_samples * 2 {
+        samples.extend(sink.pull(1000));
+    }
+    wait_until("TrackSwitched", || {
+        drain_events(&mut events, &mut seen);
+        seen.iter().any(|e| {
+            matches!(
+                e,
+                Event::TrackSwitched {
+                    token: 2,
+                    from_token: 1
+                }
+            )
+        })
+    });
+    assert!(!seen.iter().any(|e| matches!(e, Event::Ended { .. })));
+    assert_eq!(engine.status().token, 2);
+    assert!(
+        samples.iter().all(|sample| *sample != 0.0),
+        "silence at sample {:?}",
+        samples.iter().position(|sample| *sample == 0.0)
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn a_cancelled_gapless_load_lets_the_current_track_end() {
+    let (sink, engine) = spawn_engine();
+    let mut events = engine_subscribe(&engine);
+    let mut seen = Vec::new();
+
+    let (factory_a, duration_a) = wav_factory(0.5);
+    load(&engine, 1, factory_a, duration_a);
+    wait_until("phase Playing", || engine.status().phase == Phase::Playing);
+    let (factory_b, duration_b) = wav_factory(1.0);
+    assert!(load_with(&engine, 2, factory_b, duration_b, Transition::Gapless).gapless);
+    engine.send(Command::CancelPending);
+
+    wait_until("A ends", || {
+        sink.pull(4096);
+        drain_events(&mut events, &mut seen);
+        seen.iter().any(|e| matches!(e, Event::Ended { token: 1 }))
+    });
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, Event::TrackSwitched { .. }))
+    );
+    assert_eq!(engine.status().token, 1);
+    assert!(sink.pull(4096).iter().all(|sample| *sample == 0.0));
+    engine.shutdown();
 }

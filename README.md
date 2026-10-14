@@ -63,7 +63,9 @@ The player itself is a daemon: it owns the library, the audio engine, the media
 sources and their credentials, and everything that touches the system. The
 window is a client of it, and so is anything else you write — the contract is
 one gRPC schema on a local socket, documented in [docs/api.md](docs/api.md).
-`kopuzd` runs the same core with no window.
+`kopuzd` runs the same core with no window. Use [`kopuzctl`](docs/cli.md) to
+control playback, configure sources, and start library jobs from a terminal or
+script.
 
 ## Features
 
@@ -87,6 +89,12 @@ one gRPC schema on a local socket, documented in [docs/api.md](docs/api.md).
   exposed through one unified `MediaSource` layer, and the UI adapts to each
   source's capabilities (search, downloads, radio, discover, favorites sync,
   etc.) rather than hardcoding per-service behavior.
+- **Clippsly Listener**: Add Clippsly in source settings, then sign in with your
+  username and an App Password created at [clippsly.app](https://clippsly.app).
+  Browse and stream your locker, download tracks, and upload audio files from
+  the active source's settings card. The card shows your account's storage
+  usage; quotas and any free allowance are managed by Clippsly. Uploads refresh
+  the library after the batch finishes. Remote playlists are not yet supported.
 - **YouTube Music**: Full streaming backend with a Spotify-style **Discover**
   page (recommended songs, playlists, albums, artists, and moods), rich **artist
   profiles** (banner, top songs, albums, singles, related artists),
@@ -102,6 +110,9 @@ one gRPC schema on a local socket, documented in [docs/api.md](docs/api.md).
   search, and scrobbling, with playback through Spotify's official Web Playback
   SDK or any **Spotify Connect** device you own. Needs Premium and a one-time
   app setup. See [Spotify Setup](#spotify-setup).
+- **SMB / NAS**: Add an SMB 2/3 share or subfolder as a music library, with
+  embedded tags, cover art, and seekable playback without mounting the share.
+  See [SMB setup and validation](docs/smb.md).
 - **Lyrics Support**: Enjoy real-time synced and plain lyrics, complete with
   auto-scrolling to follow along with your music.
 - **Favorites**: Star tracks locally or sync favorites with your

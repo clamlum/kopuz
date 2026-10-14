@@ -26,6 +26,7 @@ service Kopuz {
   rpc Stop(StopRequest) returns (MutationResult);
   rpc Seek(Seek) returns (MutationResult);
   rpc SetVolume(SetVolume) returns (MutationResult);
+  rpc SetMuted(SetMuted) returns (MutationResult);
   rpc SetMode(SetMode) returns (MutationResult);
 
   rpc GetStatus(GetStatusRequest) returns (DaemonStatus);
@@ -87,6 +88,8 @@ service Kopuz {
   rpc DeleteTracks(DeleteTracksRequest) returns (Unit);
   rpc DeleteAlbum(DeleteAlbumRequest) returns (Unit);
   rpc UploadArtwork(ArtworkUpload) returns (Unit);
+  rpc GetStorageQuota(SourceId) returns (StorageQuota);
+  rpc UploadTrack(stream TrackUploadChunk) returns (Unit);
   rpc RemoveArtwork(ArtworkTarget) returns (Unit);
   rpc StartJob(StartJobRequest) returns (JobRef);
   rpc CancelJob(JobId) returns (CancelJobResponse);
@@ -166,8 +169,12 @@ message Seek {
 }
 
 message SetVolume {
-  // 0.0 to 1.0.
+  // 0.0 to 1.0. Also unmutes.
   float volume = 1;
+}
+
+message SetMuted {
+  bool muted = 1;
 }
 
 message SetMode {
@@ -276,6 +283,7 @@ message PlayerState {
   optional uint64 output_latency_ms = 13;
   // What is playing, the same row the queue holds.
   optional TrackInfo row = 14;
+  bool muted = 15;
 }
 
 // phase is engine truth; intent is what the daemon is trying to do.
@@ -739,6 +747,8 @@ message SourceCapabilities {
   // Playing a search result starts a track radio from it rather than
   // queueing the results.
   bool search_radio = 18;
+  bool uploads = 19;
+  bool storage_quota = 20;
 }
 
 // What making a source usable takes.
@@ -1412,6 +1422,8 @@ message ReplayGainSettings {
   bool prevent_clipping = 2;
   float preamp_db = 3;
   float fallback_gain_db = 4;
+  // Absent means on, so an older peer keeps the default.
+  optional bool normalize_loudness = 5;
 }
 
 message AlbumSortCriterion {
@@ -1494,6 +1506,7 @@ message Config {
   bool lyrics_depth_blur = 67;
   uint32 lyrics_depth_blur_strength = 68;
   ReplayGainSettings replay_gain = 70;
+  bool muted = 71;
 }
 
 enum AlbumViewMode {
@@ -1796,4 +1809,18 @@ enum NoticeLevel {
   NOTICE_LEVEL_INFO = 1;
   NOTICE_LEVEL_WARNING = 2;
   NOTICE_LEVEL_ERROR = 3;
+}
+
+message StorageQuota {
+  uint64 used_bytes = 1;
+  uint64 quota_bytes = 2;
+  uint64 remaining_bytes = 3;
+}
+
+// Metadata appears in the first message only; content follows in bounded chunks.
+message TrackUploadChunk {
+  string source_id = 1;
+  string filename = 2;
+  uint64 total_bytes = 3;
+  bytes content = 4;
 }

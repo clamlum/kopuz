@@ -1067,6 +1067,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccm"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be9b34d99d395af800e996c5784f810f8400ccd64202f91859dc677825b5378"
+dependencies = [
+ "aead 0.6.1",
+ "cipher 0.5.2",
+ "ctr 0.10.1",
+ "ctutils",
+]
+
+[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1210,6 +1222,17 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "cmac"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac78aa94ce13e432b332a4d1bf2eff167d3a2520188ee05b337180a42fd2e62e"
+dependencies = [
+ "cipher 0.5.2",
+ "dbl",
+ "digest 0.11.3",
+]
 
 [[package]]
 name = "cmake"
@@ -1783,6 +1806,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
+name = "dbl"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0d7a944e61df464668c5f51f56cc667396a8821434273112948ea0b66e405d7"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
 name = "debugid"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2092,6 +2124,7 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
+ "ctutils",
 ]
 
 [[package]]
@@ -3729,7 +3762,7 @@ version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
- "hmac",
+ "hmac 0.12.1",
 ]
 
 [[package]]
@@ -3739,6 +3772,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -4418,6 +4460,7 @@ dependencies = [
  "directories",
  "discord-rich-presence",
  "futures-util",
+ "hex",
  "http",
  "image",
  "jni 0.22.4",
@@ -4448,6 +4491,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
  "tower 0.5.3",
@@ -4480,6 +4524,7 @@ name = "kopuz-client"
 version = "0.20.0"
 dependencies = [
  "async-trait",
+ "directories",
  "futures-util",
  "hyper-util",
  "kopuz-api",
@@ -4525,6 +4570,20 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "uuid 1.23.5",
+]
+
+[[package]]
+name = "kopuz-ctl"
+version = "0.20.0"
+dependencies = [
+ "clap",
+ "kopuz-api",
+ "kopuz-client",
+ "rpassword",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4631,6 +4690,7 @@ dependencies = [
  "kopuz-api",
  "kopuz-client",
  "kopuz-config",
+ "kopuz-ctl",
  "kopuz-daemon",
  "kopuz-db",
  "kopuz-player",
@@ -4648,6 +4708,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows 0.62.2",
+ "windows-registry",
 ]
 
 [[package]]
@@ -4794,6 +4856,7 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
+ "smb2",
  "sqlx",
  "symphonia",
  "tempfile",
@@ -5125,6 +5188,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "m3u8-rs"
 version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5288,6 +5360,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
+]
+
+[[package]]
+name = "md4"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd76fb0fd6b2e4be62a73f8e0858ca97f81babcb1af322dcaca196f735f17f80"
+dependencies = [
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "md5"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5362,6 +5453,16 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
 
 [[package]]
 name = "minimal-lexical"
@@ -6299,7 +6400,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest 0.10.7",
- "hmac",
+ "hmac 0.12.1",
+]
+
+[[package]]
+name = "pbkdf2"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "112d82ceb8c5bf524d9af484d4e4970c9fd5a0cc15ba14ad93dccd28873b0629"
+dependencies = [
+ "digest 0.11.3",
+ "hmac 0.13.0",
 ]
 
 [[package]]
@@ -7435,6 +7546,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -7524,9 +7636,9 @@ dependencies = [
  "indoc",
  "libesedb",
  "log",
- "lz4_flex",
+ "lz4_flex 0.11.6",
  "once_cell",
- "pbkdf2",
+ "pbkdf2 0.12.2",
  "privilege",
  "rand 0.8.7",
  "rawcopy-rs-next",
@@ -7540,6 +7652,17 @@ dependencies = [
  "windows 0.51.1",
  "zbus 3.15.2",
  "zvariant 3.15.2",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7560,6 +7683,16 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8230,6 +8363,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "smb2"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf9e5ee92bb681d6dbeed831789fe96a9da3b36fba98e921e02a1d1e83eaf5d9"
+dependencies = [
+ "aes 0.9.1",
+ "aes-gcm 0.11.0",
+ "async-trait",
+ "ccm",
+ "cmac",
+ "ctutils",
+ "digest 0.11.3",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "log",
+ "lz4_flex 0.14.0",
+ "md-5 0.11.0",
+ "md4",
+ "num_enum",
+ "pbkdf2 0.13.0",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "socket2"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8444,10 +8605,10 @@ dependencies = [
  "generic-array",
  "hex",
  "hkdf",
- "hmac",
+ "hmac 0.12.1",
  "itoa",
  "log",
- "md-5",
+ "md-5 0.10.6",
  "memchr",
  "once_cell",
  "percent-encoding",
@@ -8482,11 +8643,11 @@ dependencies = [
  "futures-util",
  "hex",
  "hkdf",
- "hmac",
+ "hmac 0.12.1",
  "home",
  "itoa",
  "log",
- "md-5",
+ "md-5 0.10.6",
  "memchr",
  "once_cell",
  "rand 0.8.7",
@@ -9778,6 +9939,12 @@ checksum = "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4"
 dependencies = [
  "unic-common",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-bidi"

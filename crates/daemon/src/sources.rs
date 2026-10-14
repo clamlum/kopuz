@@ -58,6 +58,8 @@ fn capabilities(caps: server::source::Capabilities) -> SourceCapabilities {
         browser_playback: caps.browser_playback,
         sync: caps.sync,
         downloads: caps.downloads,
+        uploads: caps.uploads,
+        storage_quota: caps.storage_quota,
         discover: caps.discover,
         dont_recommend: caps.dont_recommend,
         track_radio: caps.radio.track,
@@ -83,7 +85,41 @@ fn capabilities(caps: server::source::Capabilities) -> SourceCapabilities {
     }
 }
 
+fn source_error(error: server::source::SourceError) -> ApiError {
+    use server::source::SourceError;
+    match &error {
+        SourceError::Unsupported(what) => ApiError::unsupported(*what),
+        SourceError::Auth => ApiError::new(ErrorCode::SourceAuthExpired, error.to_string()),
+        SourceError::Connectivity => ApiError::new(ErrorCode::SourceUnreachable, error.to_string()),
+        SourceError::InvalidInput(message) => ApiError::invalid_input(message.clone()),
+        SourceError::Backend(message) => ApiError::internal(message.clone()),
+    }
+}
+
 impl SourceService {
+    pub async fn storage_quota(&self, id: &str) -> Result<api::StorageQuota, ApiError> {
+        let (_, source) = self.resolve(id).await?;
+        let quota = source.storage_quota().await.map_err(source_error)?;
+        Ok(api::StorageQuota {
+            used_bytes: quota.used_bytes,
+            quota_bytes: quota.quota_bytes,
+            remaining_bytes: quota.remaining_bytes,
+        })
+    }
+
+    pub async fn upload_track(&self, upload: api::TrackUpload) -> Result<(), ApiError> {
+        if upload.content.is_empty() || upload.content.len() > api::MAX_MUSIC_UPLOAD_BYTES {
+            return Err(ApiError::invalid_input(
+                "audio files must be between 1 byte and 500 MiB",
+            ));
+        }
+        let (_, source) = self.resolve(&upload.source_id).await?;
+        source
+            .upload_track(upload.filename, upload.content)
+            .await
+            .map_err(source_error)
+    }
+
     pub fn new(db: db::Db, session: SessionHandle, config: Arc<ConfigService>) -> Arc<Self> {
         Arc::new(Self {
             db,
@@ -695,11 +731,20 @@ impl SourceService {
             .await
             .map_err(db_error)?
             .ok_or_else(|| ApiError::not_found("no such server"))?;
-        let auth =
+        let auth = if server.service == config::MusicService::Clippsly {
+            let client = server::clippsly::ClippslyClient::new(&server.url, &request.password)
+                .map_err(source_error)?;
+            let account = client.account().await.map_err(source_error)?;
+            server::provider::AuthSession {
+                access_token: request.password,
+                user_id: account.id.to_string(),
+            }
+        } else {
             server::provider::ProviderClient::new(server.service, server.url, current.device_id)
                 .login(request.username.trim(), &request.password)
                 .await
-                .map_err(|error| ApiError::new(ErrorCode::SourceAuthExpired, error))?;
+                .map_err(|error| ApiError::new(ErrorCode::SourceAuthExpired, error))?
+        };
         self.provision_credentials(CredentialProvision {
             server_id: request.server_id,
             secret: auth.access_token,
@@ -960,18 +1005,7 @@ impl SourceService {
     }
 
     async fn rotate_ytmusic(&self) {
-        let config = self.current().await;
-        let Some(server) = config
-            .server
-            .as_ref()
-            .filter(|server| server.service == config::MusicService::YtMusic)
-        else {
-            return;
-        };
-        let (Some(cookies), Some(id)) = (
-            server.access_token.clone(),
-            config.active_source.server_id().map(str::to_string),
-        ) else {
+        let Some((cookies, id)) = ytmusic_rotation(&self.current().await) else {
             return;
         };
         match server::ytmusic::verify_session_keepalive::tick(&cookies).await {
@@ -1027,6 +1061,12 @@ impl SourceService {
             Err(error) => tracing::debug!(%error, "Spotify token refresh failed"),
         }
     }
+}
+
+fn ytmusic_rotation(config: &config::AppConfig) -> Option<(String, String)> {
+    let cookies = config.server.as_ref()?.ytmusic_cookies()?.to_string();
+    let id = config.active_source.server_id()?.to_string();
+    Some((cookies, id))
 }
 
 /// Accept cookies that still validate, else try one keepalive rotation before
@@ -1092,5 +1132,31 @@ mod tests {
             assert_eq!(error.code, ErrorCode::InvalidInput);
         }
         assert!(SourceService::validate_server_id("jellyfin-1").is_ok());
+    }
+
+    fn youtube_music(anonymous: bool) -> config::AppConfig {
+        let mut server = config::MusicServer::new_with_service(
+            "YouTube Music".into(),
+            "https://music.youtube.com".into(),
+            config::MusicService::YtMusic,
+        );
+        server.id = Some("yt".into());
+        server.access_token = Some("SAPISID=leftover".into());
+        server.yt_anonymous = anonymous;
+        config::AppConfig {
+            server: Some(server),
+            active_source: config::Source::Server("yt".into()),
+            ..Default::default()
+        }
+    }
+
+    /// Switching to anonymous keeps the old sign-in's row; rotating it would keep that session alive.
+    #[test]
+    fn an_anonymous_source_never_rotates_a_leftover_token() {
+        assert_eq!(ytmusic_rotation(&youtube_music(true)), None);
+        assert_eq!(
+            ytmusic_rotation(&youtube_music(false)),
+            Some(("SAPISID=leftover".into(), "yt".into()))
+        );
     }
 }

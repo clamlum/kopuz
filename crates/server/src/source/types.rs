@@ -46,6 +46,20 @@ impl From<db::DbError> for SourceError {
     }
 }
 
+/// One batch of a radio. The cursor is opaque to everyone but the source that
+/// issued it, and is stored with the queue so a restart picks the radio up.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RadioPage {
+    pub tracks: Vec<reader::Track>,
+    pub more: Option<String>,
+}
+
+impl RadioPage {
+    pub fn last(tracks: Vec<reader::Track>) -> Self {
+        Self { tracks, more: None }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlaylistOps {
     None,
@@ -149,11 +163,15 @@ pub struct Capabilities {
     pub browser_playback: bool,
     pub sync: bool,
     pub downloads: bool,
+    pub uploads: bool,
+    pub storage_quota: bool,
     pub discover: bool,
     /// The person can tell it to stop recommending a track — a negative
     /// signal to the source's recommender, not a library edit.
     pub dont_recommend: bool,
     pub radio: RadioSeeds,
+    /// It keeps a play queue of its own that other clients read and write.
+    pub play_queue: bool,
     pub playlists: PlaylistOps,
     pub artist_view: ArtistView,
     pub albums: AlbumType,
@@ -174,6 +192,7 @@ pub struct StreamInfo {
     pub duration_secs: Option<u64>,
     pub bitrate: Option<u32>,
     pub content_length: Option<u64>,
+    pub loudness_db: Option<f32>,
 }
 
 pub struct PlaylistMeta {
@@ -207,4 +226,19 @@ impl From<crate::ytmusic::discover::YtAlbum> for RemoteAlbum {
             tracks: a.tracks,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageQuota {
+    pub used_bytes: u64,
+    pub quota_bytes: u64,
+    pub remaining_bytes: u64,
+}
+
+pub struct RemotePlayQueue {
+    pub tracks: Vec<reader::Track>,
+    /// The playing track's item id, matched against `tracks[i].id.key()`.
+    pub current_id: Option<String>,
+    pub position_ms: u64,
+    pub changed_by: Option<String>,
 }

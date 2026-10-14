@@ -33,21 +33,25 @@ use crate::server_ops::ServerConn;
 
 mod apple_music;
 pub mod capabilities;
+mod clippsly;
 mod jellyfin;
 mod local;
 mod nextcloud;
 mod offline;
 mod search;
+mod smb;
 mod soundcloud;
 mod spotify;
 mod subsonic;
 mod types;
 mod youtube_music;
 use apple_music::AppleMusicSource;
+use clippsly::ClippslySource;
 use jellyfin::JellyfinSource;
 use local::LocalSource;
 use nextcloud::NextcloudSource;
 use offline::OfflineServerSource;
+use smb::SmbSource;
 use soundcloud::SoundcloudSource;
 use spotify::SpotifySource;
 use subsonic::SubsonicSource;
@@ -103,6 +107,15 @@ pub trait MediaSource: Send + Sync {
     /// the remote's URL / deciphered stream).
     async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError>;
 
+    /// A seekable protocol-native stream, or `None` to use the resolved URL.
+    async fn open_stream(
+        &self,
+        _item_id: &str,
+        _progress: Option<crate::stream::stream_buffer::BufferProgressCallback>,
+    ) -> Result<Option<Box<dyn symphonia::core::io::MediaSource>>, SourceError> {
+        Ok(None)
+    }
+
     /// The bytes of one track, for sources that can't express it as a URL.
     ///
     /// Almost nothing needs this: a download is normally a GET of whatever
@@ -120,6 +133,14 @@ pub trait MediaSource: Send + Sync {
 
     /// Check stored creds against the source (local is always [`Valid`](AuthOutcome::Valid)).
     async fn validate(&self) -> AuthOutcome;
+
+    async fn storage_quota(&self) -> Result<StorageQuota, SourceError> {
+        Err(SourceError::unsupported("storage quota"))
+    }
+
+    async fn upload_track(&self, _filename: String, _content: Vec<u8>) -> Result<(), SourceError> {
+        Err(SourceError::unsupported("music uploads"))
+    }
 
     /// All favorited item ids on the remote (YT pages internally). Local has no
     /// remote set, so it returns empty.
@@ -156,7 +177,7 @@ pub trait MediaSource: Send + Sync {
     /// Start a radio/mix seeded from a track, returning the generated queue. Only
     /// sources whose [`Capabilities::radio`] is set override this; the rest
     /// inherit the unsupported default.
-    async fn start_radio(&self, _seed_ref: &str) -> Result<Vec<reader::Track>, SourceError> {
+    async fn start_radio(&self, _seed_ref: &str) -> Result<RadioPage, SourceError> {
         Err(SourceError::unsupported("radio"))
     }
 
@@ -165,11 +186,29 @@ pub trait MediaSource: Send + Sync {
     /// playlist's tracks — so callers play it as-is. Shares
     /// [`Capabilities::radio`] with [`start_radio`](Self::start_radio): a source
     /// that can seed radio from a track can seed it from a playlist too.
-    async fn start_playlist_radio(
-        &self,
-        _playlist_ref: &str,
-    ) -> Result<Vec<reader::Track>, SourceError> {
+    async fn start_playlist_radio(&self, _playlist_ref: &str) -> Result<RadioPage, SourceError> {
         Err(SourceError::unsupported("playlist radio"))
+    }
+
+    /// Only a source that hands out a cursor is ever asked.
+    async fn more_radio(&self, _cursor: &str) -> Result<RadioPage, SourceError> {
+        Err(SourceError::unsupported("radio continuation"))
+    }
+
+    /// Whether the server now holds `queue`. A queue holding tracks the source
+    /// does not own has no remote form, so an impl skips it (`false`) rather
+    /// than saving a partial one. An empty queue clears the server's.
+    async fn save_play_queue(
+        &self,
+        _queue: &[reader::Track],
+        _current_index: usize,
+        _position_ms: u64,
+    ) -> Result<bool, SourceError> {
+        Err(SourceError::unsupported("play queue sync"))
+    }
+
+    async fn get_play_queue(&self) -> Result<Option<RemotePlayQueue>, SourceError> {
+        Err(SourceError::unsupported("play queue sync"))
     }
 
     /// The track's canonical public web URL, when this source has shareable web
@@ -298,6 +337,24 @@ pub trait MediaSource: Send + Sync {
     /// (Jellyfin/Subsonic) override; the caller persists + prunes the result.
     async fn fetch_library(&self) -> Result<LibrarySnapshot, SourceError> {
         Ok(LibrarySnapshot::default())
+    }
+
+    /// Fetch a library while reporting the file currently being scanned.
+    async fn fetch_library_with_progress(
+        &self,
+        _on_progress: std::sync::Arc<dyn Fn(String) + Send + Sync>,
+    ) -> Result<LibrarySnapshot, SourceError> {
+        self.fetch_library().await
+    }
+
+    /// Resolve missing album covers after the library has been persisted.
+    async fn fetch_missing_covers(
+        &self,
+        _albums: &[reader::Album],
+        _tracks: &[reader::Track],
+        _on_progress: std::sync::Arc<dyn Fn(String) + Send + Sync>,
+    ) -> Result<Vec<reader::Album>, SourceError> {
+        Ok(Vec::new())
     }
 
     /// Fetch a playlist's tracks from the remote. Local playlists resolve their
@@ -830,6 +887,8 @@ fn remote_source(db: Db, source: Source, conn: &ServerConn) -> Box<dyn MediaSour
         }
         MusicService::Spotify => Box::new(SpotifySource::new(db, source, conn)),
         MusicService::Nextcloud => Box::new(NextcloudSource::new(db, source, conn)),
+        MusicService::Clippsly => Box::new(ClippslySource::new(db, source, conn)),
+        MusicService::Smb => Box::new(SmbSource::new(db, source, conn)),
     }
 }
 
