@@ -12,7 +12,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, RawValue, StandardTag, Tag as SymphoniaTag};
 use symphonia::core::units::Timestamp;
 
-pub(crate) struct ScannedTrack {
+pub struct ScannedTrack {
     pub track: Track,
     pub album: Album,
 }
@@ -39,7 +39,7 @@ pub fn make_album_id(album: &str, grouping_key: &str) -> String {
     }
 }
 
-pub(crate) fn album_id_is_current(album_id: &str) -> bool {
+pub fn album_id_is_current(album_id: &str) -> bool {
     album_id.starts_with("alb2_")
 }
 
@@ -88,6 +88,7 @@ pub fn extract_metadata(
     tag: Option<&Tag>,
     properties: &FileProperties,
     track_path: &Path,
+    file_size: u64,
 ) -> Track {
     let artist = tag
         .and_then(|t| t.artist().map(|a| a.to_string()))
@@ -151,13 +152,9 @@ pub fn extract_metadata(
         .map(|s| s.to_string());
 
     let sample_rate = properties.sample_rate().unwrap_or(0);
-    let file_size = std::fs::metadata(track_path)
-        .ok()
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let _bitdepth = properties.bit_depth().unwrap_or(0);
     let duration_secs = properties.duration().as_secs().max(1);
-    let bitrate_kbps = ((file_size * 8) / duration_secs / 1000).min(u16::MAX as u64) as u16;
+    let bitrate_kbps =
+        (file_size.saturating_mul(8) / duration_secs / 1000).min(u16::MAX as u64) as u16;
 
     Track {
         id: TrackId::Local(track_path.to_path_buf()),
@@ -166,6 +163,7 @@ pub fn extract_metadata(
         title,
         artist,
         artists,
+        credits: Vec::new(),
         album: album_title.unwrap_or_else(|| "Unknown Album".to_string()),
         khz: sample_rate,
         bitrate: bitrate_kbps,
@@ -177,24 +175,37 @@ pub fn extract_metadata(
         musicbrainz_recording_id,
         musicbrainz_track_id,
         playlist_item_id: None,
+        replay_gain: config::ReplayGainInfo::default(),
     }
 }
 
-pub(crate) fn read_metadata(track_path: &Path) -> Option<ScannedTrack> {
+pub fn read_metadata(track_path: &Path) -> Option<ScannedTrack> {
     let options = ParseOptions::new().read_cover_art(false);
     let tagged_file = match Probe::open(track_path).ok()?.options(options).read() {
         Ok(tagged_file) => tagged_file,
         Err(_) if is_matroska_audio(track_path) => {
-            return read_with_symphonia(track_path);
+            let file = std::fs::File::open(track_path).ok()?;
+            return read_with_symphonia(Box::new(file), track_path).ok();
         }
         Err(_) => return None,
     };
+    let file_size = std::fs::metadata(track_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    Some(from_tagged_file(&tagged_file, track_path, file_size))
+}
+
+pub fn from_tagged_file(
+    tagged_file: &TaggedFile,
+    track_path: &Path,
+    file_size: u64,
+) -> ScannedTrack {
     let properties = tagged_file.properties();
     let tag = tagged_file
         .primary_tag()
         .or_else(|| tagged_file.first_tag());
 
-    let track = extract_metadata(tag, properties, track_path);
+    let track = extract_metadata(tag, properties, track_path, file_size);
     let album_artist = tag
         .and_then(|t| t.get_string(ItemKey::AlbumArtist))
         .map(|s| s.to_string())
@@ -211,9 +222,11 @@ pub(crate) fn read_metadata(track_path: &Path) -> Option<ScannedTrack> {
         year,
         cover_path: None,
         manual_cover: false,
+        artist_id: None,
+        artist_key: None,
     };
 
-    Some(ScannedTrack { track, album })
+    ScannedTrack { track, album }
 }
 
 pub fn read(track_path: &Path, _cover_cache: &Path, library: &mut Library) -> Option<Track> {
@@ -372,9 +385,11 @@ fn find_symphonia_tag<'a>(
         })
 }
 
-fn read_with_symphonia(track_path: &Path) -> Option<ScannedTrack> {
-    let file = std::fs::File::open(track_path).ok()?;
-    let file_size = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
+pub fn read_with_symphonia(
+    stream: Box<dyn symphonia::core::io::MediaSource>,
+    track_path: &Path,
+) -> symphonia::core::errors::Result<ScannedTrack> {
+    let file_size = stream.byte_len().unwrap_or(0);
 
     let mut hint = Hint::new();
     if let Some(ext) = track_path.extension().and_then(|ext| ext.to_str()) {
@@ -385,44 +400,41 @@ fn read_with_symphonia(track_path: &Path) -> Option<ScannedTrack> {
     let mut sample_rate = 0;
     let mut duration = 0;
 
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    if let Ok(mut format) = symphonia::default::get_probe().probe(
+    let mss = MediaSourceStream::new(stream, Default::default());
+    let mut format = symphonia::default::get_probe().probe(
         &hint,
         mss,
         FormatOptions::default(),
         MetadataOptions::default(),
-    ) {
-        {
-            let mut metadata = format.metadata();
-            if let Some(revision) = metadata.skip_to_latest() {
-                tags.extend(revision.media.tags.iter().cloned());
-            }
+    )?;
+    {
+        let mut metadata = format.metadata();
+        if let Some(revision) = metadata.skip_to_latest() {
+            tags.extend(revision.media.tags.iter().cloned());
         }
+    }
 
-        if let Some(track_info) = format
-            .tracks()
-            .iter()
-            .find(|track| {
-                track
-                    .codec_params
-                    .as_ref()
-                    .and_then(|p| p.audio())
-                    .is_some()
-            })
-            .or_else(|| format.tracks().first())
-        {
-            if let Some(audio) = track_info.codec_params.as_ref().and_then(|p| p.audio()) {
-                sample_rate = audio.sample_rate.unwrap_or(0);
-            }
-            duration = track_info
-                .time_base
-                .zip(track_info.num_frames)
-                .and_then(|(time_base, n_frames)| {
-                    time_base.calc_time(Timestamp::from(n_frames as i64))
-                })
-                .map(|time| time.as_secs_f64().ceil().max(0.0) as u64)
-                .unwrap_or(0);
+    if let Some(track_info) = format
+        .tracks()
+        .iter()
+        .find(|track| {
+            track
+                .codec_params
+                .as_ref()
+                .and_then(|p| p.audio())
+                .is_some()
+        })
+        .or_else(|| format.tracks().first())
+    {
+        if let Some(audio) = track_info.codec_params.as_ref().and_then(|p| p.audio()) {
+            sample_rate = audio.sample_rate.unwrap_or(0);
         }
+        duration = track_info
+            .time_base
+            .zip(track_info.num_frames)
+            .and_then(|(time_base, n_frames)| time_base.calc_time(Timestamp::from(n_frames as i64)))
+            .map(|time| time.as_secs_f64().ceil().max(0.0) as u64)
+            .unwrap_or(0);
     }
 
     let artist = find_symphonia_tag(&tags, |t| matches!(t, StandardTag::Artist(_)), &["ARTIST"])
@@ -473,6 +485,7 @@ fn read_with_symphonia(track_path: &Path) -> Option<ScannedTrack> {
         title,
         artist: artist.clone(),
         artists: vec![artist.clone()],
+        credits: Vec::new(),
         album: album_title.unwrap_or_else(|| "Unknown Album".to_string()),
         khz: sample_rate,
         bitrate: bitrate_kbps,
@@ -510,6 +523,7 @@ fn read_with_symphonia(track_path: &Path) -> Option<ScannedTrack> {
         )
         .and_then(symphonia_tag_to_string),
         playlist_item_id: None,
+        replay_gain: config::ReplayGainInfo::default(),
     };
 
     let genre = find_symphonia_tag(&tags, |t| matches!(t, StandardTag::Genre(_)), &["GENRE"])
@@ -531,9 +545,11 @@ fn read_with_symphonia(track_path: &Path) -> Option<ScannedTrack> {
         year,
         cover_path: None,
         manual_cover: false,
+        artist_id: None,
+        artist_key: None,
     };
 
-    Some(ScannedTrack { track, album })
+    Ok(ScannedTrack { track, album })
 }
 
 #[cfg(test)]
@@ -562,6 +578,7 @@ mod tests {
             Some(&tag),
             &FileProperties::default(),
             Path::new("/music/track.mp3"),
+            0,
         );
 
         assert_eq!(

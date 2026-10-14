@@ -113,6 +113,7 @@ pub fn use_seek_drag(
 }
 
 pub struct VolumeMute {
+    pub level: f32,
     pub volume_percent: f32,
     pub is_muted: bool,
     pub toggle_mute: Callback<()>,
@@ -127,9 +128,11 @@ pub fn use_volume_mute(
     persisted_volume: Signal<f32>,
 ) -> VolumeMute {
     let mut ctrl = use_context::<PlayerController>();
+    let muted = ctrl.muted;
     let initial_volume = *volume.read();
-    let mut is_muted = use_signal(move || initial_volume <= f32::EPSILON);
-    let mut volume_before_mute = use_signal(move || {
+    // A slider dragged to zero reads as muted too, and the daemon has no
+    // level to restore for it, so the last audible one is kept here.
+    let mut last_audible = use_signal(move || {
         if initial_volume > f32::EPSILON {
             initial_volume
         } else {
@@ -140,17 +143,17 @@ pub fn use_volume_mute(
     let mut persisted_volume = persisted_volume;
 
     let toggle_mute = use_callback(move |_: ()| {
-        let muted = *is_muted.read();
-        if muted {
-            let vol = *volume_before_mute.read();
+        let current = *volume.read();
+        if *muted.read() {
+            ctrl.set_muted(false);
+            persisted_volume.set(current);
+        } else if current <= f32::EPSILON {
+            let vol = *last_audible.read();
             ctrl.set_volume(vol);
             persisted_volume.set(vol);
-            is_muted.set(false);
         } else {
-            volume_before_mute.set(*volume.read());
-            ctrl.set_volume(0.0);
+            ctrl.set_muted(true);
             persisted_volume.set(0.0);
-            is_muted.set(true);
         }
     });
 
@@ -162,36 +165,36 @@ pub fn use_volume_mute(
         }
         let step = config.read().volume_scroll_step.max(0.0);
         let dir = if dy < 0.0 { 1.0 } else { -1.0 };
-        let current = *volume.read();
+        let current = if *muted.read() { 0.0 } else { *volume.read() };
         let new_val = (current + dir * step).clamp(0.0, 1.0);
         ctrl.set_volume(new_val);
         persisted_volume.set(new_val);
-        is_muted.set(new_val <= f32::EPSILON);
         if new_val > f32::EPSILON {
-            volume_before_mute.set(new_val);
+            last_audible.set(new_val);
         }
     });
 
     let on_commit = use_callback(move |evt: FormEvent| {
         if let Ok(val) = evt.value().parse::<f32>() {
             persisted_volume.set(val);
-            is_muted.set(val == 0.0);
         }
     });
 
     let on_input = use_callback(move |evt: FormEvent| {
         if let Ok(val) = evt.value().parse::<f32>() {
             ctrl.set_volume(val);
-            is_muted.set(val == 0.0);
             if val > f32::EPSILON {
-                volume_before_mute.set(val);
+                last_audible.set(val);
             }
         }
     });
 
+    let is_muted = *muted.read();
+    let level = if is_muted { 0.0 } else { *volume.read() };
     VolumeMute {
-        volume_percent: *volume.read() * 100.0,
-        is_muted: *is_muted.read(),
+        level,
+        volume_percent: level * 100.0,
+        is_muted: is_muted || level <= f32::EPSILON,
         toggle_mute,
         on_wheel,
         on_commit,
@@ -268,7 +271,8 @@ pub fn TransportButtons(is_playing: Signal<bool>, variant: ControlsVariant) -> E
 
     rsx! {
         div {
-            class: classes.wrapper,
+            class: "playback-controls {classes.wrapper}",
+            "data-fullscreen": variant == ControlsVariant::Fullscreen,
             dir: "ltr",
             style: if variant == ControlsVariant::Fullscreen { "max-width: 640px;" } else { "" },
             button {
@@ -285,7 +289,8 @@ pub fn TransportButtons(is_playing: Signal<bool>, variant: ControlsVariant) -> E
                     i { class: "fa-solid fa-backward-step {classes.step_icon}" }
                 }
                 button {
-                    class: classes.play,
+                    class: "playback-play {classes.play}",
+                    aria_label: if *is_playing.read() { i18n::t("pause") } else { i18n::t("play") },
                     onclick: move |_| ctrl.toggle(),
                     i { class: if *is_playing.read() { format!("fa-solid fa-pause {}", classes.play_icon_size) } else { format!("fa-solid fa-play {} ml-1", classes.play_icon_size) } }
                 }
@@ -340,17 +345,12 @@ pub fn SeekSlider(
                 style: "max-width: 640px;",
                 div {
                     class: "flex items-center gap-3",
-                    span { class: "text-xs text-white/70 font-mono", style: "width: 50px; text-align: left;", "{fmt_time(display_progress)}" }
+                    span { class: "playback-time text-xs text-white/70 font-mono", style: "width: 50px; text-align: left;", "{fmt_time(display_progress)}" }
                     div {
-                        class: format!("flex-1 {} relative group", if can_seek { "cursor-pointer" } else { "" }),
-                        style: "height: 20px;",
-                        div {
-                            class: "absolute bg-white/20 rounded-full",
-                            style: "height: 4px; top: 8px; left: 0; right: 0;"
-                        }
-                        div {
-                            class: "absolute overflow-hidden rounded-full",
-                            style: "height: 4px; top: 8px; left: 0; right: 0;",
+                        class: format!("playback-seek flex-1 h-5 {} relative group", if can_seek { "cursor-pointer" } else { "" }),
+                        style: "--seek-progress: {progress_percent}%;",
+                        div { class: "playback-seek-track absolute inset-x-0 top-2 h-1 bg-white/20 rounded-full" }
+                        div { class: "playback-seek-track absolute inset-x-0 top-2 h-1 overflow-hidden rounded-full",
                             PlaybackBufferIndicator {
                                 ranges: buffered_ranges.clone(),
                                 played_percent: progress_percent,
@@ -358,17 +358,17 @@ pub fn SeekSlider(
                             }
                         }
                         div {
-                            class: "absolute rounded-full pointer-events-none bg-white/90",
-                            style: "height: 4px; top: 8px; left: 0; width: {progress_percent}%;"
+                            class: "playback-seek-fill absolute left-0 top-2 h-1 rounded-full pointer-events-none bg-white/90",
+                            style: "width: {progress_percent}%;"
                         }
                         if !is_loading {
                             div {
                                 class: if cfg!(target_os = "android") {
-                                    "absolute bg-white rounded-full pointer-events-none"
+                                    "playback-seek-handle absolute top-1 w-3 h-3 bg-white rounded-full pointer-events-none"
                                 } else {
-                                    "absolute bg-white rounded-full pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity"
+                                    "playback-seek-handle absolute top-1 w-3 h-3 bg-white rounded-full pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity"
                                 },
-                                style: "width: 12px; height: 12px; top: 4px; left: calc({progress_percent}% - 6px);"
+                                style: "left: calc({progress_percent}% - 6px);"
                             }
                         }
                         input {
@@ -382,7 +382,7 @@ pub fn SeekSlider(
                             oninput: move |evt| on_input.call(evt),
                         }
                     }
-                    span { class: "text-xs text-white/70 font-mono", style: "width: 50px; text-align: right;", "{fmt_time(*current_song_duration.read())}" }
+                    span { class: "playback-time text-xs text-white/70 font-mono", style: "width: 50px; text-align: right;", "{fmt_time(*current_song_duration.read())}" }
                 }
             }
         },
@@ -390,16 +390,16 @@ pub fn SeekSlider(
             div {
                 class: "flex items-center gap-2 w-full",
                 dir: "ltr",
-                span { class: "text-[10px] text-slate-500 w-8 text-right font-mono", "{fmt_time(display_progress)}" }
+                span { class: "playback-time text-[10px] text-slate-500 w-8 text-right font-mono", "{fmt_time(display_progress)}" }
                 div {
-                    class: format!("flex-1 h-1 bg-white/10 rounded-full relative {}", if can_seek { "group cursor-pointer" } else { "" }),
+                    class: format!("playback-slider flex-1 h-1 bg-white/10 rounded-full relative {}", if can_seek { "group cursor-pointer" } else { "" }),
                     PlaybackBufferIndicator {
                         ranges: buffered_ranges.clone(),
                         played_percent: progress_percent,
                         loading: is_loading,
                     }
                     div {
-                        class: "absolute top-0 left-0 h-full bg-white/90 rounded-full pointer-events-none",
+                        class: "playback-slider-fill absolute top-0 left-0 h-full bg-white/90 rounded-full pointer-events-none",
                         style: "width: {progress_percent}%",
                             div { class: "absolute -right-1.5 -top-1 w-3 h-3 bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity" }
                     }
@@ -414,7 +414,7 @@ pub fn SeekSlider(
                         oninput: move |evt| on_input.call(evt),
                     }
                 }
-                span { class: "text-[10px] text-slate-500 w-8 font-mono", "{fmt_time(*current_song_duration.read())}" }
+                span { class: "playback-time text-[10px] text-slate-500 w-8 font-mono", "{fmt_time(*current_song_duration.read())}" }
             }
         },
     }
@@ -428,6 +428,7 @@ pub fn VolumeSlider(
     variant: ControlsVariant,
 ) -> Element {
     let vol = use_volume_mute(config, volume, persisted_volume);
+    let level = vol.level;
     let volume_percent = vol.volume_percent;
     let is_muted = vol.is_muted;
     let toggle_mute = vol.toggle_mute;
@@ -443,31 +444,28 @@ pub fn VolumeSlider(
                 style: "max-width: 640px;",
                 i { class: "fa-solid fa-volume-low text-white/40" }
                 div {
-                    class: "flex-1 cursor-pointer relative group",
-                    style: "height: 20px;",
+                    class: "playback-seek flex-1 h-5 cursor-pointer relative group",
+                    style: "--seek-progress: {volume_percent}%;",
                     onwheel: move |evt| on_wheel.call(evt),
+                    div { class: "playback-seek-track absolute inset-x-0 top-2 h-1 bg-white/20 rounded-full" }
                     div {
-                        class: "absolute bg-white/20 rounded-full",
-                        style: "height: 4px; top: 8px; left: 0; right: 0;"
-                    }
-                    div {
-                        class: "absolute bg-white/90 rounded-full pointer-events-none",
-                        style: "height: 4px; top: 8px; left: 0; width: {volume_percent}%;"
+                        class: "playback-seek-fill absolute left-0 top-2 h-1 bg-white/90 rounded-full pointer-events-none",
+                        style: "width: {volume_percent}%;"
                     }
                     div {
                         class: if cfg!(target_os = "android") {
-                            "absolute bg-white rounded-full pointer-events-none"
+                            "playback-seek-handle absolute top-1 w-3 h-3 bg-white rounded-full pointer-events-none"
                         } else {
-                            "absolute bg-white rounded-full pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity"
+                            "playback-seek-handle absolute top-1 w-3 h-3 bg-white rounded-full pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity"
                         },
-                        style: "width: 12px; height: 12px; top: 4px; left: calc({volume_percent}% - 6px);"
+                        style: "left: calc({volume_percent}% - 6px);"
                     }
                     input {
                         r#type: "range",
                         min: "0",
                         max: "1",
                         step: "0.01",
-                        value: "{*volume.read()}",
+                        value: "{level}",
                         class: "slider-hit absolute top-0 left-0 w-full h-full opacity-0 cursor-pointer",
                         onchange: move |evt| on_commit.call(evt),
                         oninput: move |evt| on_input.call(evt),
@@ -485,10 +483,10 @@ pub fn VolumeSlider(
                     i { class: if is_muted { "fa-solid fa-volume-xmark text-xs" } else { "fa-solid fa-volume-high text-xs" } }
                 }
                 div {
-                    class: "w-24 h-1 bg-white/10 rounded-full group/vol cursor-pointer relative",
+                    class: "playback-slider w-24 h-1 bg-white/10 rounded-full group/vol cursor-pointer relative",
                     onwheel: move |evt| on_wheel.call(evt),
                     div {
-                        class: "absolute top-0 left-0 h-full bg-white/90 rounded-full pointer-events-none",
+                        class: "playback-slider-fill absolute top-0 left-0 h-full bg-white/90 rounded-full pointer-events-none",
                         style: "width: {volume_percent}%",
                         div { class: "absolute -right-1.5 -top-1 w-3 h-3 bg-white rounded-full opacity-0 group-hover/vol:opacity-100 transition-opacity" }
                     }
@@ -497,7 +495,7 @@ pub fn VolumeSlider(
                         min: "0",
                         max: "1",
                         step: "0.01",
-                        value: "{*volume.read()}",
+                        value: "{level}",
                         class: "slider-hit absolute top-0 left-0 w-full h-full opacity-0 cursor-pointer z-10",
                         onchange: move |evt| on_commit.call(evt),
                         oninput: move |evt| on_input.call(evt),

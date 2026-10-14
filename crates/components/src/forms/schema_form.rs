@@ -52,7 +52,7 @@ const CUSTOM: &str = "__custom";
 
 const TEXT_INPUT: &str =
     "bg-transparent w-full px-3 py-2 text-sm text-white placeholder:text-white/50 outline-none";
-const TEXT_WRAP: &str = "flex-1 bg-white/5 p-1 rounded-xl border border-white/5";
+const TEXT_WRAP: &str = "app-text-field flex-1 bg-white/5 p-1 rounded-xl border border-white/5";
 /// Render a published field list. `values` holds every answer so far, and
 /// `on_change` is called with each one as it is edited.
 #[component]
@@ -182,10 +182,16 @@ fn Field(
                 for option in options.into_iter() {
                     label {
                         key: "{option.value}",
-                        class: "flex items-center gap-2 text-sm text-white cursor-pointer",
+                        class: if option.unavailable.is_some() {
+                            "flex items-center gap-2 text-sm text-white opacity-40 cursor-not-allowed"
+                        } else {
+                            "flex items-center gap-2 text-sm text-white cursor-pointer"
+                        },
+                        title: option.unavailable.as_ref().map(super::text),
                         input {
                             r#type: "radio",
                             name: "{field.key}",
+                            disabled: option.unavailable.is_some(),
                             checked: value == option.value,
                             onchange: {
                                 let key = field.key.clone();
@@ -222,6 +228,35 @@ fn Field(
                 }
             }
         }
+        api::FieldKind::Directories => {
+            let key = field.key.clone();
+            let paths = api::decode_directories(&value);
+            let added = paths.clone();
+            let removed = paths.clone();
+            let add_key = key.clone();
+            rsx! {
+                div { class: "flex-1",
+                    crate::settings_items::MultiDirectoryPicker {
+                        current_paths: paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>(),
+                        on_add: move |path: std::path::PathBuf| {
+                            let mut next = added.clone();
+                            let path = path.display().to_string();
+                            if !next.contains(&path) {
+                                next.push(path);
+                            }
+                            on_change.call(api::FieldValue::new(add_key.clone(), api::encode_directories(&next)));
+                        },
+                        on_remove: move |index: usize| {
+                            let mut next = removed.clone();
+                            if index < next.len() {
+                                next.remove(index);
+                            }
+                            on_change.call(api::FieldValue::new(key.clone(), api::encode_directories(&next)));
+                        },
+                    }
+                }
+            }
+        }
         kind => {
             let secret = matches!(kind, api::FieldKind::Secret);
             let key = field.key.clone();
@@ -242,7 +277,11 @@ fn Field(
         }
     };
 
-    let stacked = matches!(field.kind, api::FieldKind::Radio { .. });
+    let stacked = matches!(
+        field.kind,
+        api::FieldKind::Radio { .. } | api::FieldKind::Directories
+    ) || (cfg!(target_os = "android")
+        && !matches!(field.kind, api::FieldKind::Toggle));
     let config_key = field.config_key.clone().unwrap_or_default();
     rsx! {
         if let Some(heading) = heading {
@@ -268,7 +307,7 @@ fn Field(
 fn DirectoryButton(on_pick: EventHandler<String>) -> Element {
     rsx! {
         button {
-            class: "bg-white/10 hover:bg-white/20 px-3 py-2 rounded-xl text-sm text-white transition-colors shrink-0",
+            class: "app-button-tonal bg-white/10 hover:bg-white/20 px-3 py-2 rounded-xl text-sm text-white transition-colors shrink-0",
             onclick: move |_| {
                 spawn(async move {
                     if let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await {

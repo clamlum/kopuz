@@ -9,9 +9,7 @@ pub fn queue_context_to_proto(value: &api::QueueContext) -> QueueContext {
         api::QueueContext::Album { id } => {
             queue_context::Kind::Album(queue_context::Id { id: id.clone() })
         }
-        api::QueueContext::Artist { name } => {
-            queue_context::Kind::Artist(queue_context::Name { name: name.clone() })
-        }
+        api::QueueContext::Artist { artist } => queue_context::Kind::ArtistKey(artist.to_string()),
         api::QueueContext::Genre { name } => {
             queue_context::Kind::Genre(queue_context::Name { name: name.clone() })
         }
@@ -44,8 +42,8 @@ pub fn queue_context_from_proto(value: &QueueContext) -> Option<api::QueueContex
             keys: tracks.keys.clone(),
         },
         queue_context::Kind::Album(id) => api::QueueContext::Album { id: id.id.clone() },
-        queue_context::Kind::Artist(name) => api::QueueContext::Artist {
-            name: name.name.clone(),
+        queue_context::Kind::ArtistKey(key) => api::QueueContext::Artist {
+            artist: key.clone(),
         },
         queue_context::Kind::Genre(name) => api::QueueContext::Genre {
             name: name.name.clone(),

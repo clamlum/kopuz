@@ -10,8 +10,14 @@ impl Session {
         queue_changed: bool,
     ) -> CommandAck {
         self.rev += 1;
+        self.top_up_radio();
         if queue_changed {
             self.queue_rev = self.rev;
+            self.refresh_album_context();
+            // Only a queue with something in it replaces one that could not be read; a shuffle toggle on nothing does not.
+            if !self.model.items().is_empty() {
+                self.queue_unread = false;
+            }
         }
         self.queue_dirty = true;
         let state = self.build_state();
@@ -25,6 +31,28 @@ impl Session {
         let _ = state_tx.send(state.clone());
         self.emit(ApiEvent::PlayerState(Box::new(state)));
         CommandAck { rev: self.rev }
+    }
+
+    pub(super) fn album_context_for_token(&self, token: u64) -> bool {
+        let position = match self.pending_transition.as_ref() {
+            Some(pending) if pending.to_token == token => pending.to_position,
+            _ => self.model.current_position(),
+        };
+        self.model
+            .track_at(position)
+            .is_some_and(|track| self.model.album_context_at(position, &track.album_id))
+    }
+
+    fn refresh_album_context(&self) {
+        let visible = self.visible_token();
+        self.player
+            .set_album_context(visible, self.album_context_for_token(visible));
+        if let Some(pending) = &self.pending_transition {
+            self.player.set_album_context(
+                pending.to_token,
+                self.album_context_for_token(pending.to_token),
+            );
+        }
     }
 
     /// Sole event egress. A subscriber that falls behind the channel is
@@ -89,6 +117,12 @@ impl Session {
             && self.player.can_resume()
     }
 
+    pub(super) fn should_play_gapless(&self) -> bool {
+        self.config.crossfade_seconds == 0
+            && self.phase == ApiPhase::Playing
+            && self.player.can_resume()
+    }
+
     pub(super) fn now_ms(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
@@ -100,7 +134,7 @@ impl Session {
             Some(external) => external.track.as_ref(),
             None => self.model.current_track(),
         };
-        let track = shown.map(|track| now_playing_from(track, &self.config));
+        let track = shown.map(|track| crate::wire::track_info(track, &self.config));
         let fading = self.pending_transition.as_ref().and_then(|pending| {
             (pending.stage == TransitionStage::Fading).then(|| FadingState {
                 from_token: pending.from_token,
@@ -127,6 +161,7 @@ impl Session {
                 loop_mode: self.model.loop_mode(),
             },
             volume: self.volume,
+            muted: self.muted,
             output_latency_ms: Some(self.player.output_latency().as_millis() as u64),
             buffered: self.buffered.clone(),
             fading,
@@ -148,29 +183,5 @@ pub(super) fn engine_phase(phase: EnginePhase) -> ApiPhase {
         EnginePhase::Playing => ApiPhase::Playing,
         EnginePhase::Paused => ApiPhase::Paused,
         EnginePhase::Ended => ApiPhase::Ended,
-    }
-}
-
-/// Translate the internal track model to the wire summary. The radio duration
-/// sentinel is contained at this boundary.
-pub(super) fn now_playing_from(track: &Track, config: &config::AppConfig) -> NowPlaying {
-    let _ = config;
-    let radio = track.duration == u64::MAX;
-    NowPlaying {
-        key: track.id.key().to_string(),
-        uid: track.id.uid(),
-        title: track.title.clone(),
-        artist: track.artist.clone(),
-        album: track.album.clone(),
-        duration_ms: (!radio).then(|| track.duration.saturating_mul(1000)),
-        khz: track.khz,
-        bitrate: track.bitrate,
-        kind: if radio {
-            TrackKind::Radio
-        } else {
-            TrackKind::Normal
-        },
-        seekable: !radio,
-        artwork: crate::artwork::track_ref(track),
     }
 }

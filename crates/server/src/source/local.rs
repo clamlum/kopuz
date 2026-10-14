@@ -32,9 +32,12 @@ impl MediaSource for LocalSource {
             browser_playback: false,
             sync: false,
             downloads: false,
+            uploads: false,
+            storage_quota: false,
             discover: false,
             dont_recommend: false,
             radio: RadioSeeds::NONE,
+            play_queue: false,
             playlists: PlaylistOps::Reorder,
             artist_view: ArtistView::Library,
             albums: AlbumType::Standard,
@@ -66,25 +69,21 @@ impl MediaSource for LocalSource {
     async fn remove_from_playlist(
         &self,
         playlist_id: &str,
-        track: &reader::Track,
-        _position: usize,
+        _track: &reader::Track,
+        position: usize,
     ) -> Result<(), SourceError> {
-        let r = track.id.key().into_owned();
-        self.db
-            .remove_playlist_tracks(&self.source, playlist_id, &[r])
-            .await
-            .map_err(SourceError::from)
+        self.remove_playlist_entry(playlist_id, position).await
     }
 
     async fn reorder_playlist(
         &self,
         playlist_id: &str,
-        ordered_refs: &[String],
+        ordered: &[reader::PlaylistEntry],
         _moved: &reader::Track,
         _new_index: usize,
     ) -> Result<(), SourceError> {
         self.db
-            .set_playlist_tracks(&self.source, playlist_id, ordered_refs)
+            .set_playlist_tracks(&self.source, playlist_id, ordered)
             .await
             .map_err(SourceError::from)
     }
@@ -97,6 +96,7 @@ impl MediaSource for LocalSource {
             duration_secs: None,
             bitrate: None,
             content_length: None,
+            loudness_db: None,
         })
     }
 

@@ -1,8 +1,8 @@
 use components::{
     CoverArtBackground, QuickSearch, bottombar::Bottombar, compact_player::CompactPlayer,
     download_overlay::DownloadOverlay, external_devices::ExternalDevicesPanel,
-    fullscreen::Fullscreen, rightbar::Rightbar, sidebar::Sidebar, titlebar::ResizeHandles,
-    titlebar::Titlebar,
+    fullscreen::Fullscreen, rightbar::Rightbar, sidebar::Sidebar, tabbar::TabBar,
+    titlebar::ResizeHandles, titlebar::Titlebar,
 };
 #[cfg(not(target_os = "android"))]
 use dioxus::desktop::tao::dpi::LogicalSize;
@@ -23,7 +23,8 @@ use webkit2gtk::{SettingsExt, WebViewExt};
 use windows::Win32::Foundation::HWND;
 
 mod app_lifecycle;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "android", test))]
+mod artwork_http;
 mod artwork_protocol;
 mod backend;
 #[cfg(not(target_os = "android"))]
@@ -33,23 +34,14 @@ mod desktop_shell;
 #[cfg(not(target_os = "android"))]
 mod exit_flush;
 mod logging;
+mod material3;
+mod static_assets;
 #[cfg(not(target_os = "android"))]
 mod ui_profile;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows_titlebar;
 
-const FAVICON: &str = include_str!(concat!(env!("OUT_DIR"), "/favicon.uri"));
-// CSS/fonts are compiled in (not `asset!()`-collected) so styling works under a
-// bare `cargo run` — see `build.rs::embed_fonts`, which bakes the font data: URIs.
-// The `OUT_DIR` ones pass through it; main.css does too, for its nasin-nanpa
-// @font-face (themes/tailwind/reduced have no font refs, so they're verbatim).
-const MAIN_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/main.css"));
-const THEME_CSS: &str = include_str!("../assets/themes.css");
-const TAILWIND_CSS: &str = include_str!("../assets/tailwind.css");
-const REDUCED_ANIMATIONS_CSS: &str = include_str!("../assets/reduced-animations.css");
-const FONT_AWESOME_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/fontawesome.css"));
-const JETBRAINS_MONO_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/jetbrains-mono.css"));
 #[cfg(target_os = "windows")]
 const TOOLBAR_ICONS: Asset = asset!("../assets/toolbar_icons", AssetOptions::folder());
 /// Store saves (config/library/playlists/favorites) are full-replace and
@@ -63,15 +55,13 @@ const STORE_SAVE_COOLDOWN_MS: u64 = 2500;
 const LIVE_THEME_POLL_MS: u64 = 400;
 const LIVE_THEME_IDLE_POLL_MS: u64 = 2000;
 
-fn configured_local_sources(config: &config::AppConfig) -> Vec<(config::Source, Vec<PathBuf>)> {
-    std::iter::once((config::Source::Local, config.music_directory.clone()))
-        .chain(config.local_sources.iter().map(|source| {
-            (
-                config::Source::LocalLibrary(source.id.clone()),
-                source.directories.clone(),
-            )
-        }))
-        .collect()
+/// Where a detail page keeps its scroll position; `None` on a route's own list.
+fn detail_scroll_key(route: Route, album: &str, artist: Option<&String>) -> Option<String> {
+    match route {
+        Route::Album if !album.is_empty() => Some(format!("album:{album}")),
+        Route::Artist => artist.map(|artist| format!("artist:{artist}")),
+        _ => None,
+    }
 }
 
 /// Build the `@font-face` + `body`/`#app-root` override CSS for a user-picked
@@ -131,20 +121,6 @@ fn WindowsToolbarIconAssets() -> Element {
     rsx! {}
 }
 
-#[component]
-fn StaticHeadAssets() -> Element {
-    rsx! {
-        document::Link { rel: "icon", href: FAVICON }
-        document::Style { {MAIN_CSS} }
-        document::Style { {THEME_CSS} }
-        document::Style { {TAILWIND_CSS} }
-        document::Style { {REDUCED_ANIMATIONS_CSS} }
-        // fonts
-        document::Style { {JETBRAINS_MONO_CSS} }
-        document::Style { {FONT_AWESOME_CSS} }
-    }
-}
-
 /// Hand the Android trust store to rustls before anything opens a TLS
 /// connection. `rustls-platform-verifier` panics on first verification if it was
 /// never given a JVM and Context, which takes down the first sync or cover fetch.
@@ -173,6 +149,10 @@ fn init_android_tls() -> Result<(), String> {
 }
 
 fn main() -> std::process::ExitCode {
+    // Core startup can fail before Dioxus installs its logger at launch.
+    #[cfg(target_os = "android")]
+    dioxus::logger::initialize_default();
+
     #[cfg(target_os = "android")]
     if let Err(e) = init_android_tls() {
         panic!("android certificate verifier failed to initialize: {e}");
@@ -243,7 +223,9 @@ fn main() -> std::process::ExitCode {
         let config = dioxus::desktop::Config::new()
             .with_custom_head(
                 "<style>html,body{background:#000;margin:0;padding:0}body{opacity:0}</style>"
-                    .to_string(),
+                    .to_string()
+                    + &static_assets::head()
+                    + desktop_shell::UNGATE_EDITS_FROM_FRAME_CLOCK,
             )
             .with_background_color((0, 0, 0, 255))
             .with_data_directory(webview_data_dir)
@@ -354,87 +336,34 @@ fn main() -> std::process::ExitCode {
 </script>"#;
 
         let config = dioxus::mobile::Config::new()
-            .with_custom_head(APPLY_EDITS_WITHOUT_RAF.to_string())
-            .with_background_color((0, 0, 0, 255))
-            // artwork://local?p=<percent-encoded-absolute-path> — the Android WebView mostly
-            // receives base64 data URLs from utils, but keep a synchronous handler for any
-            // code path that still emits artwork:// URLs.
-            .with_custom_protocol("artwork".to_string(), |_headers, request| {
-                let query = request.uri().query().unwrap_or("");
-                let raw_p = query
-                    .split('&')
-                    .find_map(|kv| {
-                        let mut parts = kv.splitn(2, '=');
-                        if parts.next() == Some("p") {
-                            parts.next()
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or("");
-                let decoded = percent_encoding::percent_decode_str(raw_p).decode_utf8_lossy();
-
-                let mime = if decoded.ends_with(".png") {
-                    "image/png"
-                } else {
-                    "image/jpeg"
-                };
-
-                let mut decoded_path = decoded.to_string();
-                if decoded_path.starts_with("/~") {
-                    if let Ok(home) = std::env::var("HOME") {
-                        decoded_path = decoded_path.replacen("/~", &home, 1);
-                    }
-                } else if decoded_path.starts_with('~') {
-                    if let Ok(home) = std::env::var("HOME") {
-                        decoded_path = decoded_path.replacen('~', &home, 1);
-                    }
-                }
-
-                let read_result =
-                    std::fs::read(std::path::Path::new(&decoded_path)).or_else(|_| {
-                        if decoded_path.strip_prefix('/').is_some() {
-                            std::fs::read(std::path::Path::new(&decoded_path[1..]))
-                        } else {
-                            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
-                        }
-                    });
-
-                fn err_resp(status: u16) -> http::Response<std::borrow::Cow<'static, [u8]>> {
-                    http::Response::builder()
-                        .status(status)
-                        .header("Access-Control-Allow-Origin", "*")
-                        .body(std::borrow::Cow::from(Vec::new()))
-                        .unwrap_or_else(|_| {
-                            http::Response::builder()
-                                .status(500)
-                                .header("Access-Control-Allow-Origin", "*")
-                                .body(std::borrow::Cow::from(Vec::new()))
-                                .expect("static fallback response")
-                        })
-                }
-
-                match read_result {
-                    Ok(bytes) => http::Response::builder()
-                        .header("Content-Type", mime)
-                        .header("Access-Control-Allow-Origin", "*")
-                        .body(std::borrow::Cow::from(bytes))
-                        .unwrap_or_else(|_| err_resp(500)),
-                    Err(e) => {
-                        let status = if e.kind() == std::io::ErrorKind::NotFound {
-                            404
-                        } else {
-                            500
-                        };
-                        err_resp(status)
-                    }
-                }
-            });
+            .with_custom_head(static_assets::head() + APPLY_EDITS_WITHOUT_RAF)
+            .with_background_color((0, 0, 0, 255));
 
         dioxus::LaunchBuilder::mobile().with_cfg(config).launch(App);
     }
 
     std::process::ExitCode::SUCCESS
+}
+
+/// Pull the daemon's settings into the app's copy, keeping edits not yet sent.
+async fn adopt_daemon_config(
+    config: Signal<config::AppConfig>,
+    baseline: hooks::config_sync::ConfigBaseline,
+) {
+    match backend::api().config().await {
+        Ok(view) => baseline.adopt(config, &view),
+        Err(error) => tracing::warn!(%error, "re-reading settings failed"),
+    }
+}
+
+/// Events were lost, so re-read everything the app holds from the daemon.
+fn resync(
+    gens: hooks::db_reactivity::Generations,
+    config: Signal<config::AppConfig>,
+    baseline: hooks::config_sync::ConfigBaseline,
+) {
+    gens.bump_all();
+    spawn(adopt_daemon_config(config, baseline));
 }
 
 #[component]
@@ -514,6 +443,7 @@ fn App() -> Element {
     // Which settings a managed file pins, so those rows render locked. The
     // daemon reads those layers; nothing here opens the file.
     hooks::config_view::use_locked_keys_provider();
+    let config_baseline = hooks::config_sync::use_config_baseline_provider();
 
     // Capabilities of the active source — drives source-agnostic routing (e.g.
     // which artist view to render) without hardcoding services in the router.
@@ -528,16 +458,12 @@ fn App() -> Element {
     // The core is already running: main built it before the window existed,
     // because the tracing subscriber and the titlebar come out of its config.
     let session = core.session.clone();
-    let library_service = core.library.clone();
-    let job_runner = core.jobs.clone();
     let favorites_service = core.favorites.clone();
     let scrobbler = core.scrobbler.clone();
 
     // Config reaches the session through the daemon's own write path, which
     // is the only copy that still holds the credentials this process is never
     // shown. Pushing the view we hold would blank them until the next save.
-    let mut trigger_rescan = use_signal(|| 0);
-    let mut last_scan_key = use_signal(|| None::<String>);
     let mut scan_current_file = use_signal(|| Option::<String>::None);
     let current_playing = use_signal(|| 0);
     let current_song_title = use_signal(String::new);
@@ -550,7 +476,6 @@ fn App() -> Element {
     let current_track_snapshot = use_signal(|| None::<api::TrackInfo>);
     let mut volume = use_signal(|| 1.0f32);
     let mut persisted_volume = use_signal(|| 1.0f32);
-    let mut configured_local_libraries = use_signal(|| configured_local_sources(&config.peek()));
 
     let is_playing = use_signal(|| false);
     let mut is_fullscreen = use_signal(|| false);
@@ -654,32 +579,22 @@ fn App() -> Element {
         ));
     });
 
-    use_effect(move || {
-        let next_sources = configured_local_sources(&config.read());
-        if *configured_local_libraries.peek() != next_sources {
-            configured_local_libraries.set(next_sources);
-        }
-    });
-
     let mut selected_album_id = use_signal(String::new);
     let mut selected_playlist_id = use_signal(|| None::<String>);
     let mut discover_selected_playlist_id = use_signal(|| None::<String>);
     let mut discover_selected_playlist_title = use_signal(|| None::<String>);
-    // YT channel id corresponding to selected_artist_name when known
-    // (Discover tile / mix entry carries it). Left None when the
-    // click only had a name — the YT artist page resolves it via
-    // search at render time.
-    let mut selected_artist_channel_id = use_signal(|| None::<String>);
-    let mut selected_artist_name = use_signal(String::new);
-    let mut search_query = use_signal(String::new);
-    let mut last_server_playlist_key = use_signal(|| None::<String>);
-    let mut server_playlist_key_initialized = use_signal(|| false);
+    // Set with the id, by whichever click had it: the viewer serves more than
+    // one kind and must not read the id to tell which.
+    let mut discover_selected_playlist_kind = use_signal(|| api::CatalogItemKind::Playlist);
+    let mut selected_artist = use_signal(|| None::<String>);
+    let search_query = use_signal(String::new);
     let queue = use_signal(Vec::<api::TrackInfo>::new);
     let current_queue_index = use_signal(|| 0usize);
 
     let mut network_banner: Signal<Option<bool>> = use_signal(|| None);
     let mut update_banner: Signal<Option<updates::AvailableUpdate>> = use_signal(|| None);
     let mut did_check_updates = use_signal(|| false);
+    let mut update_progress: Signal<Option<updates::InstallProgress>> = use_signal(|| None);
     let mut ctrl = hooks::use_player_controller(
         core.api.clone() as Arc<dyn api::KopuzApi>,
         is_playing,
@@ -727,34 +642,6 @@ fn App() -> Element {
             return;
         }
 
-        // Which source is active is the identity that matters here; a token
-        // rotates without making it a different account.
-        let current_server_key = active_source_row
-            .read()
-            .as_ref()
-            .filter(|source| source.kind == api::SourceKind::Server)
-            .map(|source| source.id.clone());
-
-        if !*server_playlist_key_initialized.read() {
-            last_server_playlist_key.set(current_server_key);
-            server_playlist_key_initialized.set(true);
-            return;
-        }
-
-        if *last_server_playlist_key.read() != current_server_key {
-            last_server_playlist_key.set(current_server_key);
-            selected_playlist_id.set(None);
-            ctrl.reset_for_backend_switch();
-            // Nothing to reload: pages query by source, so switching servers is
-            // just a key change — every hook re-queries the new server's rows.
-        }
-    });
-
-    use_effect(move || {
-        if !*initial_load_done.read() {
-            return;
-        }
-
         if !config.read().auto_check_updates {
             update_banner.set(None);
             if *did_check_updates.peek() {
@@ -778,14 +665,7 @@ fn App() -> Element {
         );
     });
 
-    // The store saves are FULL-REPLACE (hundreds-to-thousands of statements),
-    // so saving on every signal mutation hammered the runtime — a batch
-    // download bumping `offline_tracks` per finished song ran a complete
-    // config save (≈840 listen-count upserts) per completion and starved the
-    // audio stream into underruns. Each domain now marks itself dirty and a
-    // debounced saver loop persists at most once per cooldown window,
-    // coalescing bursts. The CloseRequested flush below covers quitting inside
-    // the window.
+    // Debounced: a settings save is a whole-config write, so a burst of edits must coalesce into one.
     let mut config_dirty = use_signal(|| 0u64);
     use_effect(move || {
         if !*initial_load_done.read() || !*config_loaded_ok.read() {
@@ -826,12 +706,16 @@ fn App() -> Element {
             flushed = *config_dirty.peek();
             let mut snapshot = config.peek().clone();
             snapshot.volume = *volume.peek();
-            if let Err(error) = api
-                .set_config(snapshot)
+            match api
+                .set_config(snapshot.clone())
                 .instrument(tracing::info_span!("config.persist"))
                 .await
             {
-                tracing::error!(%error, "failed to save settings");
+                Ok(view) => {
+                    config_baseline.sent(snapshot);
+                    config_baseline.adopt(config, &view);
+                }
+                Err(error) => tracing::error!(%error, "failed to save settings"),
             }
             utils::sleep(std::time::Duration::from_millis(STORE_SAVE_COOLDOWN_MS)).await;
         }
@@ -842,6 +726,13 @@ fn App() -> Element {
         let mode = config.read().titlebar_mode;
         let win = dioxus::desktop::window();
         win.set_decorations(mode == config::TitlebarMode::System);
+    });
+
+    // The daemon set SMTC up before this window existed; move it onto the
+    // window so media controls and taskbar buttons belong to the app.
+    #[cfg(target_os = "windows")]
+    use_hook(|| {
+        player::systemint::attach_window(dioxus::desktop::window().window.hwnd() as isize);
     });
 
     #[cfg(target_os = "windows")]
@@ -983,6 +874,7 @@ fn App() -> Element {
                 {
                     Ok(view) => {
                         config_loaded_ok.set(true);
+                        config_baseline.loaded(&view);
                         Some(view.config)
                     }
                     Err(error) => {
@@ -995,15 +887,10 @@ fn App() -> Element {
                     let _apply = tracing::info_span!("startup.apply_config").entered();
                     let loaded = cfg_loaded;
                     config.set(loaded.clone());
-                    configured_local_libraries.set(configured_local_sources(&loaded));
                     volume.set(loaded.volume);
                     persisted_volume.set(loaded.volume);
                     i18n::set_locale(&loaded.language);
                 }
-
-                // Local is the source of truth: no auto-switch to a server on
-                // startup. An unselected source stays Local (the config default);
-                // the user picks a server explicitly via the sidebar.
 
                 initial_load_done.set(true);
                 // Kick one reconcile shortly after startup so pending offline
@@ -1018,47 +905,6 @@ fn App() -> Element {
                     });
                 }
             }.instrument(tracing::info_span!("startup.load")));
-        }
-    });
-
-    let library_for_scan = library_service.clone();
-    let jobs_for_scan = job_runner.clone();
-    use_effect(move || {
-        // config_loaded_ok matters here: a defaulted config (load failure) has
-        // an empty music_directory, and the daemon's no-dirs branch prunes the
-        // local library - which must never happen off phantom state.
-        if !*initial_load_done.read() || !*config_loaded_ok.read() {
-            return;
-        }
-        let configured_sources = configured_local_libraries.read().clone();
-        let trigger = *trigger_rescan.read();
-
-        let scan_key = format!(
-            "{}|{}",
-            configured_sources
-                .iter()
-                .flat_map(|(source, dirs)| {
-                    std::iter::once(source.as_str().to_string())
-                        .chain(dirs.iter().map(|dir| dir.to_string_lossy().into_owned()))
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-            trigger,
-        );
-        if *last_scan_key.peek() == Some(scan_key.clone()) {
-            return;
-        }
-        last_scan_key.set(Some(scan_key));
-
-        // The scan itself lives in the daemon's LibraryService now; the job
-        // runner's single-flight replaces the old epoch supersession, and the
-        // event bridge below feeds progress and invalidations back to the UI.
-        // The roots travel with the call: the config signal is the authority
-        // here, and the session's own copy may not have caught up yet.
-        if let Err(error) =
-            library_for_scan.spawn_scan_with_config(&jobs_for_scan, config.peek().clone())
-        {
-            tracing::warn!(%error, "library scan could not start");
         }
     });
 
@@ -1085,6 +931,7 @@ fn App() -> Element {
                                     api::Table::Folders => Some(Table::Folders),
                                     api::Table::Servers => Some(Table::Servers),
                                     api::Table::Recents => Some(Table::Recents),
+                                    api::Table::Stations => Some(Table::Stations),
                                     _ => None,
                                 };
                                 if let Some(table) = mapped {
@@ -1103,9 +950,15 @@ fn App() -> Element {
                             } => {
                                 scan_current_file.set(None);
                             }
+                            api::ApiEvent::ConfigChanged { .. } => {
+                                spawn(adopt_daemon_config(config, config_baseline));
+                            }
+                            api::ApiEvent::Resync => {
+                                resync(gens, config, config_baseline);
+                            }
                             _ => {}
                         },
-                        Err(RecvError::Lagged(_)) => continue,
+                        Err(RecvError::Lagged(_)) => resync(gens, config, config_baseline),
                         Err(RecvError::Closed) => break,
                     }
                 }
@@ -1118,25 +971,17 @@ fn App() -> Element {
         // Read detail selections so this re-runs on list<->detail toggle, not just
         // on route change (album/artist list and detail are the same Route).
         let album_sel = selected_album_id.read().clone();
-        let artist_sel = selected_artist_name.read().clone();
+        let artist_sel = selected_artist.read().clone();
         // A pending section anchor (peeked, so this effect doesn't subscribe to it)
         // takes over scrolling — skip the saved-scroll restore for this navigation.
         if settings_anchor.peek().is_some() {
             return;
         }
-        let pos = match route {
-            Route::Album if !album_sel.is_empty() => detail_scroll_positions
-                .peek()
-                .get(&format!("album:{album_sel}"))
-                .copied()
-                .unwrap_or(0.0),
-            Route::Artist if !artist_sel.is_empty() => detail_scroll_positions
-                .peek()
-                .get(&format!("artist:{artist_sel}"))
-                .copied()
-                .unwrap_or(0.0),
-            _ => scroll_positions.peek().get(&route).copied().unwrap_or(0.0),
-        };
+        let pos = match detail_scroll_key(route, &album_sel, artist_sel.as_ref()) {
+            Some(key) => detail_scroll_positions.peek().get(&key).copied(),
+            None => scroll_positions.peek().get(&route).copied(),
+        }
+        .unwrap_or(0.0);
         let _ = dioxus::document::eval(&format!(
             "let el = document.getElementById('main-scroll-area'); if (el) el.scrollTop = {pos};"
         ));
@@ -1168,6 +1013,8 @@ fn App() -> Element {
     ));
     provide_context(scroll_positions);
     provide_context(components::source_switcher::SettingsAnchor(settings_anchor));
+    let mut settings_subpage = use_signal(|| None::<&'static str>);
+    provide_context(components::tabbar::SettingsSubpage(settings_subpage));
     let mut nav_history = use_signal(Vec::<components::NavSnapshot>::new);
     let mut nav_restoring = use_signal(|| false);
     let mut nav_last = use_signal(|| None::<components::NavSnapshot>);
@@ -1175,8 +1022,7 @@ fn App() -> Element {
         let snap = components::NavSnapshot {
             route: *current_route.read(),
             album_id: selected_album_id.read().clone(),
-            artist_name: selected_artist_name.read().clone(),
-            artist_channel_id: selected_artist_channel_id.read().clone(),
+            artist: selected_artist.read().clone(),
             playlist_id: selected_playlist_id.read().clone(),
             discover_playlist_id: discover_selected_playlist_id.read().clone(),
             discover_playlist_title: discover_selected_playlist_title.read().clone(),
@@ -1199,8 +1045,7 @@ fn App() -> Element {
 
     let nav_ctrl = components::NavigationController {
         current_route,
-        selected_artist_name,
-        selected_artist_channel_id,
+        selected_artist,
         selected_album_id,
         selected_playlist_id,
         discover_playlist_id: discover_selected_playlist_id,
@@ -1209,6 +1054,25 @@ fn App() -> Element {
         restoring: nav_restoring,
     };
     provide_context(nav_ctrl);
+    // The daemon swaps the queue itself and lists re-query by source; open pages and the back history name the old source's rows.
+    let mut last_active_source = use_signal(|| None::<String>);
+    use_effect(move || {
+        let Some(active) = active_source_row
+            .read()
+            .as_ref()
+            .map(|source| source.id.clone())
+        else {
+            return;
+        };
+        let previous = last_active_source.peek().clone();
+        if previous.as_deref() == Some(active.as_str()) {
+            return;
+        }
+        last_active_source.set(Some(active));
+        if previous.is_some() {
+            nav_ctrl.leave_source();
+        }
+    });
 
     // Sidebar collapse state. On Android the sidebar is an overlay drawer that
     // starts collapsed and is toggled by the mobile header hamburger; the
@@ -1216,12 +1080,15 @@ fn App() -> Element {
     let mut is_sidebar_collapsed = use_signal(|| cfg!(target_os = "android"));
     use_context_provider(|| components::sidebar::SidebarCollapsed(is_sidebar_collapsed));
 
-    // Mirror of the drawer's swipe-left-to-close: a swipe right anywhere on the
-    // page opens it. Horizontal carousels swallow their own touches so scrolling
-    // one back to the start does not pull the drawer out with it.
+    // Only an edge swipe opens the drawer; horizontal scrolling and sliders
+    // elsewhere on the page must not turn into navigation gestures.
     let mut open_swipe = components::gestures::use_swipe();
     let on_open_swipe = move |evt: TouchEvent| {
+        let from_edge = open_swipe
+            .origin()
+            .is_some_and(|(x, _)| (0.0..=24.0).contains(&x));
         if open_swipe.finish(&evt) == Some(components::gestures::SwipeDirection::Right)
+            && from_edge
             && cfg!(target_os = "android")
             && *is_sidebar_collapsed.peek()
         {
@@ -1364,7 +1231,7 @@ fn App() -> Element {
         let theme = config.read().theme.clone();
         if theme == "album-art" {
             "theme-default".to_string()
-        } else if theme == utils::live_theme::THEME_ID {
+        } else if theme == utils::live_theme::THEME_ID || theme == "system" {
             // A palette can be partial, or not written yet, so the default sits
             // underneath to keep every var resolving. The injected `.theme-live`
             // block lands later in <head>, so it still wins.
@@ -1378,6 +1245,52 @@ fn App() -> Element {
     let dir = if is_rtl { "rtl" } else { "ltr" };
     let content_row_class = "flex flex-1 overflow-hidden";
     let update_banner_state = update_banner.read().clone();
+    let update_progress_state = update_progress.read().clone();
+    let mut start_update = move |plan: updates::InstallPlan| {
+        update_progress.set(Some(updates::InstallProgress::Downloading {
+            done: 0,
+            total: None,
+        }));
+        spawn(
+            async move {
+                let mut progress = updates::install(plan);
+                let mut shown_percent = None;
+                loop {
+                    let state = progress.borrow_and_update().clone();
+                    match state {
+                        updates::InstallProgress::Downloading { done, total } => {
+                            let percent = total.filter(|total| *total > 0).map(|t| done * 100 / t);
+                            if percent != shown_percent {
+                                shown_percent = percent;
+                                update_progress.set(Some(state));
+                            }
+                        }
+                        updates::InstallProgress::Ready => {
+                            update_progress.set(Some(state));
+                            // The helper waits for this process to exit before it installs.
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                let mut close_hides_window = close_hides_window;
+                                close_hides_window.set(false);
+                                let win = dioxus::desktop::window();
+                                win.set_close_behavior(
+                                    dioxus::desktop::WindowCloseBehaviour::WindowCloses,
+                                );
+                                win.close();
+                            }
+                            return;
+                        }
+                        updates::InstallProgress::Failed => break,
+                    }
+                    if progress.changed().await.is_err() {
+                        break;
+                    }
+                }
+                update_progress.set(Some(updates::InstallProgress::Failed));
+            }
+            .instrument(tracing::info_span!("app.update_install")),
+        );
+    };
     let update_banner_padding = if cfg!(target_os = "macos") {
         "pl-20 pr-4"
     } else {
@@ -1392,7 +1305,7 @@ fn App() -> Element {
         {
             utils::color::get_background_style(palette.read().as_deref())
         } else {
-            "background-color: var(--color-black); background-image: none;".to_string()
+            "background-color: var(--md-sys-color-surface, var(--color-black)); background-image: none;".to_string()
         }
     });
 
@@ -1409,9 +1322,41 @@ fn App() -> Element {
     });
 
     let reduce_animations = use_memo(move || config.read().reduce_animations);
-    let active_source = use_memo(move || config.read().active_source.clone());
     let switch_source = hooks::source_switch::use_switch_source();
+    let all_sources = hooks::sources::use_sources();
     let mut show_quick_search = use_signal(|| false);
+    #[cfg(target_os = "android")]
+    use_future(move || async move {
+        let mut is_devices_open = is_devices_open;
+        let mut is_rightbar_open = is_rightbar_open;
+        let mut settings_subpage = settings_subpage;
+        loop {
+            player::systemint::wait_back_pressed().await;
+            if components::dots_menu::close_open_sheet().await {
+                continue;
+            }
+            if *show_quick_search.peek() {
+                show_quick_search.set(false);
+            } else if *is_devices_open.peek() {
+                is_devices_open.set(false);
+            } else if *is_rightbar_open.peek() {
+                is_rightbar_open.set(false);
+            } else if *is_fullscreen.peek() {
+                is_fullscreen.set(false);
+            } else if !*is_sidebar_collapsed.peek() {
+                is_sidebar_collapsed.set(true);
+            } else if *current_route.peek() == Route::Settings && settings_subpage.peek().is_some()
+            {
+                settings_subpage.set(None);
+            } else if !nav_history.peek().is_empty() {
+                nav_ctrl.go_back();
+            } else {
+                // Finishing the activity destroys Wry's native runtime; keep
+                // playback and the existing WebView alive when leaving the root.
+                player::systemint::move_task_to_back();
+            }
+        }
+    });
     let quick_search_source = hooks::use_db_queries::use_active_source();
     use_effect(move || {
         if !*show_quick_search.read() {
@@ -1457,9 +1402,8 @@ fn App() -> Element {
     });
 
     rsx! {
-        // we use this component here to prevent re-diffing to prevent warns in console
-        StaticHeadAssets {}
         WindowsToolbarIconAssets {}
+        material3::SystemColors { config, artwork: palette }
 
         div {
             id: "app-root",
@@ -1473,6 +1417,7 @@ fn App() -> Element {
             },
             dir: "{dir}",
             "data-platform": if cfg!(target_os = "android") { "android" } else { "desktop" },
+            "data-ui-style": config.read().ui_style.as_str(),
             "data-reduce-animations": "{reduce_animations}",
             tabindex: "0",
             autofocus: true,
@@ -1510,7 +1455,7 @@ fn App() -> Element {
                 ResizeHandles {}
             }
 
-            if active_source().is_local() {
+            if active_caps().scan_folders {
                 if let Some(file) = scan_current_file.read().clone() {
                     div {
                         class: "flex-shrink-0",
@@ -1578,7 +1523,12 @@ fn App() -> Element {
                                 button {
                                     class: "ml-2 text-xs underline opacity-70 hover:opacity-100 transition-opacity",
                                     onclick: move |_| {
-                                        let target = config.peek().server_toggle_target();
+                                        let rows = all_sources.read().clone().unwrap_or_default();
+                                        let target = rows
+                                            .iter()
+                                            .find(|source| source.needs_network && source.active)
+                                            .or_else(|| rows.iter().find(|source| source.needs_network))
+                                            .map(|source| source.id.clone());
                                         if let Some(s) = target {
                                             switch_source(s);
                                         }
@@ -1604,10 +1554,40 @@ fn App() -> Element {
                         class: "flex items-center justify-between gap-3 {update_banner_padding} py-2 bg-sky-500/15 border-b border-sky-500/20 text-sky-200 text-sm",
                         div {
                             class: "flex items-center gap-2",
-                            i { class: "fa-solid fa-download text-xs" }
-                            span { class: "font-medium", "{i18n::t(\"update_available\")} - " }
-                            span { "{i18n::t_with(\"update_banner_message\", &[(\"version\", update.version.clone())])}" }
-                            if !cfg!(target_os = "android") {
+                            match update_progress_state.clone() {
+                                None => rsx! {
+                                    i { class: "fa-solid fa-download text-xs" }
+                                    span { class: "font-medium", "{i18n::t(\"update_available\")} - " }
+                                    span { "{i18n::t_with(\"update_banner_message\", &[(\"version\", update.version.clone())])}" }
+                                },
+                                Some(updates::InstallProgress::Downloading { done, total }) => rsx! {
+                                    i { class: "fa-solid fa-circle-notch fa-spin text-xs" }
+                                    span { "{i18n::t_with(\"update_downloading\", &[(\"version\", update.version.clone())])}" }
+                                    if let Some(total) = total.filter(|total| *total > 0) {
+                                        span { class: "tabular-nums opacity-80", "{done * 100 / total}%" }
+                                    }
+                                },
+                                Some(updates::InstallProgress::Ready) => rsx! {
+                                    i { class: "fa-solid fa-rotate text-xs" }
+                                    span { "{i18n::t(\"update_restarting\")}" }
+                                },
+                                Some(updates::InstallProgress::Failed) => rsx! {
+                                    i { class: "fa-solid fa-triangle-exclamation text-xs" }
+                                    span { "{i18n::t_with(\"update_failed\", &[(\"version\", update.version.clone())])}" }
+                                },
+                            }
+                            if let (Some(plan), None | Some(updates::InstallProgress::Failed)) = (update.install.clone(), update_progress_state.clone()) {
+                                button {
+                                    class: "ml-2 px-2 py-0.5 rounded-md bg-sky-500/25 hover:bg-sky-500/40 text-sky-100 text-xs font-medium transition-colors",
+                                    onclick: move |_| start_update(plan.clone()),
+                                    if update_progress_state.is_some() {
+                                        "{i18n::t(\"update_retry\")}"
+                                    } else {
+                                        "{i18n::t(\"update_install\")}"
+                                    }
+                                }
+                            }
+                            if !cfg!(target_os = "android") && matches!(update_progress_state, None | Some(updates::InstallProgress::Failed)) {
                                 button {
                                     class: "ml-2 text-xs underline opacity-80 hover:opacity-100 transition-opacity",
                                     onclick: {
@@ -1625,10 +1605,12 @@ fn App() -> Element {
                                 }
                             }
                         }
-                        button {
-                            class: "opacity-50 hover:opacity-100 transition-opacity p-1",
-                            onclick: move |_| update_banner.set(None),
-                            i { class: "fa-solid fa-xmark text-xs" }
+                        if matches!(update_progress_state, None | Some(updates::InstallProgress::Failed)) {
+                            button {
+                                class: "opacity-50 hover:opacity-100 transition-opacity p-1",
+                                onclick: move |_| update_banner.set(None),
+                                i { class: "fa-solid fa-xmark text-xs" }
+                            }
                         }
                     }
                 }
@@ -1652,7 +1634,7 @@ fn App() -> Element {
                 }
             }
             div {
-                class: "{content_row_class}",
+                class: "app-content {content_row_class}",
                 ontouchstart: move |evt| open_swipe.start(&evt),
                 ontouchmove: move |evt| open_swipe.update(&evt),
                 ontouchend: on_open_swipe,
@@ -1664,8 +1646,7 @@ fn App() -> Element {
                             selected_album_id.set(String::new());
                         }
                         if route == Route::Artist {
-                            selected_artist_name.set(String::new());
-                            selected_artist_channel_id.set(None);
+                            selected_artist.set(None);
                         }
                         current_route.set(route);
                     }
@@ -1677,19 +1658,12 @@ fn App() -> Element {
                         let pos = evt.scroll_top();
                         let route = *current_route.peek();
                         let album_sel = selected_album_id.peek().clone();
-                        let artist_sel = selected_artist_name.peek().clone();
-                        match route {
-                            Route::Album if !album_sel.is_empty() => {
-                                detail_scroll_positions
-                                    .write()
-                                    .insert(format!("album:{album_sel}"), pos);
+                        let artist_sel = selected_artist.peek().clone();
+                        match detail_scroll_key(route, &album_sel, artist_sel.as_ref()) {
+                            Some(key) => {
+                                detail_scroll_positions.write().insert(key, pos);
                             }
-                            Route::Artist if !artist_sel.is_empty() => {
-                                detail_scroll_positions
-                                    .write()
-                                    .insert(format!("artist:{artist_sel}"), pos);
-                            }
-                            _ => {
+                            None => {
                                 scroll_positions.write().insert(route, pos);
                             }
                         }
@@ -1699,10 +1673,14 @@ fn App() -> Element {
                         {
                             let is_details = match *current_route.read() {
                                 Route::Album => !selected_album_id.read().is_empty(),
-                                Route::Artist => !selected_artist_name.read().is_empty(),
+                                Route::Artist => selected_artist.read().is_some(),
                                 Route::Playlists => selected_playlist_id.read().is_some(),
                                 _ => false,
                             };
+                            let settings_title = (*current_route.read() == Route::Settings)
+                                .then(|| *settings_subpage.read())
+                                .flatten()
+                                .map(i18n::t);
                             let page_title = match *current_route.read() {
                                 Route::Home => i18n::t("home"),
                                 Route::Search => i18n::t("search"),
@@ -1711,30 +1689,42 @@ fn App() -> Element {
                                 Route::Artist => if is_details { i18n::t("artist") } else { i18n::t("artists") },
                                 Route::Playlists => i18n::t("playlists"),
                                 Route::Favorites => i18n::t("favorites"),
-                                Route::Settings => i18n::t("settings"),
-                                _ => i18n::t("home"),
+                                Route::Discover | Route::DiscoverPlaylist => i18n::t("discover"),
+                                Route::Radio => i18n::t("radio"),
+                                Route::Activity => i18n::t("activity"),
+                                Route::Settings => settings_title.clone().unwrap_or_else(|| i18n::t("settings")),
+                                #[cfg(not(target_os = "android"))]
+                                Route::Downloader | Route::ThemeEditor => i18n::t("home"),
                             };
                             let has_image_background = config.read().cover_art_background
                                 || !config.read().custom_background_path.is_empty();
                             rsx! {
-                                div { class: if has_image_background { "shrink-0 z-[60] bg-black/30 backdrop-blur-xl border-b border-white/5 flex items-center h-11 px-3" } else { "shrink-0 z-[60] bg-black/60 backdrop-blur-2xl border-b border-white/5 flex items-center h-11 px-3 shadow-xl" },
+                                div { class: if has_image_background { "app-topbar shrink-0 z-[60] bg-black/30 backdrop-blur-xl border-b border-white/5 flex items-center h-11 px-3" } else { "app-topbar shrink-0 z-[60] bg-black/60 backdrop-blur-2xl border-b border-white/5 flex items-center h-11 px-3 shadow-xl" },
                                     if is_details {
                                         button {
-                                            class: "w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
+                                            class: "app-icon-button w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
+                                            aria_label: i18n::t("go_back"),
                                             onclick: move |_| nav_ctrl.go_back(),
+                                            i { class: "fa-solid fa-arrow-left text-lg" }
+                                        }
+                                    } else if settings_title.is_some() {
+                                        button {
+                                            class: "app-icon-button w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
+                                            aria_label: i18n::t("go_back"),
+                                            onclick: move |_| settings_subpage.set(None),
                                             i { class: "fa-solid fa-arrow-left text-lg" }
                                         }
                                     } else {
                                         button {
-                                            class: "w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
+                                            class: "app-icon-button w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-white active:scale-95 transition-all border border-white/10",
                                             onclick: move |_| is_sidebar_collapsed.toggle(),
                                             i { class: "fa-solid fa-bars text-lg" }
                                         }
                                     }
                                     div { class: "flex-1 flex justify-center pr-10",
                                         h2 {
-                                            class: "text-[13px] font-black tracking-[0.2em] text-white/90 uppercase",
-                                            style: "font-family: 'kopuz-custom-font', 'JetBrains Mono', monospace;",
+                                            class: "app-topbar-title text-[13px] font-black tracking-[0.2em] text-white/90 uppercase",
+                                            style: if config.read().ui_style != config::UiStyle::Material3 { "font-family: 'kopuz-custom-font', 'JetBrains Mono', monospace;" },
                                             "{page_title}"
                                         }
                                     }
@@ -1780,11 +1770,7 @@ fn App() -> Element {
                                     selected_playlist_id.set(Some(id));
                                     current_route.set(Route::Playlists);
                                 },
-                                on_search_artist: move |artist: String| {
-                                    selected_artist_name.set(artist);
-                                    selected_artist_channel_id.set(None);
-                                    current_route.set(Route::Artist);
-                                }
+                                on_open_artist: move |artist: String| nav_ctrl.open_artist(artist),
                             }
                         },
                         Route::Discover => rsx! {
@@ -1793,26 +1779,20 @@ fn App() -> Element {
                                     selected_album_id.set(id);
                                     current_route.set(Route::Album);
                                 },
-                                on_select_playlist: move |(id, title): (String, String)| {
+                                on_select_playlist: move |(kind, id, title): (api::CatalogItemKind, String, String)| {
+                                    discover_selected_playlist_kind.set(kind);
                                     discover_selected_playlist_id.set(Some(id));
                                     discover_selected_playlist_title.set(Some(title));
                                     current_route.set(Route::DiscoverPlaylist);
                                 },
-                                on_open_artist: move |(cid, name): (String, String)| {
-                                    selected_artist_channel_id.set(Some(cid));
-                                    selected_artist_name.set(name);
-                                    current_route.set(Route::Artist);
-                                },
-                                on_search_artist: move |name: String| {
-                                    search_query.set(name);
-                                    current_route.set(Route::Search);
-                                },
+                                on_open_artist: move |artist: String| nav_ctrl.open_artist(artist),
                             }
                         },
                         Route::DiscoverPlaylist => rsx! {
                             pages::server::discover::DiscoverPlaylistDetail {
                                 selected_playlist_id: discover_selected_playlist_id,
                                 selected_playlist_title: discover_selected_playlist_title,
+                                selected_playlist_kind: discover_selected_playlist_kind,
                                 on_back: move |_| nav_ctrl.go_back(),
                             }
                         },
@@ -1837,7 +1817,15 @@ fn App() -> Element {
                         Route::Library => rsx! {
                             pages::library::LibraryPage {
                                 config: config,
-                                on_rescan: move |_| *trigger_rescan.write() += 1,
+                                on_rescan: move |_| {
+                                    spawn(async move {
+                                        if let Err(error) =
+                                            backend::api().start_job(api::JobKind::Scan).await
+                                        {
+                                            tracing::warn!(%error, "rescan could not start");
+                                        }
+                                    });
+                                },
                                             is_playing: is_playing,
                                 current_playing: current_playing,
                                 current_song_title: current_song_title,
@@ -1866,42 +1854,33 @@ fn App() -> Element {
                             // library-driven page in all cases.
                             // Route on the active source's capability, not the
                             // configured server: a catalog server can be configured while
-                            // Local is active, and the rich remote profile must not
-                            // hijack the local artist page.
+                            // a folder source is active, and the rich remote profile must not
+                            // hijack the library-driven artist page.
                             let remote_profile =
                                 active_caps().artists == api::ArtistPresentation::Remote;
-                            let has_selection = !selected_artist_name.read().is_empty()
-                                || selected_artist_channel_id.read().is_some();
-                            if remote_profile && has_selection {
+                            if remote_profile && selected_artist.read().is_some() {
                                 rsx! {
                                     pages::server::discover::DiscoverArtistPage {
-                                        selected_artist_id: selected_artist_channel_id,
-                                        selected_artist_name: selected_artist_name,
+                                        selected_artist,
                                         on_back: move |_| nav_ctrl.go_back(),
                                         on_select_album: move |id: String| {
                                             selected_album_id.set(id);
                                             current_route.set(Route::Album);
                                         },
-                                        on_select_playlist: move |(id, title): (String, String)| {
+                                        on_select_playlist: move |(kind, id, title): (api::CatalogItemKind, String, String)| {
+                                            discover_selected_playlist_kind.set(kind);
                                             discover_selected_playlist_id.set(Some(id));
                                             discover_selected_playlist_title.set(Some(title));
                                             current_route.set(Route::DiscoverPlaylist);
                                         },
-                                        on_open_artist: move |(cid, name): (String, String)| {
-                                            selected_artist_channel_id.set(Some(cid));
-                                            selected_artist_name.set(name);
-                                        },
-                                        on_search_artist: move |name: String| {
-                                            search_query.set(name);
-                                            current_route.set(Route::Search);
-                                        },
+                                        on_open_artist: move |artist: String| nav_ctrl.open_artist(artist),
                                     }
                                 }
                             } else {
                                 rsx! {
                                     pages::artist::Artist {
                                         config: config,
-                                        artist_name: selected_artist_name,
+                                        artist: selected_artist,
                                                             on_navigate: move |album_id| {
                                             selected_album_id.set(album_id);
                                             current_route.set(Route::Album);
@@ -1992,6 +1971,12 @@ fn App() -> Element {
                 QuickSearch {
                     show: show_quick_search,
                     on_play: move |(track, fallback): (api::TrackInfo, Vec<api::TrackInfo>)| {
+                        if let Some(radio) =
+                            components::radio_actions::search_play_radio_handler(track.key.clone())
+                        {
+                            radio.call(());
+                            return;
+                        }
                         let api = hooks::consume_api();
                         let _ = quick_search_source();
                         let filter = hooks::TrackFilter {
@@ -2030,6 +2015,20 @@ fn App() -> Element {
                     persisted_volume: persisted_volume,
                     is_rightbar_open: is_rightbar_open,
                     is_devices_open: is_devices_open,
+                }
+            }
+            if cfg!(target_os = "android") {
+                TabBar {
+                    current_route,
+                    on_navigate: move |route| {
+                        if route == Route::Album {
+                            selected_album_id.set(String::new());
+                        }
+                        if route == Route::Artist {
+                            selected_artist.set(None);
+                        }
+                        current_route.set(route);
+                    },
                 }
             }
         }

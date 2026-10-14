@@ -16,19 +16,7 @@ pub fn debug_db_section() -> Element {
     let gens = hooks::db_reactivity::use_generations();
     let mut status = use_signal(String::new);
 
-    let bump_all = move || {
-        use hooks::db_reactivity::Table;
-        for t in [
-            Table::Tracks,
-            Table::Albums,
-            Table::Playlists,
-            Table::Favorites,
-            Table::Folders,
-            Table::Servers,
-        ] {
-            gens.bump(t);
-        }
-    };
+    let bump_all = move || gens.bump_all();
 
     let db_reset = db.clone();
     let db_release = db.clone();
@@ -48,7 +36,7 @@ pub fn debug_db_section() -> Element {
             }
             div { class: "flex flex-wrap gap-3",
                 button {
-                    class: "px-4 py-2 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 text-sm transition-colors",
+                    class: "app-button-tonal app-button-danger px-4 py-2 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 text-sm transition-colors",
                     onclick: move |_| {
                         let db = db_reset.clone();
                         spawn(async move {
@@ -62,7 +50,7 @@ pub fn debug_db_section() -> Element {
                     "Reset DB"
                 }
                 button {
-                    class: "px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
+                    class: "app-button-tonal px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
                     onclick: move |_| {
                         let db = db_release.clone();
                         spawn(async move {
@@ -76,7 +64,7 @@ pub fn debug_db_section() -> Element {
                     "Load release DB"
                 }
                 button {
-                    class: "px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
+                    class: "app-button-tonal px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
                     onclick: move |_| {
                         let db = db_import.clone();
                         spawn(async move {
@@ -94,7 +82,7 @@ pub fn debug_db_section() -> Element {
                     "Re-run JSON import"
                 }
                 button {
-                    class: "px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
+                    class: "app-button-tonal px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
                     onclick: move |_| {
                         let db = db_seed.clone();
                         spawn(async move {
@@ -108,7 +96,7 @@ pub fn debug_db_section() -> Element {
                     "Seed 20k tracks"
                 }
                 button {
-                    class: "px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
+                    class: "app-button-tonal px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
                     onclick: move |_| {
                         let db = db_vacuum.clone();
                         spawn(async move {
@@ -121,7 +109,7 @@ pub fn debug_db_section() -> Element {
                     "Vacuum"
                 }
                 button {
-                    class: "px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
+                    class: "app-button-tonal px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm transition-colors",
                     onclick: move |_| {
                         let db = db_info.clone();
                         spawn(async move {

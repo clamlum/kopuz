@@ -3,24 +3,42 @@ package dev.dioxus.main
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.graphics.Color
+import androidx.activity.OnBackPressedCallback
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import moe.kopuz.kopuz.MediaReceiver
 import moe.kopuz.kopuz.MediaSessionHelper
+import moe.kopuz.kopuz.SystemColors
 
 typealias BuildConfig = moe.kopuz.kopuz.BuildConfig
 
 class MainActivity : WryActivity() {
+    private var systemColorsEnabled = false
+
+    fun setSystemColorsEnabled(enabled: Boolean) {
+        systemColorsEnabled = enabled
+        enableEdgeToEdge()
+    }
+
+    // Dioxus owns page history; WebView history is not the in-app back stack.
+    override val handleBackNavigation: Boolean = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                MediaReceiver.nativeOnAction("back")
+            }
+        })
         enableEdgeToEdge()
         MediaSessionHelper.init(this)
         if (!requestNotificationPermission()) {
@@ -43,19 +61,19 @@ class MainActivity : WryActivity() {
             window.isNavigationBarContrastEnforced = false
         }
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            // Dark UI → light (white) status/nav icons.
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
+            val light = systemColorsEnabled &&
+                resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
+                Configuration.UI_MODE_NIGHT_YES
+            isAppearanceLightStatusBars = light
+            isAppearanceLightNavigationBars = light
         }
     }
 
-    // Forward hardware/gesture back to Rust, which pops the in-app router or, at the
-    // root, backgrounds the app. Deliberately NOT calling super: letting the OS finish
-    // the activity would tear down the native runtime and kill playback.
-    @Deprecated("Routed to the in-app router instead of finishing the activity.")
-    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
-    override fun onBackPressed() {
-        MediaReceiver.nativeOnAction("back")
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Android dispatches the new configuration to the existing WebView.
+        // Reapply bar styling after a system theme or display change.
+        enableEdgeToEdge()
     }
 
     private var webView: android.webkit.WebView? = null
@@ -73,6 +91,7 @@ class MainActivity : WryActivity() {
      */
     override fun onWebViewCreate(webView: android.webkit.WebView) {
         this.webView = webView
+        webView.addJavascriptInterface(SystemColors(this), "KopuzSystemColors")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             webView.setRendererPriorityPolicy(
                 android.webkit.WebView.RENDERER_PRIORITY_IMPORTANT,

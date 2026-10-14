@@ -1,6 +1,5 @@
-//! Local-library and remote-server settings controls.
+//! Source settings controls.
 
-use config::SavedLocalSource;
 use dioxus::prelude::*;
 #[cfg(not(target_os = "android"))]
 use rfd::AsyncFileDialog;
@@ -16,7 +15,7 @@ pub fn MultiDirectoryPicker(
     let no_folders_text = i18n::t("no_music_folders");
 
     rsx! {
-        div { class: "flex flex-col gap-2 w-full",
+        div { class: "flex flex-col gap-2 min-w-0 w-full",
             if current_paths.is_empty() {
                 p { class: "text-xs text-slate-500 italic", "{no_folders_text}" }
             }
@@ -26,9 +25,10 @@ pub fn MultiDirectoryPicker(
                     let row_key = format!("{i}-{display}");
                     rsx! {
                         div { key: "{row_key}",
-                            class: "flex items-center justify-between gap-3 bg-white/5 p-2 rounded w-full",
+                            class: "flex items-center justify-between gap-3 bg-white/5 p-2 rounded min-w-0 w-full",
                             span {
-                                class: "text-xs text-slate-400 font-mono truncate flex-1",
+                                class: "text-xs text-slate-400 font-mono truncate min-w-0 flex-1",
+                                title: "{display}",
                                 "{display}"
                             }
                             button {
@@ -47,97 +47,6 @@ pub fn MultiDirectoryPicker(
     }
 }
 
-#[component]
-pub fn LocalSourceSettings(
-    active_source: config::Source,
-    default_directories: Vec<std::path::PathBuf>,
-    sources: Vec<SavedLocalSource>,
-    on_add: EventHandler<()>,
-    on_delete: EventHandler<String>,
-    on_switch: EventHandler<config::Source>,
-    on_add_folder: EventHandler<(config::Source, std::path::PathBuf)>,
-    on_remove_folder: EventHandler<(config::Source, usize)>,
-) -> Element {
-    let default_active = active_source == config::Source::Local;
-    rsx! {
-        div { class: "flex flex-col gap-3 w-full",
-            div { class: "bg-white/5 p-3 rounded w-full space-y-2",
-                div { class: "flex items-center justify-between gap-3",
-                    div { class: "min-w-0 flex items-center gap-2",
-                        p { class: "text-sm font-medium text-white truncate", "{i18n::t(\"local\")}" }
-                        if default_active {
-                            span { class: "text-[10px] px-2 py-0.5 rounded bg-indigo-500/30 text-indigo-200",
-                                "{i18n::t(\"active_local_library\")}"
-                            }
-                        }
-                    }
-                    if !default_active {
-                        button {
-                            onclick: move |_| on_switch.call(config::Source::Local),
-                            class: "text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white transition-colors",
-                            "{i18n::t(\"switch_to_local_library\")}"
-                        }
-                    }
-                }
-                MultiDirectoryPicker {
-                    current_paths: default_directories,
-                    on_add: move |path| on_add_folder.call((config::Source::Local, path)),
-                    on_remove: move |index| on_remove_folder.call((config::Source::Local, index)),
-                }
-            }
-            for source in sources.iter().cloned() {
-                {
-                    let id = source.id.clone();
-                    let id_delete = id.clone();
-                    let source_key = config::Source::LocalLibrary(id.clone());
-                    let switch_key = source_key.clone();
-                    let add_folder_key = source_key.clone();
-                    let remove_folder_key = source_key.clone();
-                    let is_active = active_source.local_library_id() == Some(source.id.as_str());
-                    rsx! {
-                        div { key: "{source.id}", class: "bg-white/5 p-3 rounded w-full space-y-2",
-                            div { class: "flex items-center justify-between gap-3",
-                                div { class: "min-w-0 flex items-center gap-2",
-                                    p { class: "text-sm font-medium text-white truncate", "{source.name}" }
-                                    if is_active {
-                                        span { class: "text-[10px] px-2 py-0.5 rounded bg-indigo-500/30 text-indigo-200",
-                                            "{i18n::t(\"active_local_library\")}"
-                                        }
-                                    }
-                                }
-                                div { class: "flex items-center gap-2 shrink-0",
-                                    if !is_active {
-                                        button {
-                                            onclick: move |_| on_switch.call(switch_key.clone()),
-                                            class: "text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white transition-colors",
-                                            "{i18n::t(\"switch_to_local_library\")}"
-                                        }
-                                    }
-                                    button {
-                                        onclick: move |_| on_delete.call(id_delete.clone()),
-                                        class: "text-red-400 hover:text-red-300 text-sm px-2 py-1 transition-colors",
-                                        "{i18n::t(\"delete\")}"
-                                    }
-                                }
-                            }
-                            MultiDirectoryPicker {
-                                current_paths: source.directories.clone(),
-                                on_add: move |path| on_add_folder.call((add_folder_key.clone(), path)),
-                                on_remove: move |index| on_remove_folder.call((remove_folder_key.clone(), index)),
-                            }
-                        }
-                    }
-                }
-            }
-            button {
-                onclick: move |_| on_add.call(()),
-                class: "bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
-                "{i18n::t(\"add_local_library\")}"
-            }
-        }
-    }
-}
-
 #[cfg(not(target_os = "android"))]
 #[component]
 fn AddFolderButton(on_add: EventHandler<std::path::PathBuf>, add_text: String) -> Element {
@@ -150,7 +59,7 @@ fn AddFolderButton(on_add: EventHandler<std::path::PathBuf>, add_text: String) -
                     }
                 });
             },
-            class: "bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
+            class: "app-button-tonal bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
             "{add_text}"
         }
     }
@@ -186,17 +95,17 @@ fn AddFolderButton(on_add: EventHandler<std::path::PathBuf>, add_text: String) -
                     }
                 });
             },
-            class: "bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
+            class: "app-button-tonal bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
             "{add_text}"
         }
     }
 }
 
 #[component]
-pub fn ServerSettings(
-    /// The configured servers as the daemon reports them, including which one
+pub fn SourceSettings(
+    /// The configured sources as the daemon reports them, including which one
     /// is active and whether it holds usable credentials.
-    servers: Vec<api::SourceInfo>,
+    sources: Vec<api::SourceInfo>,
     on_add: EventHandler<()>,
     on_delete: EventHandler<String>,
     on_switch: EventHandler<String>,
@@ -214,45 +123,48 @@ pub fn ServerSettings(
     let conn = hooks::source_switch::use_connection_status();
 
     rsx! {
-        div { class: "flex flex-col gap-2 w-full",
-            if servers.is_empty() {
+        div { class: "flex flex-col gap-2 min-w-0 w-full",
+            if sources.is_empty() {
                 p { class: "text-xs text-white/50 italic", "{i18n::t(\"no_saved_servers\")}" }
             }
-            for srv in servers.iter().cloned() {
+            for srv in sources.iter().cloned() {
                 {
                     let id = srv.id.clone();
                     let is_active = srv.active;
                     let id_switch = id.clone();
                     let id_delete = id.clone();
-                    let settings = srv.settings.clone();
+                    // A server that browses a folder tree has its own picker for them.
+                    let settings: Vec<api::FieldSpec> = srv
+                        .settings
+                        .iter()
+                        .filter(|field| {
+                            !(srv.capabilities.browse_folders
+                                && matches!(field.kind, api::FieldKind::Directories))
+                        })
+                        .cloned()
+                        .collect();
                     let settings_id = srv.id.clone();
-                    let service_name = srv
-                        .service
-                        .as_ref()
-                        .map(|service| crate::forms::text(&service.name))
-                        .unwrap_or_default();
+                    let service_name = crate::forms::text(&srv.service.name);
                     let url = srv.detail.clone().unwrap_or_default();
-                    // Folders are the whole library definition here, so the
-                    // picker sits on the card the way it does for a local
-                    // library, not behind a separate dialog.
+                    // Folders are the whole library definition, so the picker sits on the card.
                     let picker = is_active.then(|| remote_folders.clone()).flatten();
                     let needs_host = srv.capabilities.browser_playback && !host_access;
                     rsx! {
                         div { key: "{srv.id}",
-                            class: "flex flex-col gap-2 bg-white/5 p-2 rounded w-full",
-                            div { class: "flex items-center justify-between gap-4 w-full",
-                            div { class: "min-w-0 flex-1",
-                                div { class: "flex items-center gap-2",
-                                    p { class: "text-sm font-medium text-white truncate", "{srv.name}" }
+                            class: "app-card flex flex-col gap-2 bg-white/5 p-2 rounded min-w-0 w-full",
+                            div { class: "flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-4 w-full",
+                            div { class: "min-w-0 w-full flex-1",
+                                div { class: "flex flex-wrap items-center gap-2",
+                                    p { class: "min-w-0 text-sm font-medium text-white break-words", "{srv.name}" }
                                     if is_active {
-                                        span { class: "text-[10px] px-2 py-0.5 rounded bg-indigo-500/30 text-indigo-200",
+                                        span { class: "app-badge shrink-0 text-[10px] px-2 py-0.5 rounded bg-indigo-500/30 text-indigo-200",
                                             "{active_text}"
                                         }
                                     }
                                 }
                                 p { class: "text-xs text-white/60", "{i18n::t_with(\"service\", &[(\"name\", service_name.clone())])}" }
                                 p { class: "text-xs text-white/60 truncate", "{url}" }
-                                if is_active {
+                                if is_active && srv.needs_network {
                                     match conn() {
                                         hooks::source_switch::ConnStatus::Online => rsx! {
                                             p { class: "text-xs mt-1", style: "color:#3fb950", "{i18n::t(\"connected\")}" }
@@ -265,7 +177,7 @@ pub fn ServerSettings(
                                                 p { class: "text-xs", style: "color:#e5534b", "{i18n::t(\"disconnected\")}" }
                                                 button {
                                                     onclick: move |_| on_login.call(()),
-                                                    class: "text-xs bg-white/10 hover:bg-white/20 px-2 py-0.5 rounded text-white transition-colors",
+                                                    class: "app-button-tonal text-xs bg-white/10 hover:bg-white/20 px-2 py-0.5 rounded text-white transition-colors",
                                                     "{login_text}"
                                                 }
                                             }
@@ -273,18 +185,20 @@ pub fn ServerSettings(
                                     }
                                 }
                             }
-                            div { class: "flex items-center gap-2 shrink-0",
+                            div { class: "flex flex-wrap items-center gap-2 shrink-0",
                                 if !is_active {
                                     button {
                                         onclick: move |_| on_switch.call(id_switch.clone()),
-                                        class: "text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white transition-colors",
+                                        class: "app-button-tonal text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white transition-colors",
                                         "{switch_text}"
                                     }
                                 }
-                                button {
-                                    onclick: move |_| on_delete.call(id_delete.clone()),
-                                    class: "text-red-400 hover:text-red-300 text-sm px-2 py-1 transition-colors",
-                                    "{delete_text}"
+                                if !srv.permanent {
+                                    button {
+                                        onclick: move |_| on_delete.call(id_delete.clone()),
+                                        class: "app-button-text app-button-danger text-red-400 hover:text-red-300 text-sm px-2 py-1 transition-colors",
+                                        "{delete_text}"
+                                    }
                                 }
                             }
                             }
@@ -298,6 +212,9 @@ pub fn ServerSettings(
                                 crate::settings_popups::HostAccessWarning {
                                     message: i18n::t("browser_playback_needs_host").to_string(),
                                 }
+                            }
+                            if is_active && srv.authenticated && srv.capabilities.storage_quota {
+                                CloudStorage { source_id: srv.id.clone(), uploads: srv.capabilities.uploads }
                             }
                             if !settings.is_empty() {
                                 div { class: "border-t border-white/10 pt-2",
@@ -319,8 +236,101 @@ pub fn ServerSettings(
             }
             button {
                 onclick: move |_| on_add.call(()),
-                class: "bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
-                "{i18n::t(\"add_server\")}"
+                class: "app-button-tonal bg-white/10 hover:bg-white/20 px-3 py-1 rounded text-sm text-white transition-colors self-start",
+                "{i18n::t(\"add_source\")}"
+            }
+        }
+    }
+}
+
+#[component]
+fn CloudStorage(source_id: String, uploads: bool) -> Element {
+    let api = hooks::api::use_api();
+    let quota_api = api.clone();
+    let quota_id = source_id.clone();
+    let mut quota = use_resource(move || {
+        let api = quota_api.clone();
+        let id = quota_id.clone();
+        async move { api.storage_quota(id).await }
+    });
+    let mut uploading = use_signal(|| false);
+    let mut current_file = use_signal(String::new);
+    let mut picker_version = use_signal(|| 0_u64);
+    let quota_value = quota.read().clone();
+    rsx! {
+        div { class: "flex flex-col gap-2 border-t border-white/10 pt-2",
+            match quota_value {
+                Some(Ok(value)) => {
+                    let used = format!("{:.1} MiB", value.used_bytes as f64 / 1_048_576.0);
+                    let total = format!("{:.1} MiB", value.quota_bytes as f64 / 1_048_576.0);
+                    rsx! { p { class: "text-xs text-white/60", "{i18n::t_with(\"cloud_storage_usage\", &[(\"used\", used.clone()), (\"total\", total.clone())])}" } }
+                }
+                Some(Err(error)) => rsx! { p { class: "text-xs text-red-400", "{error}" } },
+                None => rsx! { p { class: "text-xs text-white/60", "{i18n::t(\"cloud_storage_loading\")}" } },
+            }
+            if uploads {
+                label { class: "app-button-tonal inline-flex items-center justify-center self-start px-3 py-1 rounded text-sm text-white bg-white/10 hover:bg-white/20 transition-colors cursor-pointer",
+                    "{i18n::t(\"upload_music\")}"
+                    input {
+                        key: "{picker_version}",
+                        class: "hidden",
+                        r#type: "file",
+                        accept: ".mp3,.m4a,.flac,.wav,.ogg,.opus,.wma,.aiff",
+                        multiple: true,
+                        disabled: uploading(),
+                        onchange: move |event| {
+                            if uploading() { return; }
+                            let files = event.files();
+                            if files.is_empty() { return; }
+                            let api = api.clone();
+                            let id = source_id.clone();
+                            uploading.set(true);
+                            spawn(async move {
+                                let mut uploaded = 0;
+                                for file in files {
+                                    let filename = file.name();
+                                    current_file.set(filename.clone());
+                                    if file.size() > api::MAX_MUSIC_UPLOAD_BYTES as u64 {
+                                        hooks::toast::toast_error(&i18n::t("music_upload_too_large"));
+                                        break;
+                                    }
+                                    let content = match file.read_bytes().await {
+                                        Ok(bytes) => bytes.to_vec(),
+                                        Err(error) => {
+                                            hooks::toast::toast_error(&error.to_string());
+                                            break;
+                                        }
+                                    };
+                                    let upload = api::TrackUpload { source_id: id.clone(), filename, content };
+                                    if let Err(error) = api.upload_track(upload).await {
+                                        hooks::toast::toast_error(&error.to_string());
+                                        break;
+                                    }
+                                    uploaded += 1;
+                                }
+                                if uploaded > 0 {
+                                    hooks::toast::toast(&i18n::t_with("music_uploaded", &[("count", uploaded.to_string())]));
+                                    match api.sources().await {
+                                        Ok(sources) if sources.iter().any(|source| source.id == id && source.active) => {
+                                            if let Err(error) = api.start_job(api::JobKind::LibrarySync).await {
+                                                hooks::toast::toast_error(&error.to_string());
+                                            }
+                                        }
+                                        Err(error) => hooks::toast::toast_error(&error.to_string()),
+                                        _ => {},
+                                    }
+                                }
+                                quota.restart();
+                                uploading.set(false);
+                                current_file.set(String::new());
+                                picker_version += 1;
+                            });
+                        },
+                    }
+                }
+            }
+            if uploading() {
+                p { class: "text-xs text-white/60", "{i18n::t_with(\"uploading_music\", &[(\"name\", current_file())])}" }
             }
         }
     }

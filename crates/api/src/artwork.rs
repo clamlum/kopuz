@@ -17,11 +17,12 @@ pub enum ArtworkTarget {
 }
 
 impl ArtworkTarget {
+    /// The entity's key within its kind.
     pub fn id(&self) -> &str {
         match self {
+            Self::Artist(artist) => artist.as_str(),
             Self::Track(id)
             | Self::Album(id)
-            | Self::Artist(id)
             | Self::Playlist(id)
             | Self::Catalog(id)
             | Self::Station(id) => id,

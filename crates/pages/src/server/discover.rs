@@ -41,9 +41,8 @@ fn keys_of(tracks: &[TrackInfo]) -> Vec<String> {
 #[tracing::instrument(name = "render.discover_home", skip_all)]
 pub fn DiscoverPage(
     on_select_album: EventHandler<String>,
-    on_select_playlist: EventHandler<(String, String)>,
-    on_open_artist: EventHandler<(String, String)>,
-    on_search_artist: EventHandler<String>,
+    on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
+    on_open_artist: EventHandler<String>,
 ) -> Element {
     let api = hooks::use_api();
     let caps = hooks::sources::use_capabilities();
@@ -161,7 +160,6 @@ pub fn DiscoverPage(
                     on_select_album: on_select_album,
                     on_select_playlist: on_select_playlist,
                     on_open_artist: on_open_artist,
-                    on_search_artist: on_search_artist,
                 }
             }
 
@@ -182,9 +180,8 @@ fn ShelfRow(
     shelf: CatalogShelf,
     scroll_id: String,
     on_select_album: EventHandler<String>,
-    on_select_playlist: EventHandler<(String, String)>,
-    on_open_artist: EventHandler<(String, String)>,
-    on_search_artist: EventHandler<String>,
+    on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
+    on_open_artist: EventHandler<String>,
 ) -> Element {
     if shelf.list {
         return rsx! { SongListShelf {
@@ -237,7 +234,6 @@ fn ShelfRow(
                         on_select_album: on_select_album,
                         on_select_playlist: on_select_playlist,
                         on_open_artist: on_open_artist,
-                        on_search_artist: on_search_artist,
                     }
                 }
             }
@@ -251,7 +247,7 @@ fn ShelfRow(
 #[component]
 fn SongListShelf(
     shelf: CatalogShelf,
-    on_select_playlist: EventHandler<(String, String)>,
+    on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
 ) -> Element {
     let mut ctrl = use_context::<hooks::use_player_controller::PlayerController>();
     let mut now_playing = use_context::<DiscoverNowPlaying>().0;
@@ -270,7 +266,12 @@ fn SongListShelf(
                     button {
                         class: "text-xs font-bold text-white/60 hover:text-white cursor-pointer transition-colors",
                         onclick: move |_| {
-                            on_select_playlist.call((more.clone(), title_for_more.clone()))
+                            // A song list's "show all" opens more of the same songs.
+                            on_select_playlist.call((
+                                CatalogItemKind::Playlist,
+                                more.clone(),
+                                title_for_more.clone(),
+                            ))
                         },
                         "{i18n::t(\"discover_show_all\")}"
                     }
@@ -297,7 +298,6 @@ fn SongListShelf(
                                         key: "{idx}",
                                         track: info.clone(),
                                         cover_url,
-                                        on_start_radio: components::track_row::radio_handler(key.clone()),
                                         row_num: Some(idx + 1),
                                         is_menu_open,
                                         is_currently_playing: is_current,
@@ -341,9 +341,8 @@ fn SongListShelf(
 fn DiscoverTile(
     item: CatalogItem,
     on_select_album: EventHandler<String>,
-    on_select_playlist: EventHandler<(String, String)>,
-    on_open_artist: EventHandler<(String, String)>,
-    on_search_artist: EventHandler<String>,
+    on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
+    on_open_artist: EventHandler<String>,
 ) -> Element {
     let ctrl = use_context::<hooks::use_player_controller::PlayerController>();
     let now_playing = use_context::<DiscoverNowPlaying>().0;
@@ -371,7 +370,11 @@ fn DiscoverTile(
                         if kind == CatalogItemKind::Album {
                             on_select_album.call(id_for_click.clone());
                         } else {
-                            on_select_playlist.call((id_for_click.clone(), title_for_click.clone()));
+                            on_select_playlist.call((
+                                kind,
+                                id_for_click.clone(),
+                                title_for_click.clone(),
+                            ));
                         }
                     },
                     on_play: EventHandler::new(move |_| {
@@ -383,15 +386,14 @@ fn DiscoverTile(
             }
         }
         CatalogItemKind::Artist => {
-            let id = item.id.clone();
-            let name = item.title.clone();
+            let artist = item.id.clone();
             rsx! {
                 Card {
                     title: item.title.clone(),
                     subtitle: String::new(),
                     thumbnail,
                     rounded_full: true,
-                    onclick: move |_| on_open_artist.call((id.clone(), name.clone())),
+                    onclick: move |_| on_open_artist.call(artist.clone()),
                     on_play: None,
                     kind: CatalogItemKind::Artist,
                     source_id: None,
@@ -657,9 +659,26 @@ fn SongCard(item: CatalogItem, track: TrackInfo) -> Element {
     let show_loading = is_this_source && is_loading;
     let show_pause = is_this_source && is_playing && !is_loading;
 
+    let menu_track = track.clone();
+    let mut menu_open = use_signal(|| false);
+    let mut playlist_open = use_signal(|| false);
+    let add_key = key.clone();
+    let create_key = key.clone();
+
     rsx! {
         div {
-            class: "shrink-0 w-44 text-left cursor-pointer transition-transform duration-200 ease-out hover:scale-[1.03] hover:-translate-y-0.5 group",
+            // A transformed card contains the menu's fixed panel, so the hover
+            // lift is off while it is open. The playlist modal renders beside the card.
+            class: if menu_open() {
+                "shrink-0 w-44 text-left cursor-pointer transition-transform duration-200 ease-out group"
+            } else {
+                "shrink-0 w-44 text-left cursor-pointer transition-transform duration-200 ease-out hover:scale-[1.03] hover:-translate-y-0.5 group"
+            },
+            oncontextmenu: move |evt| {
+                evt.prevent_default();
+                components::dots_menu::open_at_pointer(&evt);
+                menu_open.set(true);
+            },
             onclick: {
                 let key = key.clone();
                 move |_| {
@@ -703,6 +722,18 @@ fn SongCard(item: CatalogItem, track: TrackInfo) -> Element {
                         }
                     }
                 }
+                div {
+                    class: "absolute right-1 top-1",
+                    onclick: move |evt| evt.stop_propagation(),
+                    components::track_actions::TrackActionsMenu {
+                        track: menu_track.clone(),
+                        is_open: Some(menu_open()),
+                        on_open: Some(EventHandler::new(move |_| menu_open.set(true))),
+                        on_close: Some(EventHandler::new(move |_| menu_open.set(false))),
+                        on_add_to_playlist: Some(EventHandler::new(move |_| playlist_open.set(true))),
+                        button_class: "opacity-0 group-hover:opacity-100 focus:opacity-100".to_string(),
+                    }
+                }
             }
             div { class: "h-10 flex items-center overflow-hidden",
                 p {
@@ -716,6 +747,19 @@ fn SongCard(item: CatalogItem, track: TrackInfo) -> Element {
                 "{subtitle}"
             }
         }
+        if playlist_open() {
+            components::playlist_modal::PlaylistModal {
+                on_close: move |_| playlist_open.set(false),
+                on_add_to_playlist: move |playlist_id: String| {
+                    hooks::playlist_actions::add_tracks(playlist_id, vec![add_key.clone()]);
+                    playlist_open.set(false);
+                },
+                on_create_playlist: move |name: String| {
+                    hooks::playlist_actions::create_with(name, vec![create_key.clone()]);
+                    playlist_open.set(false);
+                },
+            }
+        }
     }
 }
 
@@ -726,6 +770,8 @@ fn SongCard(item: CatalogItem, track: TrackInfo) -> Element {
 pub fn DiscoverPlaylistDetail(
     selected_playlist_id: Signal<Option<String>>,
     selected_playlist_title: Signal<Option<String>>,
+    /// What the id names, as the caller that had it knew.
+    selected_playlist_kind: Signal<CatalogItemKind>,
     on_back: EventHandler<()>,
 ) -> Element {
     let api = hooks::use_api();
@@ -757,15 +803,12 @@ pub fn DiscoverPlaylistDetail(
         error.set(None);
         let load_span = tracing::info_span!("playlist.load", playlist_id = %id);
         let api = api.clone();
+        // This read an `MPRE` prefix off the id to tell an album from a playlist,
+        // which is one service's id format decided in a page. The caller that had
+        // the id knew what it was.
+        let kind = *selected_playlist_kind.read();
         spawn(
             async move {
-                // Discover routes albums through this viewer too, and an album
-                // browse id is not a playlist id, so the kind follows the id.
-                let kind = if id.starts_with("MPRE") {
-                    CatalogItemKind::Album
-                } else {
-                    CatalogItemKind::Playlist
-                };
                 let result = api
                     .catalog_detail(CatalogDetailRequest {
                         kind,
@@ -850,21 +893,14 @@ fn BackButton(on_back: EventHandler<()>) -> Element {
     }
 }
 
-/// The source's own artist profile, used wherever the active source presents
-/// artists remotely. Its sections are catalog shelves, so they get the same
-/// tiles, hover-play and scrolling as the browse home.
-///
-/// Callers that know the artist's catalog id pass it; callers that only have a
-/// name pass that, and the daemon resolves it.
+/// The source's own artist profile, for a source that presents artists remotely; its sections are catalog shelves.
 #[component]
 pub fn DiscoverArtistPage(
-    selected_artist_id: Signal<Option<String>>,
-    selected_artist_name: Signal<String>,
+    selected_artist: Signal<Option<String>>,
     on_back: EventHandler<()>,
     on_select_album: EventHandler<String>,
-    on_select_playlist: EventHandler<(String, String)>,
-    on_open_artist: EventHandler<(String, String)>,
-    on_search_artist: EventHandler<String>,
+    on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
+    on_open_artist: EventHandler<String>,
 ) -> Element {
     let api = hooks::use_api();
     let ctrl = use_context::<hooks::use_player_controller::PlayerController>();
@@ -877,16 +913,10 @@ pub fn DiscoverArtistPage(
     // Generation guard: drop a late answer when the user has moved on.
     let mut fetch_gen = use_signal(|| 0u64);
     use_effect(move || {
-        // The selection is (id, name): the id wins, the name is the fallback
-        // the daemon resolves.
-        let id = selected_artist_id.read().clone();
-        let name = selected_artist_name.read().clone();
-        let Some(reference) = id.or_else(|| {
-            let name = name.trim();
-            (!name.is_empty()).then(|| name.to_string())
-        }) else {
+        let Some(selected) = selected_artist.read().clone() else {
             return;
         };
+        let request = CatalogDetailRequest::artist(&selected);
         let my_gen = fetch_gen.with_mut(|generation| {
             *generation += 1;
             *generation
@@ -894,17 +924,11 @@ pub fn DiscoverArtistPage(
         artist.set(None);
         loading.set(true);
         error.set(None);
-        let artist_span = tracing::info_span!("artist.load", artist = %reference);
+        let artist_span = tracing::info_span!("artist.load", artist = %selected);
         let api = api.clone();
         spawn(
             async move {
-                let result = api
-                    .catalog_detail(CatalogDetailRequest {
-                        kind: CatalogItemKind::Artist,
-                        id: reference,
-                        continuation: None,
-                    })
-                    .await;
+                let result = api.catalog_detail(request).await;
                 if *fetch_gen.peek() != my_gen {
                     return;
                 }
@@ -918,9 +942,29 @@ pub fn DiscoverArtistPage(
         );
     });
 
-    if selected_artist_id.read().is_none() && selected_artist_name.read().trim().is_empty() {
+    if selected_artist.read().is_none() {
         return rsx! {
             div { class: "p-12 text-white/60", "{i18n::t(\"artist_none_selected\")}" }
+        };
+    }
+
+    // An artist the source issued no id for has no page of its own, so the daemon answers with the library's tracks.
+    let loaded = artist.read().clone();
+    if let Some(detail) = loaded
+        && !detail.tracks.is_empty()
+    {
+        let cover_url = hooks::artwork::url(detail.artwork.as_ref(), hooks::artwork::Size::Thumb);
+        return rsx! {
+            div { class: "absolute inset-0 flex flex-col overflow-hidden p-8",
+                components::track_list_view::TrackListView {
+                    name: detail.title,
+                    description: String::new(),
+                    cover_url,
+                    tracks: detail.tracks,
+                    is_album: false,
+                    on_close: move |_| on_back.call(()),
+                }
+            }
         };
     }
 
@@ -986,7 +1030,6 @@ pub fn DiscoverArtistPage(
                                     on_select_album: on_select_album,
                                     on_select_playlist: on_select_playlist,
                                     on_open_artist: on_open_artist,
-                                    on_search_artist: on_search_artist,
                                 }
                             }
                         }

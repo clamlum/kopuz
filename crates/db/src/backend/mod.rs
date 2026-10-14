@@ -37,14 +37,15 @@ impl Native {
         }
         migrations::snapshot_if_pending(path).await;
         let pool = open_pool(path).await?;
-        migrations::run_migrations(&pool).await?;
         let db_dir = match path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
         };
+        let settings_path = config::store::settings_path_for(db_dir);
+        migrations::run_migrations(&pool, Some(&settings_path)).await?;
         Ok(Self {
             pool: ArcSwap::from_pointee(pool),
-            settings_path: config::store::settings_path_for(db_dir),
+            settings_path,
         })
     }
 
@@ -176,6 +177,43 @@ impl ReadStore for Native {
         queries::artist_tracks(&self.pool(), source, artist, limit).await
     }
 
+    async fn artist_albums(
+        &self,
+        source: &crate::Source,
+        artist: &str,
+    ) -> Result<Vec<reader::Album>, DbError> {
+        queries::artist_albums(&self.pool(), source, artist).await
+    }
+
+    async fn artist(
+        &self,
+        source: &crate::Source,
+        artist: &str,
+    ) -> Result<Option<crate::ArtistRow>, DbError> {
+        queries::artist(&self.pool(), source, artist).await
+    }
+
+    async fn artist_keys_unnamed_by_source(
+        &self,
+        source: &crate::Source,
+    ) -> Result<std::collections::HashSet<String>, DbError> {
+        queries::artist_keys_unnamed_by_source(&self.pool(), source).await
+    }
+
+    async fn linked_artist_keys(
+        &self,
+        source: &crate::Source,
+    ) -> Result<std::collections::HashMap<String, String>, DbError> {
+        queries::linked_artist_keys(&self.pool(), source).await
+    }
+
+    async fn unlinked_artist_keys(
+        &self,
+        source: &crate::Source,
+    ) -> Result<std::collections::HashMap<String, String>, DbError> {
+        queries::unlinked_artist_keys(&self.pool(), source).await
+    }
+
     async fn genre_tracks(
         &self,
         source: &crate::Source,
@@ -224,7 +262,7 @@ impl ReadStore for Native {
         queries::tracks_by_keys(&self.pool(), source, keys).await
     }
 
-    async fn artists(&self, source: &crate::Source) -> Result<Vec<(String, u32)>, DbError> {
+    async fn artists(&self, source: &crate::Source) -> Result<Vec<crate::ArtistRow>, DbError> {
         queries::artists(&self.pool(), source).await
     }
 
@@ -233,6 +271,14 @@ impl ReadStore for Native {
         source: &crate::Source,
     ) -> Result<std::collections::HashMap<String, String>, DbError> {
         queries::artist_album_covers(&self.pool(), source).await
+    }
+
+    async fn artist_album_cover(
+        &self,
+        source: &crate::Source,
+        artist: &str,
+    ) -> Result<Option<String>, DbError> {
+        queries::artist_album_cover(&self.pool(), source, artist).await
     }
 
     async fn genres(&self, source: &crate::Source) -> Result<Vec<String>, DbError> {
@@ -263,8 +309,8 @@ impl ReadStore for Native {
         queries::albums_recently_added(&self.pool(), source, limit).await
     }
 
-    async fn load_queue(&self) -> Result<crate::QueueSnapshot, DbError> {
-        dump::load_queue(&self.pool()).await
+    async fn load_queue(&self, source: &crate::Source) -> Result<crate::QueueSnapshot, DbError> {
+        dump::load_queue(&self.pool(), source).await
     }
 
     async fn load_playlists(
@@ -272,6 +318,14 @@ impl ReadStore for Native {
         source: &crate::Source,
     ) -> Result<reader::PlaylistStore, DbError> {
         dump::load_playlists(&self.pool(), source).await
+    }
+
+    async fn playlist_entries(
+        &self,
+        source: &crate::Source,
+        pl_id: &str,
+    ) -> Result<Vec<reader::PlaylistEntry>, DbError> {
+        writes::playlist_entries(&self.pool(), source, pl_id).await
     }
 
     async fn favorites(&self, server_id: &str) -> Result<Vec<String>, DbError> {
@@ -303,6 +357,10 @@ impl ReadStore for Native {
         cfg_store::set_server_credentials(&self.pool(), id, access_token, user_id).await
     }
 
+    async fn cached_lyrics(&self, cache_key: &str) -> Result<Option<crate::CachedLyrics>, DbError> {
+        dump::cached_lyrics(&self.pool(), cache_key).await
+    }
+
     async fn meta_get(&self, cache_key: &str, kind: &str) -> Result<Option<String>, DbError> {
         writes::meta_get(&self.pool(), cache_key, kind).await
     }
@@ -322,8 +380,15 @@ impl Storage for Native {
         cfg_store::save_config(&self.pool(), cfg, &self.settings_path).await
     }
 
+    async fn purge_source(&self, source: &crate::Source) -> Result<(), DbError> {
+        let mut tx = self.pool().begin().await?;
+        cfg_store::purge_source(&mut tx, source.as_str()).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn import_legacy_json(&self, config_dir: &Path) -> Result<crate::ImportReport, DbError> {
-        migrations::run_json_import(&self.pool(), config_dir).await
+        migrations::run_json_import(&self.pool(), config_dir, &self.settings_path).await
     }
 
     async fn finalize_migration(&self, config_dir: &Path) -> Result<usize, DbError> {
@@ -347,13 +412,23 @@ impl Storage for Native {
         writes::prune_source(&self.pool(), source, keep_track_keys, keep_album_ids).await
     }
 
+    async fn name_artist(
+        &self,
+        source: &crate::Source,
+        id: &str,
+        name: &str,
+    ) -> Result<bool, DbError> {
+        writes::name_artist(&self.pool(), source, id, name).await
+    }
+
     async fn set_artist_image(
         &self,
-        artist_norm: &str,
+        source: &crate::Source,
+        artist_key: &str,
         kind: &str,
         image_ref: Option<&str>,
     ) -> Result<(), DbError> {
-        writes::set_artist_image(&self.pool(), artist_norm, kind, image_ref).await
+        writes::set_artist_image(&self.pool(), source, artist_key, kind, image_ref).await
     }
 
     async fn update_album_cover(
@@ -394,9 +469,9 @@ impl Storage for Native {
         &self,
         source: &crate::Source,
         pl_id: &str,
-        refs: &[String],
+        entries: &[reader::PlaylistEntry],
     ) -> Result<(), DbError> {
-        writes::set_playlist_tracks(&self.pool(), source, pl_id, refs).await
+        writes::set_playlist_tracks(&self.pool(), source, pl_id, entries).await
     }
 
     async fn add_playlist_tracks(
@@ -417,11 +492,20 @@ impl Storage for Native {
         writes::remove_playlist_tracks(&self.pool(), source, pl_id, refs).await
     }
 
+    async fn remove_playlist_entry(
+        &self,
+        source: &crate::Source,
+        pl_id: &str,
+        index: usize,
+    ) -> Result<(), DbError> {
+        writes::remove_playlist_entry(&self.pool(), source, pl_id, index).await
+    }
+
     async fn upsert_playlist_tracks_page(
         &self,
         source: &crate::Source,
         pl_id: &str,
-        refs: &[String],
+        entries: &[reader::PlaylistEntry],
         start_position: i64,
         epoch: i64,
     ) -> Result<(), DbError> {
@@ -429,7 +513,7 @@ impl Storage for Native {
             &self.pool(),
             source,
             pl_id,
-            refs,
+            entries,
             start_position,
             epoch,
         )
@@ -468,9 +552,9 @@ impl Storage for Native {
     async fn bump_listen_count(
         &self,
         source: &crate::Source,
-        track_uid: &str,
+        track_key: &str,
     ) -> Result<(), DbError> {
-        cfg_store::bump_listen_count(&self.pool(), source, track_uid).await
+        cfg_store::bump_listen_count(&self.pool(), source, track_key).await
     }
 
     async fn push_recent(&self, source: &crate::Source, track_key: &str) -> Result<(), DbError> {
@@ -481,8 +565,36 @@ impl Storage for Native {
         writes::set_offline_track(&self.pool(), id, path).await
     }
 
-    async fn save_queue(&self, snap: &crate::QueueSnapshot) -> Result<(), DbError> {
-        writes::save_queue(&self.pool(), snap).await
+    async fn save_queue(
+        &self,
+        source: &crate::Source,
+        snap: &crate::QueueSnapshot,
+    ) -> Result<(), DbError> {
+        writes::save_queue(&self.pool(), source, snap).await
+    }
+
+    async fn save_queue_position(
+        &self,
+        source: &crate::Source,
+        snap: &crate::QueueSnapshot,
+    ) -> Result<(), DbError> {
+        writes::save_queue_position(&self.pool(), source, snap).await
+    }
+
+    async fn clear_queue(&self, source: &crate::Source) -> Result<(), DbError> {
+        writes::clear_queue(&self.pool(), source).await
+    }
+
+    async fn set_pinned_station(&self, id: &str, manifest: Option<&str>) -> Result<(), DbError> {
+        writes::set_pinned_station(&self.pool(), id, manifest).await
+    }
+
+    async fn cache_lyrics(
+        &self,
+        cache_key: &str,
+        lyrics: Option<&utils::lyrics::Lyrics>,
+    ) -> Result<(), DbError> {
+        writes::cache_lyrics(&self.pool(), cache_key, lyrics).await
     }
 
     async fn scrobble_queue_push(&self, row: &crate::QueuedScrobbleRow) -> Result<(), DbError> {
@@ -515,6 +627,16 @@ impl Storage for Native {
         writes::upsert_albums(&self.pool(), source, albums).await
     }
 
+    async fn refile_track(
+        &self,
+        source: &crate::Source,
+        track: &reader::Track,
+        album: &reader::Album,
+        left_album: &str,
+    ) -> Result<(), DbError> {
+        writes::refile_track(&self.pool(), source, track, album, left_album).await
+    }
+
     async fn stamp_added_at(
         &self,
         source: &crate::Source,
@@ -537,7 +659,7 @@ impl Storage for Native {
             let _ = std::fs::remove_file(with_ext(db_path, ext));
         }
         let pool = open_pool(db_path).await?;
-        migrations::run_migrations(&pool).await?;
+        migrations::run_migrations(&pool, Some(&self.settings_path)).await?;
         self.swap_pool(pool);
         Ok(())
     }
@@ -559,7 +681,7 @@ impl Storage for Native {
             }
         }
         let pool = open_pool(db_path).await?;
-        migrations::run_migrations(&pool).await?;
+        migrations::run_migrations(&pool, Some(&self.settings_path)).await?;
         self.swap_pool(pool);
         Ok(())
     }
@@ -573,8 +695,8 @@ impl Storage for Native {
             let artist = format!("Artist {:03}", i % 100);
             let album = format!("Album {:04}", i % 2000);
             sqlx::query(
-                "INSERT OR IGNORE INTO tracks (source, track_key, path, title, artist, album, artists_json) \
-                 VALUES ('local', ?1, ?1, ?2, ?3, ?4, '[]')",
+                "INSERT OR IGNORE INTO tracks (source, track_key, path, title, artist, album) \
+                 VALUES ('local', ?1, ?1, ?2, ?3, ?4)",
             )
             .bind(&key)
             .bind(&title)
@@ -603,7 +725,7 @@ impl Storage for Native {
             "playlists",
             "favorites",
             "servers",
-            "metadata_cache",
+            "kv",
         ] {
             let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
                 .fetch_one(&*pool)
@@ -652,7 +774,9 @@ mod tests {
     async fn file_pool() -> (tempfile::TempDir, SqlitePool) {
         let dir = tempfile::tempdir().expect("tempdir");
         let pool = open_pool(&dir.path().join("t.db")).await.expect("pool");
-        migrations::run_migrations(&pool).await.expect("migrate");
+        migrations::run_migrations(&pool, None)
+            .await
+            .expect("migrate");
         (dir, pool)
     }
 
@@ -667,7 +791,7 @@ mod tests {
         drop(held);
 
         let started = std::time::Instant::now();
-        cfg_store::push_recent(&pool, &crate::Source::Local, "/after.flac")
+        cfg_store::push_recent(&pool, &crate::Source::default(), "/after.flac")
             .await
             .expect("the lock was released with the connection");
         assert!(

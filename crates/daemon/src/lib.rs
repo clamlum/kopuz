@@ -3,13 +3,18 @@
 //! wire, no socket. Whoever hosts it decides how (or whether) to serve it:
 //! `kopuz-kopuzd` puts it behind gRPC, the app calls it in-process.
 
+#[cfg(any(target_os = "android", test))]
+mod android_signin;
+mod artist_row;
 pub mod artwork;
+pub mod auto_sync;
 pub mod boot;
 pub mod catalog;
 pub mod config_service;
 pub mod downloads;
 pub mod external;
 pub mod favorites;
+pub mod folder_scan;
 pub mod integrations;
 pub mod jobs;
 pub mod library;

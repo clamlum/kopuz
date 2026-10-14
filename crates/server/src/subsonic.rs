@@ -61,6 +61,7 @@ pub struct SubsonicAlbum {
     pub id: String,
     pub name: String,
     pub artist: Option<String>,
+    pub artist_id: Option<String>,
     pub genre: Option<String>,
     pub year: Option<u16>,
     pub cover_art: Option<String>,
@@ -74,6 +75,12 @@ pub struct SubsonicSong {
     pub album: Option<String>,
     pub album_id: Option<String>,
     pub artist: Option<String>,
+    /// Sent by Subsonic and OpenSubsonic both; absent on a tagless server.
+    pub artist_id: Option<String>,
+    /// OpenSubsonic only: each artist the song credits, in billing order, where
+    /// `artist` holds the joined display string ("A feat. B").
+    #[serde(default)]
+    pub artists: Vec<SubsonicArtistRef>,
     pub duration: Option<u64>,
     pub bit_rate: Option<u32>,
     pub sampling_rate: Option<u32>,
@@ -81,6 +88,45 @@ pub struct SubsonicSong {
     pub disc_number: Option<u32>,
     pub genre: Option<String>,
     pub cover_art: Option<String>,
+    pub replay_gain: Option<SubsonicReplayGain>,
+}
+
+/// One entry of an OpenSubsonic song's `artists` list.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubsonicArtistRef {
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+}
+
+/// The OpenSubsonic `replayGain` object. `baseGain` is deliberately unread:
+/// it exists for Ogg Opus output gain, which the decode worker already applies.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubsonicReplayGain {
+    pub track_gain: Option<f32>,
+    pub album_gain: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_peak: Option<f32>,
+}
+
+impl SubsonicSong {
+    pub fn replay_gain_info(&self) -> config::ReplayGainInfo {
+        let Some(gain) = &self.replay_gain else {
+            return config::ReplayGainInfo::default();
+        };
+        config::ReplayGainInfo {
+            track_gain_db: gain.track_gain.filter(|db| db.is_finite()),
+            track_peak: gain
+                .track_peak
+                .filter(|peak| peak.is_finite() && *peak > 0.0),
+            album_gain_db: gain.album_gain.filter(|db| db.is_finite()),
+            album_peak: gain
+                .album_peak
+                .filter(|peak| peak.is_finite() && *peak > 0.0),
+            loudness_db: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,6 +255,16 @@ struct SimilarSongsContainer {
     song: Vec<SubsonicSong>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubsonicPlayQueue {
+    pub current: Option<String>,
+    pub position: Option<u64>,
+    pub changed_by: Option<String>,
+    #[serde(default)]
+    pub entry: Vec<SubsonicSong>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GetSimilarSongsData {
@@ -251,6 +307,13 @@ struct OpenSubsonicExtension {
 struct GetOpenSubsonicExtensionsData {
     #[serde(default)]
     open_subsonic_extensions: Vec<OpenSubsonicExtension>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetPlayQueueData {
+    #[serde(default)]
+    play_queue: Option<SubsonicPlayQueue>,
 }
 
 /// Build a Subsonic `getCoverArt` URL without the caller holding a client — the
@@ -616,6 +679,35 @@ impl SubsonicClient {
         Ok(url.to_string())
     }
 
+    pub async fn get_play_queue(&self) -> Result<Option<SubsonicPlayQueue>, String> {
+        let data = self
+            .call::<GetPlayQueueData>("getPlayQueue.view", vec![])
+            .await?;
+        Ok(data.play_queue)
+    }
+
+    /// An empty `item_ids` with no `current` clears the saved queue.
+    pub async fn save_play_queue(
+        &self,
+        item_ids: &[&str],
+        current_id: Option<&str>,
+        position_ms: Option<u64>,
+    ) -> Result<(), String> {
+        let mut params: Vec<(String, String)> = item_ids
+            .iter()
+            .map(|id| ("id".to_string(), (*id).to_string()))
+            .collect();
+        if let Some(current) = current_id {
+            params.push(("current".to_string(), current.to_string()));
+        }
+        if let Some(position) = position_ms {
+            params.push(("position".to_string(), position.to_string()));
+        }
+        self.call::<EmptyData>("savePlayQueue.view", params)
+            .await
+            .map(|_| ())
+    }
+
     fn auth_params(&self) -> Vec<(String, String)> {
         let salt = self.random_salt();
         let token_input = format!("{}{}", self.password, salt);
@@ -795,5 +887,78 @@ mod tests {
                 .iter()
                 .any(|ext| ext.name == SONIC_SIMILARITY_EXTENSION)
         );
+    }
+
+    #[test]
+    fn reads_the_opensubsonic_replaygain_object() {
+        let song: SubsonicSong = serde_json::from_str(
+            r#"{
+                "id": "1",
+                "title": "T",
+                "replayGain": {
+                    "trackGain": -7.5,
+                    "albumGain": -5.25,
+                    "trackPeak": 0.98,
+                    "baseGain": 0
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let info = song.replay_gain_info();
+        assert_eq!(info.track_gain_db, Some(-7.5));
+        assert_eq!(info.album_gain_db, Some(-5.25));
+        assert_eq!(info.track_peak, Some(0.98));
+        assert_eq!(info.album_peak, None);
+    }
+
+    #[test]
+    fn a_song_without_the_object_reports_nothing() {
+        let song: SubsonicSong = serde_json::from_str(r#"{"id": "1", "title": "T"}"#).unwrap();
+        assert!(song.replay_gain_info().is_empty());
+    }
+
+    /// Captured from Navidrome 0.63.2, trimmed to the fields this crate reads.
+    #[test]
+    fn play_queue_response_parses() {
+        let data: GetPlayQueueData = parse(serde_json::json!({
+            "subsonic-response": {
+                "status": "ok",
+                "version": "1.16.1",
+                "playQueue": {
+                    "entry": [{
+                        "id": "BgdZpTKEu8u6xLGYsZCCXq",
+                        "title": "Expectation",
+                        "album": "Innerspeaker",
+                        "albumId": "7tbDxWiXuAInyHqxBR8ukM",
+                        "artist": "Tame Impala",
+                        "duration": 362,
+                        "bitRate": 901,
+                        "coverArt": "mf-BgdZpTKEu8u6xLGYsZCCXq_6a69cd29"
+                    }],
+                    "current": "BgdZpTKEu8u6xLGYsZCCXq",
+                    "position": 45000,
+                    "username": "someone",
+                    "changed": "2026-08-09T18:08:10.49647068Z",
+                    "changedBy": "Arpeggi"
+                }
+            }
+        }));
+
+        let queue = data.play_queue.expect("playQueue present");
+        assert_eq!(queue.current.as_deref(), Some("BgdZpTKEu8u6xLGYsZCCXq"));
+        assert_eq!(queue.position, Some(45000));
+        assert_eq!(queue.changed_by.as_deref(), Some("Arpeggi"));
+        assert_eq!(queue.entry.len(), 1);
+        assert_eq!(queue.entry[0].title, "Expectation");
+    }
+
+    #[test]
+    fn play_queue_absent_when_nothing_saved() {
+        let data: GetPlayQueueData = parse(serde_json::json!({
+            "subsonic-response": { "status": "ok", "version": "1.16.1" }
+        }));
+
+        assert!(data.play_queue.is_none());
     }
 }

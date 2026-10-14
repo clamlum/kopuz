@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 const ITEM_HEIGHT: f64 = 60.0;
 
-/// The source-agnostic Favorites body. Renders local or any server: covers via
+/// The source-agnostic Favorites body. Renders any source: covers via
 /// the source seam, the favorites partition keyed on the active source, and the
 /// remote-sync/download affordances gated on [`Capabilities`].
 #[component]
@@ -125,7 +125,6 @@ pub fn FavoritesBody(
             let track_path = track.key.clone();
             let track_select = track.key.clone();
             let track_add = track.clone();
-            let track_queue = track.clone();
             let track_meta = track.clone();
             let track_delete = track.clone();
             let queue_source = queue_tracks.clone();
@@ -150,7 +149,6 @@ pub fn FavoritesBody(
                 TrackRow {
                     track: track.clone(),
                     cover_url: cover_url.clone(),
-                    on_start_radio: components::track_row::radio_handler(track.key.clone()),
                     row_num: Some(idx + 1),
                     is_menu_open,
                     is_album: false,
@@ -184,10 +182,6 @@ pub fn FavoritesBody(
                     on_add_to_playlist: move |_| {
                         selected_track_for_playlist.set(Some(track_add.key.clone()));
                         show_playlist_modal.set(true);
-                        active_menu_track.set(None);
-                    },
-                    on_queue: move |_| {
-                        ctrl.add_to_queue(vec![track_queue.clone()]);
                         active_menu_track.set(None);
                     },
                     on_close_menu: move |_| active_menu_track.set(None),
@@ -361,7 +355,7 @@ pub fn FavoritesBody(
                                 }
                             }
                             button {
-                                class: "px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white/80 transition-colors disabled:opacity-50",
+                                class: "app-button-tonal px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white/80 transition-colors disabled:opacity-50",
                                 disabled: syncing,
                                 onclick: move |_| {
                                     hooks::jobs::start(hooks::JobKind::FavoritesSync);
@@ -506,9 +500,9 @@ fn track_matches_filter(track: &api::TrackInfo, query: &str) -> bool {
         || track.artist.to_lowercase().contains(query)
         || track.album.to_lowercase().contains(query)
         || track
-            .artists
+            .credits
             .iter()
-            .any(|artist| artist.to_lowercase().contains(query))
+            .any(|credit| credit.name.to_lowercase().contains(query))
 }
 
 #[cfg(test)]
@@ -527,7 +521,10 @@ mod tests {
             khz: 44_100,
             track_number: Some(11),
             disc_number: Some(1),
-            artists: vec!["Anthony Gonzalez".to_string()],
+            credits: vec![api::ArtistCredit {
+                name: "Anthony Gonzalez".to_string(),
+                key: None,
+            }],
             ..Default::default()
         }
     }

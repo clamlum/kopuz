@@ -143,7 +143,7 @@ fn album_metadata_key(album: &Album) -> (String, String) {
     )
 }
 
-fn merge_scanned_tracks(library: &mut Library, scanned_tracks: Vec<ScannedTrack>) {
+pub fn merge_scanned_tracks(library: &mut Library, scanned_tracks: Vec<ScannedTrack>) {
     let mut track_indexes: HashMap<_, _> = library
         .tracks
         .iter()
@@ -242,6 +242,7 @@ mod tests {
             title: title.to_string(),
             artist: "Artist".to_string(),
             artists: vec!["Artist".to_string()],
+            credits: Vec::new(),
             album: "Album".to_string(),
             duration: 1,
             khz: 44_100,
@@ -252,6 +253,7 @@ mod tests {
             musicbrainz_recording_id: None,
             musicbrainz_track_id: None,
             playlist_item_id: None,
+            replay_gain: config::ReplayGainInfo::default(),
         }
     }
 
@@ -264,6 +266,8 @@ mod tests {
             year: 0,
             cover_path: None,
             manual_cover: false,
+            artist_id: None,
+            artist_key: None,
         }
     }
 

@@ -33,26 +33,20 @@ impl LibraryService {
         })
     }
 
-    /// Like [`Self::spawn_scan`], but with the roots pinned by the caller.
-    /// The embedded frontend uses this: its config signal is the authority,
-    /// and reading the session watch here instead would race the async
-    /// config push (a lost race scans and prunes against default roots).
-    pub fn spawn_scan_with_config(
-        self: &Arc<Self>,
-        runner: &JobRunner,
-        config: config::AppConfig,
-    ) -> Result<JobRef, ApiError> {
-        let service = self.clone();
-        runner.start(JobKind::Scan, move |ctx| async move {
-            service.run_scan(&ctx, &config).await
-        })
-    }
-
     pub fn spawn_remote_sync(self: &Arc<Self>, runner: &JobRunner) -> Result<JobRef, ApiError> {
         let service = self.clone();
         runner.start(JobKind::LibrarySync, move |ctx| async move {
             let config = service.current_config();
-            service.run_remote_sync(&ctx, &config).await
+            let result = service.run_remote_sync(&ctx, &config).await;
+            if result.is_ok() && !ctx.cancelled() {
+                crate::auto_sync::mark_synced(
+                    &service.db,
+                    JobKind::LibrarySync,
+                    &config.active_source,
+                )
+                .await;
+            }
+            result
         })
     }
 
@@ -195,16 +189,29 @@ impl LibraryService {
                 .prune_source(&source, &keep_keys, &keep_albums)
                 .await
                 .map_err(db_error)?;
-            for (artist, image) in &library.local_artist_images {
+            // The scanner names a folder's artist by text; here that is the identity of the source's unlinked row.
+            let unlinked = self
+                .db
+                .unlinked_artist_keys(&source)
+                .await
+                .map_err(db_error)?;
+            for (name, image) in &library.local_artist_images {
+                let Some(key) = unlinked.get(name) else {
+                    continue;
+                };
                 let path = image.to_string_lossy().into_owned();
-                let _ = self.db.set_artist_image(artist, "local", Some(&path)).await;
+                let _ = self
+                    .db
+                    .set_artist_image(&source, key, "local", Some(&path))
+                    .await;
             }
             if let Ok((_, photos)) = self.db.artist_images().await {
-                for (artist, photo) in photos {
+                for ((photo_source, key), photo) in photos {
                     if let reader::ArtistImageRef::Local(path) = photo
+                        && photo_source == source.as_str()
                         && !path.exists()
                     {
-                        let _ = self.db.set_artist_image(&artist, "local", None).await;
+                        let _ = self.db.set_artist_image(&source, &key, "local", None).await;
                     }
                 }
             }
@@ -250,7 +257,7 @@ impl LibraryService {
         albums: &[reader::Album],
         missing_ids: &HashSet<String>,
     ) {
-        let mut changed = false;
+        let mut changed = Vec::new();
         for album in albums {
             if ctx.cancelled() {
                 break;
@@ -267,13 +274,17 @@ impl LibraryService {
                 .update_album_cover_if_not_manual(source, &album.id, &path)
                 .await
             {
-                Ok(written) => changed |= written,
+                Ok(true) => changed.push(album.clone()),
+                Ok(false) => {}
                 Err(error) => {
                     tracing::warn!(album_id = %album.id, %error, "cover persist failed");
                 }
             }
         }
-        if changed {
+        if !changed.is_empty() {
+            if let Some(session) = self.session.get() {
+                session.update_album_covers(source, &changed);
+            }
             self.invalidate(Table::Albums);
             // An artist with no photo of their own wears an album's cover, so
             // indexing one changes the artist listing too. Without this the
@@ -321,8 +332,11 @@ impl LibraryService {
         };
 
         ctx.progress("fetching library", None, None, None);
-        let snapshot = source
-            .fetch_library()
+        let progress_ctx = ctx.clone();
+        let mut snapshot = source
+            .fetch_library_with_progress(Arc::new(move |file| {
+                progress_ctx.progress_throttled("scanning", None, None, Some(file));
+            }))
             .await
             .map_err(|error| ApiError::internal(error.to_string()))?;
 
@@ -354,10 +368,12 @@ impl LibraryService {
             ctx.progress("persisting", Some(done), Some(total), None);
             self.invalidate(Table::Tracks);
         }
-        // Normalized, because that is the key every read looks the photo up
-        // under; storing the display name here wrote rows nothing found.
-        for (name, url) in &snapshot.artist_images {
-            let key = utils::artist::normalize_artist_key(name);
+        let unlinked = self.db.unlinked_artist_keys(&src).await.map_err(db_error)?;
+        let linked = self.db.linked_artist_keys(&src).await.map_err(db_error)?;
+        for (artist, url) in &snapshot.artist_images {
+            let Some(key) = super::artist_art::credit_key(artist, &linked, &unlinked) else {
+                continue;
+            };
             let _ = source.set_artist_image(&key, "server", Some(url)).await;
         }
         let keep_keys: Vec<String> = snapshot
@@ -369,6 +385,56 @@ impl LibraryService {
         let _ = source.prune(&keep_keys, &keep_albums).await;
         self.invalidate(Table::Tracks);
         self.invalidate(Table::Albums);
+        if ctx.cancelled() {
+            return Ok(());
+        }
+        ctx.progress("indexing covers", None, None, None);
+        let progress_ctx = ctx.clone();
+        let covers = source
+            .fetch_missing_covers(
+                &merged_albums,
+                &snapshot.tracks,
+                Arc::new(move |album| {
+                    progress_ctx.progress_throttled("indexing covers", None, None, Some(album));
+                }),
+            )
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if !covers.is_empty() && !ctx.cancelled() {
+            source
+                .upsert_albums(&covers)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+            if let Some(session) = self.session.get() {
+                session.update_album_covers(&src, &covers);
+            }
+            let covers: HashMap<_, _> = covers
+                .iter()
+                .filter_map(|album| {
+                    album
+                        .cover_path
+                        .as_ref()
+                        .map(|path| (&album.id, path.to_string_lossy().into_owned()))
+                })
+                .collect();
+            let tracks: Vec<_> = snapshot
+                .tracks
+                .iter_mut()
+                .filter_map(|track| {
+                    let cover = covers.get(&track.album_id)?;
+                    track.cover = Some(cover.clone());
+                    Some(track.clone())
+                })
+                .collect();
+            for chunk in tracks.chunks(100) {
+                source
+                    .upsert_tracks(chunk)
+                    .await
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+            }
+            self.invalidate(Table::Albums);
+            self.invalidate(Table::Tracks);
+        }
         Ok(())
     }
 }

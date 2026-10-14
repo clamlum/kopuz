@@ -31,7 +31,7 @@ impl DatabaseLease {
             options.mode(0o600);
         }
         let file = options.open(&path)?;
-        match file.try_lock() {
+        match try_lock_exclusive(&file) {
             Ok(()) => Ok(Some(Self { _file: file, path })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
             Err(std::fs::TryLockError::Error(error)) => Err(error),
@@ -52,6 +52,29 @@ impl DatabaseLease {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+// std's file locking is unsupported on Android. Use the same kernel operation
+// on Linux so the ownership tests exercise the Android implementation too.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn try_lock_exclusive(file: &File) -> Result<(), std::fs::TryLockError> {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: the borrowed file keeps its descriptor valid for this call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        Err(std::fs::TryLockError::WouldBlock)
+    } else {
+        Err(std::fs::TryLockError::Error(error))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn try_lock_exclusive(file: &File) -> Result<(), std::fs::TryLockError> {
+    file.try_lock()
 }
 
 fn lock_path(database_path: &Path) -> PathBuf {

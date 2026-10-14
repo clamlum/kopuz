@@ -32,7 +32,7 @@ player = { workspace = true }
 radio = { workspace = true }
 reader = { workspace = true }
 server = { workspace = true }
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "process"] }
 tracing = { workspace = true }
 rand = { workspace = true }
 async-trait = { workspace = true }
@@ -41,6 +41,9 @@ utils = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 directories = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -44,11 +44,6 @@ fn source_error(error: server::source::SourceError) -> ApiError {
 /// its files are not ours to unlink.
 fn configured_roots(config: &config::AppConfig) -> Vec<&Path> {
     match &config.active_source {
-        config::Source::Local => config
-            .music_directory
-            .iter()
-            .map(PathBuf::as_path)
-            .collect(),
         config::Source::LocalLibrary(id) => config
             .local_sources
             .iter()
@@ -119,7 +114,7 @@ impl MutationService {
         patch: TrackMetadataPatch,
     ) -> Result<api::TrackInfo, ApiError> {
         let config = self.config();
-        let mut track = self.track(&patch.key).await?;
+        let track = self.track(&patch.key).await?;
         let path = Self::editable_path(&config, &track)?;
 
         let title = patch.title.unwrap_or_else(|| track.title.clone());
@@ -152,31 +147,35 @@ impl MutationService {
             disc_number,
             cover,
         };
-        tokio::task::spawn_blocking(move || reader::write_tags(&path, &edits))
+        let written = path.clone();
+        tokio::task::spawn_blocking(move || reader::write_tags(&written, &edits))
             .await
             .map_err(|error| ApiError::internal(format!("tag writer task failed: {error}")))?
             .map_err(ApiError::internal)?;
 
-        track.title = title.trim().to_string();
-        track.artist = artist.trim().to_string();
-        // Credits are re-derived rather than patched: the single artist
-        // string is what the user edited, so it is the authority.
-        track.artists = artist
-            .split([';', ','])
-            .map(str::trim)
-            .filter(|artist| !artist.is_empty())
-            .map(str::to_string)
-            .collect();
-        track.album = album.trim().to_string();
-        track.album_id = reader::metadata::make_album_id(&track.album, &track.artist);
-        track.track_number = track_number;
-        track.disc_number = disc_number;
+        // Read back as a scan would, so an edit files the same artists and album a rescan of the file does.
+        let reader::ScannedTrack {
+            track: mut scanned,
+            album: scanned_album,
+        } = tokio::task::spawn_blocking(move || reader::read_metadata(&path))
+            .await
+            .map_err(|error| ApiError::internal(format!("tag reader task failed: {error}")))?
+            .ok_or_else(|| ApiError::internal("the edited file could not be read back"))?;
+        scanned.cover = track.cover.clone();
         self.db
-            .upsert_tracks(&config.active_source, std::slice::from_ref(&track))
+            .refile_track(
+                &config.active_source,
+                &scanned,
+                &scanned_album,
+                &track.album_id,
+            )
             .await
             .map_err(db_error)?;
         self.session.invalidate(Table::Tracks);
-        Ok(crate::wire::track_info(&track, &config))
+        self.session.invalidate(Table::Albums);
+        // Read back, so the row carries the artist rows its new credits were filed under.
+        let stored = self.track(&patch.key).await?;
+        Ok(crate::wire::track_info(&stored, &config))
     }
 
     pub async fn delete_tracks(&self, keys: &[String], from_disk: bool) -> Result<(), ApiError> {
@@ -250,6 +249,7 @@ impl MutationService {
                 )));
             }
         };
+        let previous = self.current_artwork_path(&upload.target).await?;
         // Content-addressed, so re-uploading the same picture is idempotent
         // and a different one lands at a different path -- which is what makes
         // the artwork version, and the caches keyed by it, change.
@@ -267,7 +267,6 @@ impl MutationService {
             .map_err(|error| ApiError::internal(format!("artwork write failed: {error}")))?;
         let stored = path.to_string_lossy().into_owned();
 
-        let previous = self.current_artwork_path(&upload.target).await?;
         let result = match &upload.target {
             ArtworkTarget::Album(id) => self
                 .source()
@@ -275,16 +274,15 @@ impl MutationService {
                 .await
                 .map_err(source_error)
                 .map(|_| Table::Albums),
-            ArtworkTarget::Artist(name) => self
-                .source()
-                .set_artist_image(
-                    &utils::artist::normalize_artist_key(name),
-                    "custom",
-                    Some(&stored),
-                )
-                .await
-                .map_err(source_error)
-                .map(|_| Table::Tracks),
+            ArtworkTarget::Artist(artist) => match self.artist_image_key(artist).await {
+                Ok((source, key)) => self
+                    .db
+                    .set_artist_image(&source, &key, "custom", Some(&stored))
+                    .await
+                    .map_err(db_error)
+                    .map(|_| Table::Tracks),
+                Err(error) => Err(error),
+            },
             ArtworkTarget::Playlist(id) => {
                 let playlist = self.playlist(id).await?;
                 self.source()
@@ -324,11 +322,12 @@ impl MutationService {
                     .map_err(source_error)?;
                 Table::Albums
             }
-            ArtworkTarget::Artist(name) => {
-                self.source()
-                    .set_artist_image(&utils::artist::normalize_artist_key(name), "custom", None)
+            ArtworkTarget::Artist(artist) => {
+                let (source, key) = self.artist_image_key(artist).await?;
+                self.db
+                    .set_artist_image(&source, &key, "custom", None)
                     .await
-                    .map_err(source_error)?;
+                    .map_err(db_error)?;
                 Table::Tracks
             }
             ArtworkTarget::Playlist(id) => {
@@ -379,6 +378,13 @@ impl MutationService {
             .ok_or_else(|| ApiError::not_found("playlist not found"))
     }
 
+    /// The key this artist's own photo is filed under in `artist_images`, with its source.
+    async fn artist_image_key(&self, artist: &str) -> Result<(config::Source, String), ApiError> {
+        let source = self.config().active_source;
+        let row = crate::artist_row::require(&self.db, &source, artist).await?;
+        Ok((source, row.key))
+    }
+
     async fn current_artwork_path(
         &self,
         target: &ArtworkTarget,
@@ -391,14 +397,16 @@ impl MutationService {
                 .await
                 .map_err(db_error)?
                 .and_then(|album| album.cover_path),
-            ArtworkTarget::Artist(name) => self
-                .db
-                .artist_images()
-                .await
-                .map_err(db_error)?
-                .0
-                .get(&utils::artist::normalize_artist_key(name))
-                .cloned(),
+            ArtworkTarget::Artist(artist) => {
+                let (source, key) = self.artist_image_key(artist).await?;
+                self.db
+                    .artist_images()
+                    .await
+                    .map_err(db_error)?
+                    .0
+                    .get(&(source.as_str().to_string(), key))
+                    .cloned()
+            }
             ArtworkTarget::Playlist(id) => self.playlist(id).await?.cover_path,
             _ => None,
         })
@@ -445,8 +453,9 @@ mod tests {
 
     fn config_with_root(root: &Path) -> config::AppConfig {
         config::AppConfig {
-            active_source: config::Source::Local,
-            music_directory: vec![root.to_path_buf()],
+            local_sources: vec![config::SavedLocalSource::default_library(vec![
+                root.to_path_buf(),
+            ])],
             ..Default::default()
         }
     }

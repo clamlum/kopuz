@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use config::{ChannelMode, EqualizerSettings};
+use config::{ChannelMode, EqualizerSettings, ReplayGainInfo, ReplayGainSettings};
 use symphonia::core::formats::probe::Hint;
 
 /// Builds the media source on the decode worker thread, so slow constructions
@@ -38,6 +38,8 @@ pub type SourceFactory = Box<
 pub enum Transition {
     Immediate,
     Crossfade(Duration),
+    /// Start on the sample after the current session's last one.
+    Gapless,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -55,6 +57,9 @@ pub struct LoadOutcome {
     /// False when a requested crossfade fell back to an immediate switch
     /// (config mismatch, idle/drained outgoing session, or paused).
     pub crossfaded: bool,
+    /// Audible on `TrackSwitched`. False when it fell back to an immediate switch
+    /// because nothing was left to play first.
+    pub gapless: bool,
 }
 
 /// Resolved once the source is playing (`Ok`) or failed to load (`Err`).
@@ -68,12 +73,19 @@ pub struct LoadRequest {
     pub duration: Duration,
     pub transition: Transition,
     pub start_at: Option<Duration>,
+    /// The queue is walking an album, so `ReplayGainMode::Auto` levels this
+    /// track by its album gain instead of its own.
+    pub album_context: bool,
+    /// ReplayGain the media server reported for this track. The stream's own
+    /// tags win where it has them; this is what a transcoded stream, whose
+    /// tags the server dropped, falls back to.
+    pub service_replay_gain: ReplayGainInfo,
     pub reply: Option<LoadReply>,
 }
 
 pub enum Command {
     Load(LoadRequest),
-    /// Drop a load that is still probing without touching the live session.
+    /// Drop a probing load and a queued gapless session; the live one is untouched.
     CancelPending,
     /// Seek the visible session. `token`, when set, is the session the caller
     /// believes is visible; the engine drops the seek if a crossfade has since
@@ -90,6 +102,11 @@ pub enum Command {
     SetVolume(f32),
     SetChannelMode(ChannelMode),
     SetEqualizer(EqualizerSettings),
+    SetReplayGain(ReplayGainSettings),
+    SetAlbumContext {
+        token: u64,
+        album_context: bool,
+    },
     SetDeviceChangeBehavior(config::DeviceChangeBehavior),
     SetSampleRateMode(config::SampleRateMode),
     SetDuration(Duration),
@@ -113,9 +130,10 @@ pub enum Event {
     Ended {
         token: u64,
     },
-    /// A crossfade finished and the outgoing session was torn down. `token` is
+    /// A crossfade finished, or a gapless session took over at the last sample
+    /// of the one before it, and the outgoing session was torn down. `token` is
     /// the now-sole (incoming) session; `from_token` the retired outgoing one.
-    /// This is the authoritative signal to commit a deferred crossfade UI.
+    /// This is the authoritative signal to commit a deferred transition UI.
     TrackSwitched {
         token: u64,
         from_token: u64,

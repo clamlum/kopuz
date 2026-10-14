@@ -20,7 +20,7 @@ pub use linux::{
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{SystemEvent, init, poll_event, update_now_playing, wait_event};
+pub use windows::{SystemEvent, attach_window, init, poll_event, update_now_playing, wait_event};
 
 #[cfg(target_os = "android")]
 mod android;
@@ -31,7 +31,7 @@ pub use android::{
     get_files_dir, has_media_permission, init, login_close, login_cookies, login_is_open,
     login_open, move_task_to_back, request_permissions, set_background_handler, set_keepalive,
     set_tokio_waker, stop_session, take_back_pressed, update_modes, update_now_playing,
-    wake_run_loop,
+    wait_back_pressed, wake_run_loop,
 };
 
 #[cfg(not(target_os = "android"))]
@@ -42,12 +42,8 @@ pub fn get_android_music_dir() -> Option<String> {
     None
 }
 
-// --- Event-driven wakes for the background loops ---------------------------------
-// Let the back-handling loop sleep on a long interval while idle instead of
-// busy-polling at 10Hz, then wake it the instant a back press happens.
-// notify_one stores one permit, so a wake fired before the loop re-awaits is
-// never lost. Compiled for all native targets (systemint is excluded on wasm).
-// (The player task loop wakes through the engine's event stream instead.)
+// notify_one stores a permit, so a back press between checking the pending flag
+// and awaiting the notification still wakes the UI task.
 use std::sync::OnceLock;
 use tokio::sync::Notify;
 
@@ -59,9 +55,4 @@ fn back_notify() -> &'static Notify {
 /// Wake the Android back-handling loop now. Sync, any thread.
 pub fn back_wake() {
     back_notify().notify_one();
-}
-
-/// Awaited by the back-handling loop's adaptive sleep.
-pub async fn back_wait() {
-    back_notify().notified().await;
 }

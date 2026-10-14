@@ -37,6 +37,7 @@ pub struct PlayerController {
     pub buffered_ranges: Signal<Vec<BufferedRange>>,
     pub current_track_snapshot: Signal<Option<Track>>,
     pub volume: Signal<f32>,
+    pub muted: Signal<bool>,
     pub config: Signal<AppConfig>,
     pub playback_error: Signal<Option<String>>,
     pub browse_loading: Signal<bool>,
@@ -89,10 +90,6 @@ impl PlayerController {
         } else {
             Some(idx)
         }
-    }
-
-    pub fn get_current_track_index(&self) -> Option<usize> {
-        self.get_queue_index(*self.current_queue_index.peek())
     }
 
     pub fn get_track_at(&self, idx: usize) -> Option<Track> {
@@ -301,7 +298,13 @@ impl PlayerController {
     /// slider responsive.
     pub fn set_volume(&mut self, value: f32) {
         self.volume.set(value);
+        self.muted.set(false);
         self.command(api::PlayerCommand::SetVolume { volume: value });
+    }
+
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted.set(muted);
+        self.command(api::PlayerCommand::SetMuted { muted });
     }
 
     /// Apply an equalizer preview to the engine without committing it to the
@@ -393,6 +396,20 @@ impl PlayerController {
         });
     }
 
+    /// Drop the entry at play-order position `idx`. The daemon refuses the
+    /// playing position, so a caller does not have to guard it.
+    pub fn remove_queue_item(&mut self, idx: usize) {
+        let handle = self.handle();
+        spawn(async move {
+            if let Err(error) = handle
+                .queue_edit(api::QueueEdit::Remove { index: idx as u32 })
+                .await
+            {
+                tracing::warn!(%error, "removing a queue entry failed");
+            }
+        });
+    }
+
     pub fn move_queue_item(&mut self, from: usize, to: usize) {
         let handle = self.handle();
         spawn(async move {
@@ -402,32 +419,6 @@ impl PlayerController {
                     to: to as u32,
                 })
                 .await;
-        });
-    }
-
-    pub fn swap_queue_item(&mut self, from: usize, to: usize) {
-        self.move_queue_item(from, to);
-    }
-
-    /// Hard reset when the active server changes: stop everything and clear
-    /// the queue so a queued remote track cannot replay through the wrong
-    /// backend.
-    pub fn reset_for_backend_switch(&mut self) {
-        self.playback_error.set(None);
-        self.clear_current_track_metadata();
-        self.queue.write().clear();
-        self.history.write().clear();
-        self.current_queue_index.set(0);
-        let handle = self.handle();
-        spawn(async move {
-            let _ = handle.player_command(api::PlayerCommand::Stop).await;
-            let request = api::SetQueueRequest {
-                mode: api::QueueMode::Replace,
-                context: api::QueueContext::Tracks { keys: Vec::new() },
-                start_index: None,
-                shuffle: None,
-            };
-            let _ = handle.set_queue(request).await;
         });
     }
 
@@ -469,6 +460,7 @@ impl PlayerController {
         self.current_song_duration.set(0);
         self.current_song_progress.set(0);
         self.buffered_ranges.set(Vec::new());
+        self.current_artwork.set(None);
         self.current_track_snapshot.set(None);
     }
 }
@@ -506,6 +498,7 @@ pub fn use_player_controller(
     let output_latency_ms = use_signal(|| 0u64);
     let current_artwork = use_signal(|| None::<api::ArtworkRef>);
     let external_device = use_signal(|| None::<String>);
+    let muted = use_signal(|| false);
 
     let ctrl = PlayerController {
         api,
@@ -528,6 +521,7 @@ pub fn use_player_controller(
         buffered_ranges,
         current_track_snapshot,
         volume,
+        muted,
         config,
         playback_error,
         browse_loading,

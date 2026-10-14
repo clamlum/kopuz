@@ -160,6 +160,16 @@ impl Kopuz for KopuzGrpc {
         .await
     }
 
+    async fn set_muted(
+        &self,
+        request: Request<proto::SetMuted>,
+    ) -> Result<Response<proto::MutationResult>, Status> {
+        self.player_mutation(api::PlayerCommand::SetMuted {
+            muted: request.get_ref().muted,
+        })
+        .await
+    }
+
     async fn set_mode(
         &self,
         request: Request<proto::SetMode>,
@@ -178,6 +188,7 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(proto::DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_secs: self.0.started.elapsed().as_secs(),
+            proto_revision: proto::WIRE_REVISION,
         }))
     }
 
@@ -319,13 +330,23 @@ impl Kopuz for KopuzGrpc {
     ) -> Result<Response<proto::TrackPage>, Status> {
         let request = request.get_ref();
         let page = convert::page_from_proto(request.page.as_ref());
+        let artist = request.key.clone();
         let tracks = self
             .0
             .api
-            .artist_tracks(request.artist.clone(), page)
+            .artist_tracks(artist, page)
             .await
             .map_err(failed)?;
         Ok(Response::new(convert::track_page_to_proto(&tracks)))
+    }
+
+    async fn get_artist(
+        &self,
+        request: Request<proto::ArtistRequest>,
+    ) -> Result<Response<proto::ArtistDetail>, Status> {
+        let artist = request.get_ref().key.clone();
+        let detail = self.0.api.artist(artist).await.map_err(failed)?;
+        Ok(Response::new(convert::artist_detail_to_proto(&detail)))
     }
 
     async fn get_artist_sample_tracks(
@@ -572,7 +593,7 @@ impl Kopuz for KopuzGrpc {
     ) -> Result<Response<proto::Unit>, Status> {
         self.0
             .api
-            .refresh_artist_artwork(request.into_inner().names)
+            .refresh_artist_artwork(convert::refresh_artists_from_proto(request.get_ref()))
             .await
             .map_err(failed)?;
         Ok(Response::new(proto::Unit {}))
@@ -912,6 +933,24 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(proto::JobRef { job_id: job.job_id }))
     }
 
+    async fn search_downloads(
+        &self,
+        request: Request<proto::SearchDownloadsRequest>,
+    ) -> Result<Response<proto::DownloadCandidates>, Status> {
+        let candidates = self
+            .0
+            .api
+            .search_downloads(request.into_inner().query)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::DownloadCandidates {
+            candidates: candidates
+                .iter()
+                .map(convert::download_candidate_to_proto)
+                .collect(),
+        }))
+    }
+
     async fn get_download_formats(
         &self,
         _: Request<proto::GetDownloadFormatsRequest>,
@@ -1141,45 +1180,6 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(convert::source_info_to_proto(&info)))
     }
 
-    async fn upsert_local_source(
-        &self,
-        request: Request<proto::LocalSourceDraft>,
-    ) -> Result<Response<proto::SourceInfo>, Status> {
-        let info = self
-            .0
-            .api
-            .upsert_local_source(convert::local_draft_from_proto(request.get_ref()))
-            .await
-            .map_err(failed)?;
-        Ok(Response::new(convert::source_info_to_proto(&info)))
-    }
-
-    async fn delete_local_source(
-        &self,
-        request: Request<proto::SourceId>,
-    ) -> Result<Response<proto::Unit>, Status> {
-        self.0
-            .api
-            .delete_local_source(request.into_inner().id)
-            .await
-            .map_err(failed)?;
-        Ok(Response::new(proto::Unit {}))
-    }
-
-    async fn set_source_directories(
-        &self,
-        request: Request<proto::SetSourceDirectoriesRequest>,
-    ) -> Result<Response<proto::SourceInfo>, Status> {
-        let request = request.into_inner();
-        let info = self
-            .0
-            .api
-            .set_source_directories(request.id, request.directories)
-            .await
-            .map_err(failed)?;
-        Ok(Response::new(convert::source_info_to_proto(&info)))
-    }
-
     async fn set_source_settings(
         &self,
         request: Request<proto::SetSourceSettingsRequest>,
@@ -1199,39 +1199,119 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(convert::source_info_to_proto(&info)))
     }
 
-    async fn check_server_draft(
+    async fn get_storage_quota(
         &self,
-        request: Request<proto::ServerDraft>,
+        request: Request<proto::SourceId>,
+    ) -> Result<Response<proto::StorageQuota>, Status> {
+        let quota = self
+            .0
+            .api
+            .storage_quota(request.into_inner().id)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::StorageQuota {
+            used_bytes: quota.used_bytes,
+            quota_bytes: quota.quota_bytes,
+            remaining_bytes: quota.remaining_bytes,
+        }))
+    }
+
+    async fn upload_track(
+        &self,
+        request: Request<tonic::Streaming<proto::TrackUploadChunk>>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        let mut stream = request.into_inner();
+        let header = tokio::time::timeout(std::time::Duration::from_secs(30), stream.message())
+            .await
+            .map_err(|_| Status::deadline_exceeded("upload timed out"))??
+            .ok_or_else(|| Status::invalid_argument("missing upload metadata"))?;
+        if header.total_bytes == 0
+            || header.total_bytes > api::MAX_MUSIC_UPLOAD_BYTES as u64
+            || header.source_id.is_empty()
+            || header.filename.is_empty()
+            || !header.content.is_empty()
+        {
+            return Err(Status::invalid_argument("invalid upload metadata"));
+        }
+        let source = self
+            .0
+            .api
+            .sources()
+            .await
+            .map_err(failed)?
+            .into_iter()
+            .find(|source| source.id == header.source_id)
+            .ok_or_else(|| Status::not_found("no such source"))?;
+        if !source.capabilities.uploads {
+            return Err(Status::unimplemented(
+                "this source does not support music uploads",
+            ));
+        }
+        let mut content = Vec::new();
+        while let Some(chunk) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), stream.message())
+                .await
+                .map_err(|_| Status::deadline_exceeded("upload timed out"))??
+        {
+            if !chunk.source_id.is_empty()
+                || !chunk.filename.is_empty()
+                || chunk.total_bytes != 0
+                || chunk.content.is_empty()
+                || chunk.content.len() > 256 * 1024
+                || content.len() as u64 + chunk.content.len() as u64 > header.total_bytes
+            {
+                return Err(Status::invalid_argument("invalid upload chunk"));
+            }
+            content.extend(chunk.content);
+        }
+        if content.len() as u64 != header.total_bytes {
+            return Err(Status::invalid_argument("incomplete upload"));
+        }
+        self.0
+            .api
+            .upload_track(api::TrackUpload {
+                source_id: header.source_id,
+                filename: header.filename,
+                content,
+            })
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
+    }
+
+    async fn check_source_draft(
+        &self,
+        request: Request<proto::SourceDraft>,
     ) -> Result<Response<proto::DraftCheck>, Status> {
         let check = self
             .0
             .api
-            .check_server_draft(convert::server_draft_from_proto(request.get_ref()))
+            .check_source_draft(convert::source_draft_from_proto(request.get_ref()))
             .await
             .map_err(failed)?;
         Ok(Response::new(convert::draft_check_to_proto(&check)))
     }
 
-    async fn upsert_server(
+    async fn upsert_source(
         &self,
-        request: Request<proto::ServerDraft>,
+        request: Request<proto::SourceDraft>,
     ) -> Result<Response<proto::SourceInfo>, Status> {
         let info = self
             .0
             .api
-            .upsert_server(convert::server_draft_from_proto(request.get_ref()))
+            .upsert_source(convert::source_draft_from_proto(request.get_ref()))
             .await
             .map_err(failed)?;
         Ok(Response::new(convert::source_info_to_proto(&info)))
     }
 
-    async fn delete_server(
+    async fn delete_source(
         &self,
         request: Request<proto::SourceId>,
     ) -> Result<Response<proto::Unit>, Status> {
         self.0
             .api
-            .delete_server(request.into_inner().id)
+            .delete_source(request.into_inner().id)
             .await
             .map_err(failed)?;
         Ok(Response::new(proto::Unit {}))

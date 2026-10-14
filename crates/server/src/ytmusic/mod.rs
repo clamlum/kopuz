@@ -8,11 +8,13 @@ pub mod decipher;
 pub mod discover;
 pub mod innertube;
 pub mod isolated_profile;
+pub mod lyrics;
 pub mod mix;
 pub mod mutations;
 pub mod player;
 pub mod playlists;
 pub mod search;
+pub mod tracking;
 pub mod verify_session_keepalive;
 
 pub use player::YtStreamInfo;
@@ -90,12 +92,12 @@ impl YouTubeMusicClient {
         }
     }
 
-    pub async fn search_tracks(&self, query: &str) -> Result<Vec<Track>, String> {
-        search::music_search_tracks(query, self.cookies.as_deref()).await
+    pub fn cookies(&self) -> Option<&str> {
+        self.cookies.as_deref()
     }
 
-    pub async fn resolve_artist_channel_id(&self, query: &str) -> Result<Option<String>, String> {
-        search::resolve_artist_channel_id(query, self.cookies.as_deref()).await
+    pub async fn search_tracks(&self, query: &str) -> Result<Vec<Track>, String> {
+        search::music_search_tracks(query, self.cookies.as_deref()).await
     }
 
     /// Top YT Music artist-search avatar for `name` — the Artists grid uses this
@@ -115,9 +117,9 @@ impl YouTubeMusicClient {
             .await
     }
 
-    /// The channel's square avatar, for grid photos of song-reconciled artists.
-    pub async fn artist_avatar(&self, channel_id: &str) -> Result<Option<String>, String> {
-        discover::artist_avatar(channel_id, self.cookies.as_deref().unwrap_or("")).await
+    /// The channel's own name and square avatar.
+    pub async fn artist_header(&self, channel_id: &str) -> Result<discover::ChannelHeader, String> {
+        discover::artist_header(channel_id, self.cookies.as_deref().unwrap_or("")).await
     }
 
     /// Resolve a saved album (title + artist) back to its YT album browse id
@@ -303,7 +305,7 @@ impl YouTubeMusicClient {
         self.cookies.is_some()
     }
 
-    pub async fn start_mix(&self, seed_video_id: &str) -> Result<Vec<Track>, String> {
+    pub async fn start_mix(&self, seed_video_id: &str) -> Result<mix::MixPage, String> {
         mix::fetch(
             mix::MixSeed::Video(seed_video_id),
             self.cookies.as_deref().unwrap_or(""),
@@ -311,12 +313,20 @@ impl YouTubeMusicClient {
         .await
     }
 
-    pub async fn start_playlist_mix(&self, playlist_id: &str) -> Result<Vec<Track>, String> {
+    pub async fn start_playlist_mix(&self, playlist_id: &str) -> Result<mix::MixPage, String> {
         mix::fetch(
             mix::MixSeed::Playlist(playlist_id),
             self.cookies.as_deref().unwrap_or(""),
         )
         .await
+    }
+
+    pub async fn mix_continuation(
+        &self,
+        playlist_id: &str,
+        token: &str,
+    ) -> Result<mix::MixPage, String> {
+        mix::fetch_continuation(playlist_id, token, self.cookies.as_deref().unwrap_or("")).await
     }
 
     pub async fn discover_home(&self) -> Result<discover::DiscoverHome, String> {

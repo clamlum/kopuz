@@ -20,7 +20,7 @@ pub enum CatalogItemKind {
     Unknown,
 }
 
-/// One tile. `id` is what [`CatalogDetailRequest`] takes to open it.
+/// One tile. `id` is what [`CatalogDetailRequest`] takes to open it; an artist tile's is its key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CatalogItem {
     pub kind: CatalogItemKind,
@@ -55,8 +55,23 @@ pub struct CatalogPage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CatalogDetailRequest {
     pub kind: CatalogItemKind,
+    /// What the daemon handed out for the entity: a tile's `id`, or an artist's key.
     pub id: String,
     pub continuation: Option<String>,
+}
+
+impl CatalogDetailRequest {
+    pub fn new(kind: CatalogItemKind, id: impl Into<String>) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+            continuation: None,
+        }
+    }
+
+    pub fn artist(artist: &str) -> Self {
+        Self::new(CatalogItemKind::Artist, artist)
+    }
 }
 
 /// One catalog entity opened: its tracks, or its own shelves, or both.
@@ -74,4 +89,6 @@ pub struct CatalogDetail {
     pub tracks: Vec<TrackInfo>,
     pub shelves: Vec<CatalogShelf>,
     pub continuation: Option<String>,
+    /// For an album, the artist its header opens; absent when it bills nobody.
+    pub artist_key: Option<String>,
 }

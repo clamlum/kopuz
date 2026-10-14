@@ -15,6 +15,18 @@ pub(super) struct JellyfinSource {
     client: JellyfinClient,
 }
 
+fn credits_of(items: Option<&[crate::jellyfin::NamedItem]>) -> Vec<reader::ArtistCredit> {
+    items
+        .unwrap_or_default()
+        .iter()
+        .filter(|item| !item.name.trim().is_empty())
+        .map(|item| match item.id.is_empty() {
+            true => reader::ArtistCredit::unlinked(&item.name),
+            false => reader::ArtistCredit::linked(&item.name, &item.id),
+        })
+        .collect()
+}
+
 impl JellyfinSource {
     pub(super) fn new(db: Db, source: Source, conn: &ServerConn) -> Self {
         Self {
@@ -101,7 +113,14 @@ impl MediaSource for JellyfinSource {
                         &a.id,
                         image_tag.as_deref(),
                     )));
+                    let artist_id = a
+                        .album_artists
+                        .as_ref()
+                        .and_then(|artists| artists.first())
+                        .map(|artist| artist.id.clone());
                     albums.push(reader::Album {
+                        artist_key: artist_id.clone(),
+                        artist_id,
                         id: format!("jellyfin:{}", a.id),
                         title: a.name,
                         artist: a
@@ -141,6 +160,7 @@ impl MediaSource for JellyfinSource {
                         .and_then(|tags| tags.get("Primary").cloned());
                     let bitrate_u16 =
                         (item.bitrate.unwrap_or(0) / 1000).min(u16::MAX as u32) as u16;
+                    let replay_gain = item.replay_gain_info();
                     tracks.push(reader::Track {
                         id: reader::models::TrackId::Server {
                             service: MusicService::Jellyfin,
@@ -167,9 +187,11 @@ impl MediaSource for JellyfinSource {
                         musicbrainz_recording_id: None,
                         musicbrainz_track_id: None,
                         playlist_item_id: None,
+                        credits: credits_of(item.artist_items.as_deref()),
                         artists: item
                             .artists
                             .unwrap_or_else(|| item.album_artist.into_iter().collect()),
+                        replay_gain,
                     });
                 }
                 start += count;
@@ -192,7 +214,10 @@ impl MediaSource for JellyfinSource {
                         512,
                         90,
                     );
-                    artist_images.push((artist.name, url));
+                    artist_images.push((
+                        reader::ArtistCredit::linked(artist.name, artist.id.clone()),
+                        url,
+                    ));
                 }
             }
         }
@@ -242,9 +267,12 @@ impl MediaSource for JellyfinSource {
             browser_playback: false,
             sync: true,
             downloads: true,
+            uploads: false,
+            storage_quota: false,
             discover: false,
             dont_recommend: false,
             radio: RadioSeeds::NONE,
+            play_queue: false,
             playlists: PlaylistOps::Reorder,
             artist_view: ArtistView::Library,
             albums: AlbumType::Standard,
@@ -282,7 +310,7 @@ impl MediaSource for JellyfinSource {
         &self,
         playlist_id: &str,
         track: &reader::Track,
-        _position: usize,
+        position: usize,
     ) -> Result<(), SourceError> {
         let entry_id = track
             .playlist_item_id
@@ -291,10 +319,7 @@ impl MediaSource for JellyfinSource {
         self.client
             .remove_from_playlist(playlist_id, entry_id)
             .await?;
-        self.db
-            .remove_playlist_tracks(&self.source, playlist_id, &[track.id.key().into_owned()])
-            .await
-            .map_err(SourceError::from)
+        self.remove_playlist_entry(playlist_id, position).await
     }
 
     async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError> {
@@ -305,6 +330,7 @@ impl MediaSource for JellyfinSource {
             duration_secs: None,
             bitrate: None,
             content_length: None,
+            loudness_db: None,
         })
     }
 
@@ -338,7 +364,7 @@ impl MediaSource for JellyfinSource {
     async fn reorder_playlist(
         &self,
         playlist_id: &str,
-        ordered_refs: &[String],
+        ordered: &[reader::PlaylistEntry],
         moved: &reader::Track,
         new_index: usize,
     ) -> Result<(), SourceError> {
@@ -350,7 +376,7 @@ impl MediaSource for JellyfinSource {
             .move_playlist_item(playlist_id, entry_id, new_index)
             .await?;
         self.db
-            .set_playlist_tracks(&self.source, playlist_id, ordered_refs)
+            .set_playlist_tracks(&self.source, playlist_id, ordered)
             .await
             .map_err(SourceError::from)
     }
@@ -391,6 +417,7 @@ impl MediaSource for JellyfinSource {
                     .clone()
                     .or_else(|| item.artists.as_ref().map(|a| a.join(", ")))
                     .unwrap_or_default();
+                let replay_gain = item.replay_gain_info();
                 reader::models::Track {
                     id: reader::models::TrackId::Server {
                         service: MusicService::Jellyfin,
@@ -413,13 +440,17 @@ impl MediaSource for JellyfinSource {
                     musicbrainz_recording_id: None,
                     musicbrainz_track_id: None,
                     playlist_item_id: item.playlist_item_id,
+                    credits: credits_of(item.artist_items.as_deref()),
                     artists: item.artists.unwrap_or_default(),
+                    replay_gain,
                 }
             })
             .collect())
     }
 
-    async fn fetch_artist_images(&self) -> Result<Vec<(String, String)>, SourceError> {
+    async fn fetch_artist_images(
+        &self,
+    ) -> Result<Vec<(reader::ArtistCredit, String)>, SourceError> {
         let artists = self.client.get_artists().await?;
         let mut out = Vec::new();
         for artist in artists {
@@ -427,7 +458,7 @@ impl MediaSource for JellyfinSource {
                 && let Some(tag) = tags.get("Primary")
             {
                 out.push((
-                    artist.name.clone(),
+                    reader::ArtistCredit::linked(&artist.name, &artist.id),
                     crate::cover::jellyfin_item_url(
                         self.client.base_url(),
                         &artist.id,

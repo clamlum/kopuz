@@ -115,9 +115,9 @@ pub fn SearchResults(
                                 let track_key = track.uid.clone();
                                 let track_menu = track.clone();
                                 let track_add = track.clone();
-                                let track_queue = track.clone();
                                 let track_delete = track.clone();
                                 let queue_source = search_queue.clone();
+                                let play_radio = crate::radio_actions::search_play_radio_handler(track.key.clone());
                                 let matches_current_path = currently_playing_path.as_ref() == Some(&track.uid);
                                 let matches_current_metadata = currently_playing_path.is_none()
                                     && !current_song_title.is_empty()
@@ -136,7 +136,6 @@ pub fn SearchResults(
                                         key: "{track_key}",
                                         track: track.clone(),
                                         cover_url: hooks::artwork::for_track(&track, hooks::artwork::Size::Thumb),
-                                        on_start_radio: crate::track_row::radio_handler(track.key.clone()),
                                         row_num: Some(idx + 1),
                                         is_menu_open: is_menu_open,
                                         is_album: false,
@@ -154,10 +153,6 @@ pub fn SearchResults(
                                             show_playlist_modal.set(true);
                                             active_menu_track.set(None);
                                         },
-                                        on_queue: move |_| {
-                                            ctrl.add_to_queue(vec![track_queue.clone()]);
-                                            active_menu_track.set(None);
-                                        },
                                         on_close_menu: move |_| active_menu_track.set(None),
                                         on_delete: move |_| {
                                             active_menu_track.set(None);
@@ -167,7 +162,10 @@ pub fn SearchResults(
                                             );
                                         },
                                         on_play: move |_| {
-                                            ctrl.play_queue_at(queue_source.clone(), idx);
+                                            match play_radio {
+                                                Some(radio) => radio.call(()),
+                                                None => ctrl.play_queue_at(queue_source.clone(), idx),
+                                            }
                                         }
                                     }
                                 }

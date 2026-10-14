@@ -1,24 +1,6 @@
 use super::*;
 use crate::*;
 
-pub fn source_kind_to_proto(value: api::SourceKind) -> SourceKind {
-    match value {
-        api::SourceKind::Local => SourceKind::Local,
-        api::SourceKind::LocalLibrary => SourceKind::LocalLibrary,
-        api::SourceKind::Server => SourceKind::Server,
-        api::SourceKind::Unknown => SourceKind::Unknown,
-    }
-}
-
-pub fn source_kind_from_proto(value: i32) -> api::SourceKind {
-    match SourceKind::try_from(value) {
-        Ok(SourceKind::Local) => api::SourceKind::Local,
-        Ok(SourceKind::LocalLibrary) => api::SourceKind::LocalLibrary,
-        Ok(SourceKind::Server) => api::SourceKind::Server,
-        Ok(SourceKind::Unknown) | Err(_) => api::SourceKind::Unknown,
-    }
-}
-
 pub fn capabilities_to_proto(value: &api::SourceCapabilities) -> SourceCapabilities {
     use api::{AlbumPresentation, ArtistPresentation, FavoritesSyncMode, PlaylistCapability};
     SourceCapabilities {
@@ -28,10 +10,13 @@ pub fn capabilities_to_proto(value: &api::SourceCapabilities) -> SourceCapabilit
         folders: value.folders,
         sync: value.sync,
         downloads: value.downloads,
+        uploads: value.uploads,
+        storage_quota: value.storage_quota,
         discover: value.discover,
         dont_recommend: value.dont_recommend,
         track_radio: value.track_radio,
         playlist_radio: value.playlist_radio,
+        search_radio: value.search_radio,
         browse_folders: value.browse_folders,
         external_devices: value.external_devices,
         browser_playback: value.browser_playback,
@@ -66,10 +51,13 @@ pub fn capabilities_from_proto(value: Option<&SourceCapabilities>) -> api::Sourc
         folders: value.folders,
         sync: value.sync,
         downloads: value.downloads,
+        uploads: value.uploads,
+        storage_quota: value.storage_quota,
         discover: value.discover,
         dont_recommend: value.dont_recommend,
         track_radio: value.track_radio,
         playlist_radio: value.playlist_radio,
+        search_radio: value.search_radio,
         browse_folders: value.browse_folders,
         external_devices: value.external_devices,
         browser_playback: value.browser_playback,
@@ -169,8 +157,7 @@ pub fn source_info_to_proto(value: &api::SourceInfo) -> SourceInfo {
     SourceInfo {
         id: value.id.clone(),
         name: value.name.clone(),
-        kind: source_kind_to_proto(value.kind) as i32,
-        service: value.service.as_ref().map(service_ref_to_proto),
+        service: Some(service_ref_to_proto(&value.service)),
         active: value.active,
         authenticated: value.authenticated,
         sign_in: sign_in_kind_to_proto(value.sign_in) as i32,
@@ -179,7 +166,11 @@ pub fn source_info_to_proto(value: &api::SourceInfo) -> SourceInfo {
         detail: value.detail.clone(),
         anonymous: value.anonymous,
         settings: value.settings.iter().map(field_spec_to_proto).collect(),
-        directories: value.directories.clone(),
+        needs_network: value.needs_network,
+        permanent: value.permanent,
+        state: value
+            .state
+            .map(|state| super::enums::source_state_to_proto(state) as i32),
     }
 }
 
@@ -187,8 +178,11 @@ pub fn source_info_from_proto(value: &SourceInfo) -> api::SourceInfo {
     api::SourceInfo {
         id: value.id.clone(),
         name: value.name.clone(),
-        kind: source_kind_from_proto(value.kind),
-        service: value.service.as_ref().map(service_ref_from_proto),
+        service: value
+            .service
+            .as_ref()
+            .map(service_ref_from_proto)
+            .unwrap_or_default(),
         active: value.active,
         authenticated: value.authenticated,
         sign_in: sign_in_kind_from_proto(value.sign_in),
@@ -197,28 +191,14 @@ pub fn source_info_from_proto(value: &SourceInfo) -> api::SourceInfo {
         detail: value.detail.clone(),
         anonymous: value.anonymous,
         settings: value.settings.iter().map(field_spec_from_proto).collect(),
-        directories: value.directories.clone(),
+        needs_network: value.needs_network,
+        permanent: value.permanent,
+        state: value.state.map(super::enums::source_state_from_proto),
     }
 }
 
-pub fn local_draft_to_proto(value: &api::LocalSourceDraft) -> LocalSourceDraft {
-    LocalSourceDraft {
-        id: value.id.clone(),
-        name: value.name.clone(),
-        directories: value.directories.clone(),
-    }
-}
-
-pub fn local_draft_from_proto(value: &LocalSourceDraft) -> api::LocalSourceDraft {
-    api::LocalSourceDraft {
-        id: value.id.clone(),
-        name: value.name.clone(),
-        directories: value.directories.clone(),
-    }
-}
-
-pub fn server_draft_to_proto(value: &api::ServerDraft) -> ServerDraft {
-    ServerDraft {
+pub fn source_draft_to_proto(value: &api::SourceDraft) -> SourceDraft {
+    SourceDraft {
         id: value.id.clone(),
         name: value.name.clone(),
         service: value.service.clone(),
@@ -227,8 +207,8 @@ pub fn server_draft_to_proto(value: &api::ServerDraft) -> ServerDraft {
     }
 }
 
-pub fn server_draft_from_proto(value: &ServerDraft) -> api::ServerDraft {
-    api::ServerDraft {
+pub fn source_draft_from_proto(value: &SourceDraft) -> api::SourceDraft {
+    api::SourceDraft {
         id: value.id.clone(),
         name: value.name.clone(),
         service: value.service.clone(),
@@ -322,8 +302,7 @@ mod tests {
         let info = api::SourceInfo {
             id: "jellyfin-1".into(),
             name: "Home".into(),
-            kind: api::SourceKind::Server,
-            service: Some(jellyfin()),
+            service: jellyfin(),
             active: true,
             authenticated: true,
             sign_in: api::SignInKind::Password,
@@ -335,6 +314,8 @@ mod tests {
                 delete_from_disk: false,
                 sync: true,
                 downloads: true,
+                uploads: true,
+                storage_quota: true,
                 browse_folders: true,
                 external_devices: false,
                 playlists: api::PlaylistCapability::Reorder,
@@ -346,9 +327,19 @@ mod tests {
             detail: Some("https://jelly.example".into()),
             anonymous: false,
             settings: vec![url_field()],
-            directories: vec!["/Music".into()],
+            needs_network: true,
+            permanent: true,
+            state: Some(api::SourceState::AuthExpired),
         };
         assert_eq!(info, source_info_from_proto(&source_info_to_proto(&info)));
+        let unprobed = api::SourceInfo {
+            state: None,
+            ..info
+        };
+        assert_eq!(
+            unprobed,
+            source_info_from_proto(&source_info_to_proto(&unprobed))
+        );
     }
 
     /// The form a client renders to add a server, and the answers it sends
@@ -376,7 +367,7 @@ mod tests {
             service_info_from_proto(&service_info_to_proto(&service))
         );
 
-        let draft = api::ServerDraft {
+        let draft = api::SourceDraft {
             id: Some("jellyfin-1".into()),
             name: "Home".into(),
             service: "jellyfin".into(),
@@ -385,7 +376,7 @@ mod tests {
         };
         assert_eq!(
             draft,
-            server_draft_from_proto(&server_draft_to_proto(&draft))
+            source_draft_from_proto(&source_draft_to_proto(&draft))
         );
 
         let check = api::DraftCheck {

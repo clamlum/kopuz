@@ -18,6 +18,7 @@ use super::botguard;
 use super::clients::{VISIONOS, WEB_REMIX, YouTubeClient};
 use super::decipher;
 use super::innertube::{self, PlayerExtras};
+use super::tracking::PlaybackTracking;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioFormat {
@@ -62,6 +63,8 @@ pub struct YtStreamInfo {
     /// playing — a range-backed source would fail outright instead of playing
     /// sequentially (issue #386).
     pub range_safe: bool,
+    /// `playerConfig.audioConfig.loudnessDb`.
+    pub loudness_db: Option<f32>,
 }
 
 /// The visitor id every player call carries, held for the process and kept
@@ -177,7 +180,7 @@ pub async fn resolve(video_id: &str, cookies: Option<&str>) -> Result<YtStreamIn
         ..Default::default()
     };
     let anonymous_err = match anonymous_attempt(video_id, extras).await {
-        Ok(info) => return Ok(info),
+        Ok(info) => return Ok(recheck_gated(info, || anonymous_attempt(video_id, extras)).await),
         Err(error) => error,
     };
     tracing::debug!(%anonymous_err, "anonymous path failed");
@@ -197,7 +200,11 @@ pub async fn resolve(video_id: &str, cookies: Option<&str>) -> Result<YtStreamIn
                     signature_timestamp: None,
                 };
                 match anonymous_attempt(video_id, extras).await {
-                    Ok(info) => return Ok(info),
+                    Ok(info) => {
+                        return Ok(
+                            recheck_gated(info, || anonymous_attempt(video_id, extras)).await
+                        );
+                    }
                     Err(error) => error,
                 }
             }
@@ -256,6 +263,83 @@ async fn anonymous_attempt(
     }
     pick_plain_format(&json, VISIONOS)
         .ok_or_else(|| format!("{} returned no plain audio format", VISIONOS.client_name))
+}
+
+const GATED_RETRIES: usize = 2;
+
+// Well under the range source's timeout: a hung probe passes.
+const GATE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Some plain URLs are gated behind a PO token the response never asks for:
+/// ranges past the first megabyte get 403, at random, so a repeat request
+/// usually returns a clean URL. `again` must reuse the original extras.
+async fn recheck_gated<F, Fut>(info: YtStreamInfo, mut again: F) -> YtStreamInfo
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<YtStreamInfo, String>>,
+{
+    let mut current = info;
+    for retry in 0..=GATED_RETRIES {
+        if !is_gated(&current).await {
+            return current;
+        }
+        if retry == GATED_RETRIES {
+            break;
+        }
+        tracing::info!(
+            retry = retry + 1,
+            "googlevideo refused the tail of the stream; resolving again"
+        );
+        match again().await {
+            Ok(next) => current = next,
+            Err(error) => {
+                tracing::debug!(%error, "resolving a gated stream again failed");
+                break;
+            }
+        }
+    }
+    tracing::warn!(
+        "googlevideo refused deep ranges on every resolve; streaming sequentially without seeking"
+    );
+    current.range_safe = false;
+    current
+}
+
+/// Any probe failure other than 403/410 passes; the range source rechecks the tail on open.
+async fn is_gated(info: &YtStreamInfo) -> bool {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let Some(last) = info.content_length.and_then(|len| len.checked_sub(1)) else {
+        return false;
+    };
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(GATE_PROBE_TIMEOUT)
+            .build()
+            .unwrap_or_default()
+    });
+    let started = Instant::now();
+    let response = client
+        .get(&info.url)
+        .header(reqwest::header::USER_AGENT, &info.user_agent)
+        .header(reqwest::header::RANGE, format!("bytes={last}-{last}"))
+        .send()
+        .await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let gated = matches!(
+                status,
+                reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::GONE
+            );
+            tracing::debug!(%status, gated, elapsed_ms, "googlevideo tail probe");
+            gated
+        }
+        Err(error) => {
+            tracing::debug!(%error, elapsed_ms, "googlevideo tail probe failed");
+            false
+        }
+    }
 }
 
 /// Why every path failed, not only the last one.
@@ -519,7 +603,24 @@ fn pick_plain_format(json: &Value, client: YouTubeClient) -> Option<YtStreamInfo
         bitrate: Some(bitrate as u32),
         itag,
         range_safe: true,
+        loudness_db: loudness_db(json),
     })
+}
+
+/// WEB_REMIX's `loudnessDb` is relative to this target. VISIONOS states absolute
+/// LKFS against -14, so it is rebased here to level a queue mixing both clients.
+const YTM_LOUDNESS_TARGET_LKFS: f64 = -7.0;
+
+fn loudness_db(json: &Value) -> Option<f32> {
+    let audio = json.pointer("/playerConfig/audioConfig")?;
+    audio
+        .get("trackAbsoluteLoudnessLkfs")
+        .or_else(|| audio.get("perceptualLoudnessDb"))
+        .and_then(Value::as_f64)
+        .map(|lkfs| lkfs - YTM_LOUDNESS_TARGET_LKFS)
+        .or_else(|| audio.get("loudnessDb").and_then(Value::as_f64))
+        .map(|db| db as f32)
+        .filter(|db| db.is_finite())
 }
 
 /// Best audio format by bitrate, regardless of whether it's `signatureCipher`
@@ -580,6 +681,7 @@ fn stream_info_from(
         bitrate,
         itag,
         range_safe: true,
+        loudness_db: loudness_db(json),
     })
 }
 
@@ -646,10 +748,67 @@ async fn try_native_decipher(
             playability_reason(&json)
         ));
     }
+    if let Some(cookies) = cookies {
+        remember_tracking(cookies, video_id, &json);
+    }
     let fmt = pick_best_audio(&json).ok_or("WEB_REMIX returned no audio format")?;
     let url = decipher::deciphered_url(&player.0, fmt).await?;
     stream_info_from(&json, fmt, url, WEB_REMIX)
         .ok_or_else(|| "deciphered format missing fields".to_string())
+}
+
+/// Tracking URLs from signed-in `player` responses, keyed by account and video.
+/// Anonymous responses never land here: their URLs carry the anonymous identity.
+static TRACKING: OnceLock<Mutex<HashMap<String, PlaybackTracking>>> = OnceLock::new();
+const TRACKING_CACHE_LIMIT: usize = 64;
+
+fn tracking_key(cookies: &str, video_id: &str) -> Option<String> {
+    super::derive_user_id(cookies).map(|user| format!("{user}/{video_id}"))
+}
+
+fn remember_tracking(cookies: &str, video_id: &str, json: &Value) {
+    let (Some(key), Some(tracking)) = (
+        tracking_key(cookies, video_id),
+        PlaybackTracking::from_player(json),
+    ) else {
+        return;
+    };
+    if let Ok(mut cache) = TRACKING.get_or_init(Default::default).lock() {
+        if cache.len() >= TRACKING_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, tracking);
+    }
+}
+
+/// Cached when the stream path already made a signed-in `player` call, else
+/// fetched with one of its own.
+pub async fn playback_tracking(video_id: &str, cookies: &str) -> Result<PlaybackTracking, String> {
+    let key = tracking_key(cookies, video_id).ok_or("SAPISID missing")?;
+    let cached = TRACKING
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.remove(&key));
+    if let Some(tracking) = cached {
+        return Ok(tracking);
+    }
+    let extras = PlayerExtras {
+        signature_timestamp: decipher::player_js(video_id).await.ok().map(|js| js.1),
+        visitor_data: signed_in_visitor(cookies).await,
+        ..Default::default()
+    };
+    let json = innertube::player(WEB_REMIX, video_id, Some(cookies), extras).await?;
+    let status = PlayabilityStatus::from_response(&json);
+    if status != PlayabilityStatus::Ok {
+        return Err(format!("WEB_REMIX playability {}", status.as_str()));
+    }
+    PlaybackTracking::from_player(&json).ok_or_else(|| "no playbackTracking".to_string())
+}
+
+pub async fn signed_in_visitor(cookies: &str) -> Option<&'static str> {
+    super::derive_user_id(cookies)?;
+    visitor_data(Some(cookies)).await.ok()
 }
 
 #[cfg(test)]
@@ -696,6 +855,100 @@ mod tests {
         assert_eq!(other, "VISIONOS: returned no plain audio format");
     }
 
+    async fn googlevideo() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let n = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                let status = if request.starts_with("GET /gated") {
+                    "403 Forbidden"
+                } else {
+                    "206 Partial Content"
+                };
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        addr
+    }
+
+    fn stream_at(addr: std::net::SocketAddr, path: &str) -> YtStreamInfo {
+        YtStreamInfo {
+            url: format!("http://{addr}/{path}"),
+            format: AudioFormat::Webm,
+            user_agent: VISIONOS.user_agent.to_string(),
+            content_length: Some(4096),
+            duration_secs: Some(212),
+            bitrate: Some(136544),
+            itag: Some(251),
+            range_safe: true,
+            loudness_db: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gated_url_is_replaced_by_a_working_one() {
+        let addr = googlevideo().await;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let info = recheck_gated(stream_at(addr, "gated"), || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(stream_at(addr, "good")) }
+        })
+        .await;
+        assert!(info.url.ends_with("/good"), "{}", info.url);
+        assert!(info.range_safe);
+        assert_eq!(calls.into_inner(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_url_gated_on_every_resolve_streams_sequentially() {
+        let addr = googlevideo().await;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let info = recheck_gated(stream_at(addr, "gated"), || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(stream_at(addr, "gated")) }
+        })
+        .await;
+        assert!(!info.range_safe);
+        assert_eq!(calls.into_inner(), GATED_RETRIES);
+    }
+
+    #[tokio::test]
+    async fn a_failed_resolve_keeps_the_gated_url_sequential() {
+        let addr = googlevideo().await;
+        let info = recheck_gated(stream_at(addr, "gated"), || async {
+            Err("VISIONOS playability ERROR: nope".to_string())
+        })
+        .await;
+        assert!(info.url.ends_with("/gated"), "{}", info.url);
+        assert!(!info.range_safe);
+    }
+
+    #[tokio::test]
+    async fn a_working_url_is_not_resolved_again() {
+        let addr = googlevideo().await;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let info = recheck_gated(stream_at(addr, "good"), || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(stream_at(addr, "gated")) }
+        })
+        .await;
+        assert!(info.url.ends_with("/good"), "{}", info.url);
+        assert!(info.range_safe);
+        assert_eq!(calls.into_inner(), 0);
+    }
+
     #[test]
     fn pick_plain_format_carries_bitrate_and_itag() {
         let json = json!({
@@ -722,6 +975,57 @@ mod tests {
         assert_eq!(info.itag, Some(774));
         assert_eq!(info.bitrate, Some(270204));
         assert_eq!(info.duration_secs, Some(212));
+    }
+
+    #[test]
+    fn a_recorded_player_response_carries_its_loudness() {
+        let json: Value =
+            serde_json::from_str(include_str!("testdata/player_web_remix.json")).unwrap();
+        let fmt = pick_best_audio(&json).expect("an audio format");
+        let info = stream_info_from(&json, fmt, "https://x/y".into(), WEB_REMIX)
+            .expect("should build stream info");
+        let loudness = info.loudness_db.expect("loudnessDb");
+        assert!((loudness - -6.11).abs() < 1e-3, "{loudness}");
+    }
+
+    #[test]
+    fn visionos_loudness_is_rebased_onto_the_web_target() {
+        let json = json!({ "playerConfig": { "audioConfig": {
+            "perceptualLoudnessDb": -5.24,
+            "trackAbsoluteLoudnessLkfs": -5.24,
+            "loudnessTargetLkfs": -14
+        }}});
+        let loudness = loudness_db(&json).expect("loudness");
+        assert!((loudness - 1.76).abs() < 1e-3, "{loudness}");
+
+        let only_relative = json!({ "playerConfig": { "audioConfig": { "loudnessDb": 2.5 }}});
+        assert_eq!(loudness_db(&only_relative), Some(2.5));
+    }
+
+    #[test]
+    fn a_response_without_loudness_carries_none() {
+        let json = json!({ "videoDetails": { "lengthSeconds": "212" } });
+        let fmt = json!({ "itag": 251, "mimeType": "audio/webm; codecs=\"opus\"" });
+        let info = stream_info_from(&json, &fmt, "https://x/y".into(), WEB_REMIX).unwrap();
+        assert_eq!(info.loudness_db, None);
+    }
+
+    /// Skrillex, "Bangarang", about -5 LKFS.
+    #[tokio::test]
+    #[ignore = "hits live YouTube"]
+    async fn resolve_reports_loudness() {
+        let info = resolve("YJVmu6yttiw", None)
+            .await
+            .expect("resolve should succeed");
+        let loudness = info.loudness_db.expect("loudnessDb");
+        let gain = config::loudness_gain(loudness);
+        tracing::info!(
+            loudness,
+            gain,
+            gain_db = 20.0 * gain.log10(),
+            "resolved loudness"
+        );
+        assert!(gain < 1.0, "a track this loud is turned down");
     }
 
     /// End-to-end: resolve a public track (decipher via the SubprocessEngine)

@@ -148,6 +148,7 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
     let session = SessionHandle::try_spawn(library.clone(), services)
         .map_err(|error| format!("audio engine init failed: {error:?}"))?;
     library.attach_session(session.clone());
+    config_service.attach_session(session.clone());
     scrobbler.attach_session(session.clone());
     {
         let scrobbler = scrobbler.clone();
@@ -170,20 +171,42 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
     let playlists = crate::PlaylistService::new(database.clone(), session.clone());
     spawn_volume_persistence(&session, config_service.clone());
     crate::os_media::spawn(&session);
-    crate::integrations::spawn_jellyfin_reporter(&session, active_source, session.config_watch());
+    crate::integrations::spawn_jellyfin_reporter(
+        &session,
+        active_source.clone(),
+        session.config_watch(),
+    );
+    crate::integrations::spawn_youtube_reporter(&session, database.clone(), session.config_watch());
     crate::integrations::spawn_discord_presence(&session, session.config_watch());
-    if let Some(snapshot) = queue_store.load().await
-        && !snapshot.queue.is_empty()
-    {
-        let restored = snapshot.queue.len();
-        // A restored queue can hold rows the library never stored -- last
-        // session's radio mix, say. Register them the way a live listing is,
-        // or hearting the track that is playing answers "unknown track key".
-        library.register_transient(&snapshot.queue);
-        match session.restore_queue(snapshot).await {
-            Ok(_) => tracing::info!(tracks = restored, "queue restored from the last session"),
-            Err(error) => tracing::warn!(%error, "queue restore failed"),
+    let restored_source = session.config_watch().borrow().active_source.clone();
+    match queue_store.load(&restored_source).await {
+        Ok(snapshot) if !snapshot.queue.is_empty() => {
+            let restored = snapshot.queue.len();
+            // A restored queue can hold rows the library never stored -- last
+            // session's radio mix, say. Register them the way a live listing is,
+            // or hearting the track that is playing answers "unknown track key".
+            library.register_transient(&snapshot.queue);
+            match session.restore_queue(snapshot).await {
+                Ok(_) => tracing::info!(tracks = restored, "queue restored from the last session"),
+                Err(error) => tracing::warn!(%error, "queue restore failed"),
+            }
         }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "the last session's queue could not be read");
+            session.hold_unread_queue();
+        }
+    }
+    // Asking the source for its queue costs a round trip, so startup does not wait on it.
+    {
+        let session = session.clone();
+        let library = library.clone();
+        let source = active_source.clone();
+        let store = queue_store.clone();
+        tokio::spawn(async move {
+            crate::persistence::adopt_remote_queue(&session, &library, &source, store.as_ref())
+                .await;
+        });
     }
     let artwork = crate::ArtworkService::new(
         database.clone(),
@@ -202,9 +225,27 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
     let sources =
         crate::SourceService::new(database.clone(), session.clone(), config_service.clone());
     sources.spawn_credential_upkeep();
+    sources.watch_active(session.config_watch());
+    crate::auto_sync::spawn(
+        database.clone(),
+        jobs.clone(),
+        library.clone(),
+        playlists.clone(),
+        favorites.clone(),
+        session.config_watch(),
+    );
+    // A failed settings read aborts boot above, so reaching here means the config is real.
+    crate::folder_scan::spawn(
+        jobs.clone(),
+        library.clone(),
+        session.config_watch(),
+        session.subscribe(),
+        true,
+    );
     let config_service_for_api = config_service.clone();
     let catalog = crate::CatalogService::new(database.clone(), session.clone(), library.clone());
-    let radio_service = crate::RadioService::new(config_service.clone(), library.clone());
+    let radio_service =
+        crate::RadioService::new(config_service.clone(), library.clone(), session.clone());
     library.attach_catalog(catalog.clone());
     artwork.attach_library(library.clone());
     artwork.attach_catalog(catalog.clone());
@@ -218,7 +259,7 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
             tracing::warn!(%error, "radio registry could not be loaded");
         }
     });
-    let downloader = crate::UrlDownloadService::new(session.clone(), config_service.clone());
+    let downloader = crate::UrlDownloadService::new(config_service.clone());
     downloader.attach_rescan(library.clone(), jobs.clone());
     // Spotify plays itself, so the session is told where to send a track it
     // cannot decode. Nothing starts until one is actually queued.
@@ -240,10 +281,7 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
             .with_sources(sources.clone())
             .with_downloader(downloader)
             .with_spotify(spotify)
-            .with_integrations(crate::IntegrationService::new(
-                config_service_for_api,
-                session.clone(),
-            )),
+            .with_integrations(crate::IntegrationService::new(config_service_for_api)),
     );
 
     Ok(Core {
@@ -267,21 +305,22 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
 /// one that remembers it; the debounce keeps a drag off the database.
 fn spawn_volume_persistence(session: &SessionHandle, config: Arc<ConfigService>) {
     let mut events = session.subscribe();
-    let mut last = session.state().volume;
+    let state = session.state();
+    let mut last = (state.volume, state.muted);
     tokio::spawn(async move {
         loop {
-            let volume = match events.recv().await {
-                Ok(api::ApiEvent::PlayerState(state)) => state.volume,
+            let (volume, muted) = match events.recv().await {
+                Ok(api::ApiEvent::PlayerState(state)) => (state.volume, state.muted),
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             };
-            if (volume - last).abs() < f32::EPSILON {
+            if (volume - last.0).abs() < f32::EPSILON && muted == last.1 {
                 continue;
             }
-            last = volume;
+            last = (volume, muted);
             tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            if let Err(error) = config.set_volume(last).await {
+            if let Err(error) = config.set_volume(last.0, last.1).await {
                 tracing::warn!(%error, "volume persist failed");
             }
         }
@@ -296,7 +335,8 @@ fn spawn_volume_persistence(session: &SessionHandle, config: Arc<ConfigService>)
 /// also where a whole-config write reads volume back from, which is why the
 /// frontend's own copy cannot stand in for this.
 pub async fn flush_volume(session: &SessionHandle, config: &ConfigService) {
-    if let Err(error) = config.set_volume(session.state().volume).await {
+    let state = session.state();
+    if let Err(error) = config.set_volume(state.volume, state.muted).await {
         tracing::warn!(%error, "flushing the volume on shutdown failed");
     }
 }
