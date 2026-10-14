@@ -56,12 +56,12 @@ let
     dioxus-cli
     git
   ]
-  ++ lib.optionals stdenv.isLinux [ wrapGAppsHook3 ];
+  ++ lib.optionals stdenv.hostPlatform.isLinux [ wrapGAppsHook3 ];
 
   buildInputs = [
     libopus
   ]
-  ++ lib.optionals stdenv.isLinux [
+  ++ lib.optionals stdenv.hostPlatform.isLinux [
     webkitgtk_4_1
     gtk3
     libsoup_3
@@ -131,7 +131,7 @@ craneLib.mkCargoDerivation (
     buildPhaseCargoCommand = ''
       tailwindcss -i tailwind.css -o crates/kopuz/assets/tailwind.css --minify
 
-      ${lib.optionalString stdenv.isDarwin ''
+      ${lib.optionalString stdenv.hostPlatform.isDarwin ''
               mkdir -p "$TMPDIR/fake-bin"
               cat > "$TMPDIR/fake-bin/codesign" <<'CODESIGN_EOF'
         #!/bin/sh
@@ -152,7 +152,7 @@ craneLib.mkCargoDerivation (
       install -m755 target/release/kopuzctl target/release/kopuzd $out/bin/
 
       ${
-        if stdenv.isLinux then
+        if stdenv.hostPlatform.isLinux then
           ''
             cp -r target/dx/kopuz/release/linux/app/* $out/bin/
 
@@ -183,7 +183,7 @@ craneLib.mkCargoDerivation (
       runHook postInstall
     '';
 
-    preFixup = lib.optionalString stdenv.isLinux ''
+    preFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
       wrapProgram $out/bin/kopuz \
         "''${gappsWrapperArgs[@]}" \
         --chdir $out/bin \
