@@ -77,7 +77,7 @@ type Api = std::sync::Arc<dyn api::KopuzApi>;
 pub fn authenticate(
     server_id: String,
     error: Signal<Option<String>>,
-    playback_error: Signal<Option<String>>,
+    playback_error: Signal<Option<hooks::PlaybackError>>,
 ) {
     let api = hooks::consume_api();
     spawn(
@@ -90,14 +90,14 @@ async fn authenticate_with(
     api: Api,
     server_id: String,
     mut error: Signal<Option<String>>,
-    mut playback_error: Signal<Option<String>>,
+    mut playback_error: Signal<Option<hooks::PlaybackError>>,
 ) {
     match api.authenticate_source(server_id).await {
         Ok(_) => error.set(None),
         Err(failure) => {
             let message = i18n::t_with("signin_failed", &[("error", failure.to_string())]);
             error.set(Some(message.clone()));
-            playback_error.set(Some(message));
+            playback_error.set(Some(message.into()));
         }
     }
 }
@@ -109,7 +109,7 @@ async fn activate(
     id: String,
     error: Signal<Option<String>>,
     mut show_login: Signal<bool>,
-    playback_error: Signal<Option<String>>,
+    playback_error: Signal<Option<hooks::PlaybackError>>,
 ) {
     let source = match api.switch_source(id).await {
         Ok(source) => source,
@@ -162,7 +162,7 @@ pub fn add_source(
     mut error: Signal<Option<String>>,
     mut show_add_source: Signal<bool>,
     show_login: Signal<bool>,
-    playback_error: Signal<Option<String>>,
+    playback_error: Signal<Option<hooks::PlaybackError>>,
 ) {
     let api = hooks::consume_api();
     spawn(
@@ -206,13 +206,108 @@ pub fn add_source(
     );
 }
 
+/// If the session cannot be taken, the half-made source is removed again and the
+/// form stays open on the error.
+#[allow(clippy::too_many_arguments)]
+pub fn add_source_from_session(
+    mut draft: api::SourceDraft,
+    session: api::BrowserSession,
+    mut importing: Signal<Option<String>>,
+    mut source_name: Signal<String>,
+    mut values: Signal<Vec<api::FieldValue>>,
+    mut secrets: Signal<Vec<api::FieldValue>>,
+    mut error: Signal<Option<String>>,
+    mut show_add_source: Signal<bool>,
+    show_login: Signal<bool>,
+    playback_error: Signal<Option<hooks::PlaybackError>>,
+) {
+    if draft.name.trim().is_empty() {
+        draft.name = components::settings_popups::session_label(&session);
+    }
+    let session = session.id;
+    let api = hooks::consume_api();
+    importing.set(Some(session.clone()));
+    spawn(
+        async move {
+            match api.check_source_draft(draft.clone()).await {
+                Ok(check) => {
+                    if let Some(problem) = check.problems.first() {
+                        error.set(Some(components::forms::text(&problem.label)));
+                        importing.set(None);
+                        return;
+                    }
+                }
+                Err(failure) => {
+                    error.set(Some(failure.to_string()));
+                    importing.set(None);
+                    return;
+                }
+            }
+            let saved = match api.upsert_source(draft).await {
+                Ok(saved) => saved,
+                Err(failure) => {
+                    error.set(Some(failure.to_string()));
+                    importing.set(None);
+                    return;
+                }
+            };
+            if let Err(failure) = api.import_browser_session(saved.id.clone(), session).await {
+                if let Err(cleanup) = api.delete_source(saved.id).await {
+                    tracing::warn!(%cleanup, "removing a source that could not sign in failed");
+                }
+                error.set(Some(i18n::t_with(
+                    "signin_failed",
+                    &[("error", failure.to_string())],
+                )));
+                importing.set(None);
+                return;
+            }
+            importing.set(None);
+            source_name.set(String::new());
+            values.set(Vec::new());
+            secrets.set(Vec::new());
+            error.set(None);
+            show_add_source.set(false);
+            activate(api, saved.id, error, show_login, playback_error).await;
+        }
+        .instrument(tracing::info_span!("source.add_from_browser")),
+    );
+}
+
+pub fn reauth_from_session(
+    server_id: String,
+    session: api::BrowserSession,
+    mut importing: Signal<Option<String>>,
+    mut error: Signal<Option<String>>,
+    mut show: Signal<bool>,
+) {
+    let api = hooks::consume_api();
+    importing.set(Some(session.id.clone()));
+    spawn(
+        async move {
+            match api.import_browser_session(server_id, session.id).await {
+                Ok(_) => {
+                    error.set(None);
+                    show.set(false);
+                }
+                Err(failure) => error.set(Some(i18n::t_with(
+                    "signin_failed",
+                    &[("error", failure.to_string())],
+                ))),
+            }
+            importing.set(None);
+        }
+        .instrument(tracing::info_span!("source.reauth_from_browser")),
+    );
+}
+
 /// Make a saved server the active source, and pick up the sign-in it needs if
 /// the daemon reports it has no usable credentials.
 pub fn switch_server(
     id: String,
     error: Signal<Option<String>>,
     show_login: Signal<bool>,
-    playback_error: Signal<Option<String>>,
+    playback_error: Signal<Option<hooks::PlaybackError>>,
 ) {
     let api = hooks::consume_api();
     spawn(activate(api, id, error, show_login, playback_error));

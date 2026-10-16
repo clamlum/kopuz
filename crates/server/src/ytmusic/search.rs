@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use super::SOURCE_PREFIX;
 use super::clients::WEB_REMIX;
-use super::innertube::sapisid_hash;
+use super::innertube::{sapisid_hash, signed};
 
 const ORIGIN_YT_MUSIC: &str = "https://music.youtube.com";
 const SONGS_FILTER: &str = "EgWKAQIIAWoMEAMQBBAJEAoQDhAV";
@@ -45,14 +45,16 @@ impl MusicVideoType {
 }
 
 #[derive(Debug, Clone)]
-struct ParsedRow {
-    video_id: String,
-    title: String,
-    artists: Vec<ArtistCredit>,
-    album: Option<String>,
-    album_browse_id: Option<String>,
-    duration: u64,
-    thumbnail_url: Option<String>,
+pub(super) struct ParsedRow {
+    pub video_id: String,
+    pub title: String,
+    pub artists: Vec<ArtistCredit>,
+    pub album: Option<String>,
+    pub album_browse_id: Option<String>,
+    pub duration: u64,
+    pub thumbnail_url: Option<String>,
+    pub explicit: bool,
+    pub plays: Option<String>,
 }
 
 #[tracing::instrument(name = "yt.search", skip(cookies), fields(query = %query))]
@@ -282,7 +284,7 @@ async fn do_search_raw(
         "context": {
             "client": {
                 "clientName": client.client_name,
-                "clientVersion": client.client_version,
+                "clientVersion": client.version(),
                 "hl": "en",
                 "gl": "US",
             },
@@ -302,18 +304,18 @@ async fn do_search_raw(
         .header("Content-Type", "application/json")
         .header("X-Goog-Api-Format-Version", "1")
         .header("X-YouTube-Client-Name", client.client_id)
-        .header("X-YouTube-Client-Version", client.client_version)
+        .header("X-YouTube-Client-Version", client.version())
         .header("X-Origin", ORIGIN_YT_MUSIC)
         .header("Origin", ORIGIN_YT_MUSIC)
-        .header("Referer", format!("{ORIGIN_YT_MUSIC}/"))
-        .json(&body);
+        .header("Referer", format!("{ORIGIN_YT_MUSIC}/"));
     if let Some(c) = cookies {
-        req = req.header("Cookie", c);
-        if let Some(auth) = sapisid_hash(c, ORIGIN_YT_MUSIC) {
-            req = req.header("Authorization", auth);
-        }
+        req = match sapisid_hash(c, ORIGIN_YT_MUSIC) {
+            Some(auth) => signed(req, &mut body, c, auth),
+            None => req.header("Cookie", c),
+        };
     }
-    req.send()
+    req.json(&body)
+        .send()
         .await
         .map_err(|e| format!("search HTTP: {e}"))?
         .error_for_status()
@@ -333,7 +335,7 @@ async fn do_search(
     Ok(walk_tracks(&resp))
 }
 
-fn walk_tracks(resp: &Value) -> Vec<Track> {
+pub(super) fn walk_tracks(resp: &Value) -> Vec<Track> {
     let shelves = resp
         .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
         .and_then(|v| v.as_array());
@@ -441,6 +443,8 @@ fn parse_card_shelf(card: &Value) -> Option<ParsedRow> {
         album_browse_id,
         duration,
         thumbnail_url,
+        explicit: super::has_explicit_badge(card),
+        plays: None,
     })
 }
 
@@ -492,9 +496,10 @@ fn parse_playlist_track(
             artists.push(ArtistCredit::unlinked(name));
         }
     }
+    // Some playlists put the play count in the album column.
     let album = if mvt.has_album() {
         let s = pick_run(row, 2, 0);
-        if s.is_empty() { None } else { Some(s) }
+        (!s.is_empty() && !super::is_count(&s)).then_some(s)
     } else {
         None
     };
@@ -521,6 +526,8 @@ fn parse_playlist_track(
         album_browse_id,
         duration,
         thumbnail_url,
+        explicit: super::has_explicit_badge(row),
+        plays: row_plays(row),
     }
 }
 
@@ -572,6 +579,8 @@ fn parse_search_row(
         album_browse_id,
         duration,
         thumbnail_url,
+        explicit: super::has_explicit_badge(row),
+        plays: row_plays(row),
     }
 }
 
@@ -609,7 +618,7 @@ fn runs_with_browse(runs: Option<&Value>) -> Vec<(String, Option<String>)> {
         .unwrap_or_default()
 }
 
-fn parsed_to_track(p: ParsedRow) -> Track {
+pub(super) fn parsed_to_track(p: ParsedRow) -> Track {
     let primary_artist = p
         .artists
         .first()
@@ -641,7 +650,30 @@ fn parsed_to_track(p: ParsedRow) -> Track {
         artists: p.artists.iter().map(|c| c.name.clone()).collect(),
         credits: p.artists,
         replay_gain: config::ReplayGainInfo::default(),
+        explicit: p.explicit,
+        plays: p.plays,
+        counterpart: None,
     }
+}
+
+/// A row's play or view count, from whichever column or `•` part holds it.
+fn row_plays(row: &Value) -> Option<String> {
+    row["flexColumns"]
+        .as_array()?
+        .iter()
+        .skip(1)
+        .flat_map(|column| {
+            column["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|run| run["text"].as_str())
+                .collect::<String>()
+                .split(" • ")
+                .map(|part| part.trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .find(|part| super::is_count(part))
 }
 
 fn pick_run(row: &Value, col: usize, run: usize) -> String {

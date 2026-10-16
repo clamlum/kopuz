@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT position, track_key, service, source_album_id, title, artist, album, duration, khz, bitrate, track_number, disc_number, cover_path, mb_release_id, mb_recording_id, mb_track_id, playlist_item_id, rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak FROM queue_tracks WHERE source = ?1 ORDER BY position",
+  "query": "SELECT position, track_key, service, source_album_id, title, artist, album, duration, khz, bitrate, track_number, disc_number, cover_path, mb_release_id, mb_recording_id, mb_track_id, playlist_item_id, rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, explicit, plays FROM queue_tracks WHERE source = ?1 ORDER BY position",
   "describe": {
     "columns": [
       {
@@ -107,6 +107,16 @@
         "name": "rg_album_peak",
         "ordinal": 20,
         "type_info": "Float"
+      },
+      {
+        "name": "explicit",
+        "ordinal": 21,
+        "type_info": "Integer"
+      },
+      {
+        "name": "plays",
+        "ordinal": 22,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -133,8 +143,10 @@
       true,
       true,
       true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "2337a0ac5f3a8976b9af2fc487276f07a0d2628107c907b94929b80bc1f8cd08"
+  "hash": "959facf892960961519f9481e2dabe1991240f2f5c557b55f184a6f93046b65d"
 }

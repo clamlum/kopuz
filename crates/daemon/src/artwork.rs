@@ -116,6 +116,16 @@ pub fn url_ref(target: ArtworkTarget, url: &str) -> ArtworkRef {
     ArtworkRef::new(target, version_of(&CoverRef::EmbeddedUrl(url.to_string())))
 }
 
+/// Versioned by account, so signing in as someone else is a new picture.
+pub fn account_ref(source_id: &str, account: &str) -> ArtworkRef {
+    ArtworkRef::new(
+        ArtworkTarget::Account(source_id.to_string()),
+        version_of(&CoverRef::EmbeddedUrl(format!(
+            "account:{source_id}:{account}"
+        ))),
+    )
+}
+
 pub fn track_ref(track: &reader::Track) -> Option<ArtworkRef> {
     ref_for(
         ArtworkTarget::Track(track.id.key().into_owned()),
@@ -330,6 +340,20 @@ impl ArtworkService {
                 .and_then(|catalog| catalog.thumbnail(id))
                 .map(CoverRef::EmbeddedUrl)
                 .ok_or_else(|| ApiError::not_found("no artwork for this catalog item")),
+            // Only the active source's listing hands out an avatar ref.
+            ArtworkTarget::Account(id) => {
+                if id != config.active_source.as_str() {
+                    return Err(ApiError::not_found("no picture for that account"));
+                }
+                server::source::active(self.db.clone(), config)
+                    .account_avatar()
+                    .await
+                    .map_err(|error| {
+                        ApiError::new(api::ErrorCode::SourceUnreachable, error.to_string())
+                    })?
+                    .map(CoverRef::EmbeddedUrl)
+                    .ok_or_else(|| ApiError::not_found("the account has no picture"))
+            }
             ArtworkTarget::Station(id) => {
                 let radio = self
                     .radio
@@ -537,6 +561,9 @@ mod tests {
             credits: Vec::new(),
             artists: vec![],
             replay_gain: config::ReplayGainInfo::default(),
+            explicit: false,
+            plays: None,
+            counterpart: None,
         }
     }
 

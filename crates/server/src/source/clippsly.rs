@@ -9,8 +9,8 @@ use crate::clippsly::ClippslyClient;
 use crate::server_ops::ServerConn;
 
 use super::{
-    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibrarySnapshot, MediaSource,
-    PlaylistOps, RadioSeeds, SourceError, StreamInfo,
+    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibraryActions,
+    LibrarySnapshot, MediaSource, PlaylistOps, RadioSeeds, SourceError, StreamInfo,
 };
 
 pub(super) struct ClippslySource {
@@ -63,6 +63,9 @@ impl ClippslySource {
             artists: vec![row.artist.clone()],
             credits: vec![reader::ArtistCredit::unlinked(row.artist)],
             replay_gain: Default::default(),
+            explicit: false,
+            plays: None,
+            counterpart: None,
         }
     }
 }
@@ -85,18 +88,25 @@ impl MediaSource for ClippslySource {
             browse_folders: false,
             external_devices: false,
             browser_playback: false,
+            accounts: false,
             sync: true,
             downloads: true,
             uploads: true,
             storage_quota: true,
             discover: false,
             dont_recommend: false,
+            music_videos: false,
             radio: RadioSeeds::NONE,
             play_queue: false,
             playlists: PlaylistOps::None,
             artist_view: ArtistView::Library,
             albums: AlbumType::Standard,
             favorites_sync: FavoritesSync::Instant,
+            account_avatar: false,
+            stream_quality: false,
+            explicit_flags: false,
+            watch_history: false,
+            library_actions: LibraryActions::NONE,
         }
     }
 
@@ -129,7 +139,11 @@ impl MediaSource for ClippslySource {
         })
     }
 
-    async fn resolve_stream(&self, id: &str) -> Result<StreamInfo, SourceError> {
+    async fn resolve_stream(
+        &self,
+        id: &str,
+        _: config::StreamQuality,
+    ) -> Result<StreamInfo, SourceError> {
         let client = self.client()?;
         let stream = client.stream(id).await?;
         Ok(StreamInfo {

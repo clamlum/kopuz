@@ -28,6 +28,8 @@ pub struct TrackRow {
     pub rg_track_peak: Option<f64>,
     pub rg_album_gain: Option<f64>,
     pub rg_album_peak: Option<f64>,
+    pub explicit: i64,
+    pub plays: Option<String>,
 }
 
 /// One credit of a track, with the artist row it is filed under.
@@ -79,6 +81,9 @@ impl TrackRow {
                 album_peak: self.rg_album_peak.map(|v| v as f32),
                 loudness_db: None,
             },
+            explicit: self.explicit != 0,
+            plays: self.plays,
+            counterpart: None,
         }
     }
 }
@@ -146,6 +151,8 @@ pub struct QueueTrackRow {
     pub rg_track_peak: Option<f64>,
     pub rg_album_gain: Option<f64>,
     pub rg_album_peak: Option<f64>,
+    pub explicit: i64,
+    pub plays: Option<String>,
 }
 
 impl QueueTrackRow {
@@ -175,6 +182,9 @@ impl QueueTrackRow {
                 album_peak: self.rg_album_peak.map(|v| v as f32),
                 loudness_db: None,
             },
+            explicit: self.explicit != 0,
+            plays: self.plays,
+            counterpart: None,
         }
     }
 }

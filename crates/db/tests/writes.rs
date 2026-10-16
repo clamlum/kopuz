@@ -39,7 +39,10 @@ fn local(path: &str, title: &str) -> Track {
         playlist_item_id: None,
         artists: vec!["Artist".into(), "Feat".into()],
         replay_gain: config::ReplayGainInfo::default(),
+        counterpart: None,
         credits: Vec::new(),
+        explicit: false,
+        plays: None,
     }
 }
 
@@ -335,6 +338,44 @@ async fn replay_gain_round_trips_and_clears() {
         .unwrap();
     assert!(stored[0].replay_gain.is_empty());
     assert_eq!(stored[0].replay_gain.track_peak, None);
+
+    let _ = std::fs::remove_dir_all(db_path.parent().unwrap());
+}
+
+/// Skip explicit reads the flag off stored rows, not only freshly fetched ones.
+#[tokio::test]
+async fn explicit_and_plays_round_trip() {
+    let db_path = unique_db();
+    let db = db::init(&db_path).await.unwrap();
+    let source = Source::Server("yt".into());
+    let mut track = local("/music/e.flac", "E");
+    track.id = TrackId::Server {
+        service: config::MusicService::YtMusic,
+        item_id: "vid".into(),
+    };
+    track.explicit = true;
+    track.plays = Some("900M plays".into());
+    db.upsert_tracks(&source, std::slice::from_ref(&track))
+        .await
+        .unwrap();
+    let filter = TrackFilter::new(source.clone());
+    let page = Page {
+        offset: 0,
+        limit: 10,
+    };
+    let stored = db.tracks_page(&filter, page).await.unwrap();
+    assert!(stored[0].explicit);
+    assert_eq!(stored[0].plays.as_deref(), Some("900M plays"));
+
+    // A listing that omits the flag or the count (a card, not a track row) leaves the stored ones.
+    track.explicit = false;
+    track.plays = None;
+    db.upsert_tracks(&source, std::slice::from_ref(&track))
+        .await
+        .unwrap();
+    let stored = db.tracks_page(&filter, page).await.unwrap();
+    assert!(stored[0].explicit);
+    assert_eq!(stored[0].plays.as_deref(), Some("900M plays"));
 
     let _ = std::fs::remove_dir_all(db_path.parent().unwrap());
 }

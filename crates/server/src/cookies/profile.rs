@@ -38,9 +38,13 @@ pub fn delete_profile(prefix: &str, server_id: &str) -> std::io::Result<()> {
 
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
 pub(crate) fn pick_cookies_path(profile_root: &Path) -> Option<PathBuf> {
+    // An isolated profile is a user-data dir with its store under `Default`;
+    // a listed profile is the profile dir itself.
     [
         profile_root.join("Default").join("Network").join("Cookies"),
         profile_root.join("Default").join("Cookies"),
+        profile_root.join("Network").join("Cookies"),
+        profile_root.join("Cookies"),
     ]
     .into_iter()
     .find(|p| p.exists())

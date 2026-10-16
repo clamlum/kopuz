@@ -16,6 +16,8 @@ mod runtime;
 /// One mint job: the `video_id` to bind the pot to, and a one-shot for the result.
 pub struct MintRequest {
     pub video_id: String,
+    /// Negotiate a new integrity token before minting.
+    pub fresh: bool,
     pub reply: oneshot::Sender<Result<String, String>>,
 }
 
@@ -80,6 +82,17 @@ mod tests {
 /// use. Errors if the minter is unavailable (Android) or the runtime failed.
 #[tracing::instrument(name = "yt.mint_pot", fields(video_id = %video_id))]
 pub async fn mint_content_pot(video_id: &str) -> Result<String, String> {
+    mint(video_id, false).await
+}
+
+/// [`mint_content_pot`] from a newly negotiated integrity token. Some
+/// negotiations yield a token whose pots googlevideo refuses every time, so a
+/// pot that did not lift the gate is not worth minting again from the same one.
+pub async fn remint_content_pot(video_id: &str) -> Result<String, String> {
+    mint(video_id, true).await
+}
+
+async fn mint(video_id: &str, fresh: bool) -> Result<String, String> {
     ensure_started();
     let tx = MINTER
         .get()
@@ -87,6 +100,7 @@ pub async fn mint_content_pot(video_id: &str) -> Result<String, String> {
     let (reply, rx) = oneshot::channel();
     tx.send(MintRequest {
         video_id: video_id.to_string(),
+        fresh,
         reply,
     })
     .map_err(|_| "PO token minter channel closed".to_string())?;

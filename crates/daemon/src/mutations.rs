@@ -12,6 +12,7 @@ use api::{ApiError, ArtworkChange, ArtworkTarget, ArtworkUpload, Table, TrackMet
 use sha2::{Digest, Sha256};
 
 use crate::session::SessionHandle;
+use crate::sources::source_error;
 
 /// Big enough for a scanned LP sleeve, small enough that a mistake is not a
 /// denial of service.
@@ -26,18 +27,6 @@ pub struct MutationService {
 
 fn db_error(error: db::DbError) -> ApiError {
     ApiError::internal(format!("database error: {error}"))
-}
-
-fn source_error(error: server::source::SourceError) -> ApiError {
-    use api::ErrorCode;
-    use server::source::SourceError;
-    match &error {
-        SourceError::Unsupported(what) => ApiError::unsupported(*what),
-        SourceError::Auth => ApiError::new(ErrorCode::SourceAuthExpired, error.to_string()),
-        SourceError::Connectivity => ApiError::new(ErrorCode::SourceUnreachable, error.to_string()),
-        SourceError::InvalidInput(message) => ApiError::invalid_input(message.clone()),
-        SourceError::Backend(message) => ApiError::internal(message.clone()),
-    }
 }
 
 /// The roots the active source may delete inside. A server source has none:
@@ -292,9 +281,11 @@ impl MutationService {
                     .map(|_| Table::Playlists)
             }
             ArtworkTarget::Track(_) => unreachable!("handled above"),
-            ArtworkTarget::Catalog(_) | ArtworkTarget::Station(_) => Err(ApiError::unsupported(
-                "catalog and station artwork is not ours to set",
-            )),
+            ArtworkTarget::Catalog(_) | ArtworkTarget::Station(_) | ArtworkTarget::Account(_) => {
+                Err(ApiError::unsupported(
+                    "catalog, station and account artwork is not ours to set",
+                ))
+            }
         };
         match result {
             Ok(table) => {
@@ -345,9 +336,9 @@ impl MutationService {
                 Table::Playlists
             }
             ArtworkTarget::Track(_) => unreachable!("handled above"),
-            ArtworkTarget::Catalog(_) | ArtworkTarget::Station(_) => {
+            ArtworkTarget::Catalog(_) | ArtworkTarget::Station(_) | ArtworkTarget::Account(_) => {
                 return Err(ApiError::unsupported(
-                    "catalog and station artwork is not ours to remove",
+                    "catalog, station and account artwork is not ours to remove",
                 ));
             }
         };

@@ -176,6 +176,9 @@ pub fn extract_metadata(
         musicbrainz_track_id,
         playlist_item_id: None,
         replay_gain: config::ReplayGainInfo::default(),
+        explicit: false,
+        plays: None,
+        counterpart: None,
     }
 }
 
@@ -524,6 +527,9 @@ pub fn read_with_symphonia(
         .and_then(symphonia_tag_to_string),
         playlist_item_id: None,
         replay_gain: config::ReplayGainInfo::default(),
+        explicit: false,
+        plays: None,
+        counterpart: None,
     };
 
     let genre = find_symphonia_tag(&tags, |t| matches!(t, StandardTag::Genre(_)), &["GENRE"])

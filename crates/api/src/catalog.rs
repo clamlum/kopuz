@@ -16,6 +16,11 @@ pub enum CatalogItemKind {
     Artist,
     /// A curated mood or genre page.
     Mood,
+    Podcast,
+    Episode,
+    Video,
+    /// Any other page the source can open, such as a chart.
+    Page,
     #[default]
     Unknown,
 }
@@ -28,13 +33,51 @@ pub struct CatalogItem {
     pub title: String,
     pub subtitle: Option<String>,
     pub artwork: Option<crate::ArtworkRef>,
-    /// Present for [`CatalogItemKind::Track`], so a shelf of songs is
+    /// Present for the kinds that play as one song, so a shelf of them is
     /// playable without a second round trip.
     pub track: Option<TrackInfo>,
+    /// `#rrggbb`, where the source gives the tile a colour.
+    pub accent: Option<String>,
+    pub explicit: bool,
+    pub web_url: Option<String>,
+    pub actions: CatalogActions,
 }
 
-/// A row of tiles. `list` marks the shelves a source renders as a track list
-/// rather than a carousel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Rating {
+    #[default]
+    None,
+    Like,
+    Dislike,
+}
+
+/// Refs are opaque and go back as they came. `None` means the source has no
+/// such action, or for a state, that the page did not say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogActions {
+    pub rate_ref: Option<String>,
+    pub rating: Option<Rating>,
+    pub save_ref: Option<String>,
+    pub saved: Option<bool>,
+    pub follow_ref: Option<String>,
+    pub followed: Option<bool>,
+    /// Only a row of the listening history has one.
+    pub history_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShelfLayout {
+    #[default]
+    Carousel,
+    Grid,
+    List,
+    /// Track rows in columns of four that scroll sideways ("Quick picks").
+    TrackGrid,
+    /// One large tile with a few rows under it ("Top result").
+    Hero,
+}
+
+/// A row of tiles, laid out as `layout` says.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CatalogShelf {
     pub title: String,
@@ -42,7 +85,13 @@ pub struct CatalogShelf {
     pub items: Vec<CatalogItem>,
     /// Opens the shelf's own page, when it has one.
     pub more_ref: Option<String>,
-    pub list: bool,
+    pub layout: ShelfLayout,
+    /// The kind that opens `more_ref`.
+    pub more_kind: CatalogItemKind,
+    /// More items for this shelf, not more shelves for the page.
+    pub continuation: Option<String>,
+    /// On an "all" search, the filter that shows every result of this kind.
+    pub search_filter: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -72,6 +121,29 @@ impl CatalogDetailRequest {
     pub fn artist(artist: &str) -> Self {
         Self::new(CatalogItemKind::Artist, artist)
     }
+
+    pub fn page(id: impl Into<String>) -> Self {
+        Self::new(CatalogItemKind::Page, id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CatalogHeader {
+    #[default]
+    None,
+    Title,
+    /// Artwork beside the title.
+    Detail,
+    /// A full-width banner.
+    Artist,
+}
+
+/// A filter over a page; `id` opens the filtered page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogChip {
+    pub id: String,
+    pub label: String,
+    pub selected: bool,
 }
 
 /// One catalog entity opened: its tracks, or its own shelves, or both.
@@ -91,4 +163,17 @@ pub struct CatalogDetail {
     pub continuation: Option<String>,
     /// For an album, the artist its header opens; absent when it bills nobody.
     pub artist_key: Option<String>,
+    pub header: CatalogHeader,
+    pub chips: Vec<CatalogChip>,
+    /// "Album", "Single", "EP", as the source labels it.
+    pub album_type: Option<String>,
+    /// For an artist; `subtitle` carries its subscribers.
+    pub monthly_listeners: Option<String>,
+    pub owner: Option<String>,
+    /// As the source wrote it ("6.9M views").
+    pub plays: Option<String>,
+    pub web_url: Option<String>,
+    pub actions: CatalogActions,
+    /// Set for a playlist the account owns.
+    pub privacy: Option<crate::PlaylistPrivacy>,
 }

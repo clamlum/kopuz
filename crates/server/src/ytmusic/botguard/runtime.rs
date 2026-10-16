@@ -67,7 +67,8 @@ pub fn run(mut rx: mpsc::UnboundedReceiver<MintRequest>) {
 
         while let Some(req) = rx.recv().await {
             // (Re)negotiate the integrity token on first use or near expiry.
-            let needs_init = warm.as_ref().is_none_or(|w| Instant::now() >= w.refresh_at);
+            let needs_init =
+                req.fresh || warm.as_ref().is_none_or(|w| Instant::now() >= w.refresh_at);
             if needs_init {
                 match init().await {
                     Ok(w) => {

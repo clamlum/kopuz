@@ -31,8 +31,7 @@ pub fn PlaylistDetail(
     let tracks_res = use_tracks_by_keys(active_partition, track_refs);
 
     // Affordances follow the source's capabilities, not what kind of source it is.
-    let caps = *hooks::sources::use_capabilities().read();
-    let can_reorder = caps.playlists == api::PlaylistCapability::Reorder;
+    let caps = hooks::sources::use_capabilities().read().clone();
 
     // A server playlist's contents are refreshed by the daemon, a page at a
     // time, and every page invalidates -- so the list fills in as it arrives
@@ -68,6 +67,8 @@ pub fn PlaylistDetail(
             return rsx! { div { "{i18n::t(\"playlist_not_found\")}" } };
         };
 
+    let can_reorder = caps.playlists == api::PlaylistCapability::Reorder;
+
     let tracks_val = tracks_res.read().clone().unwrap_or_default();
     let track_count = tracks_val.len();
     let tracks_for_delete = tracks_val.clone();
@@ -78,6 +79,17 @@ pub fn PlaylistDetail(
     let pid_for_move_up = playlist_id.clone();
     let pid_for_move_down = playlist_id.clone();
     let pid_for_cover = playlist_id.clone();
+    // A source that keeps details for its playlists keeps them on its side,
+    // so rating, editing and deleting go through its own menu.
+    let remote_menu = caps.playlist_details.then(|| {
+        rsx! {
+            crate::playlist_remote_actions::RemotePlaylistMenu {
+                playlist_id: playlist_id.clone(),
+                name: playlist_name.clone(),
+                on_deleted: move |_| on_close.call(()),
+            }
+        }
+    });
 
     rsx! {
         crate::track_list_view::TrackListView {
@@ -87,6 +99,7 @@ pub fn PlaylistDetail(
             tracks: tracks_val,
             on_close,
             on_start_radio: start_radio,
+            actions: remote_menu,
             enable_metadata: caps.edit_tags,
             on_cover_click: move |_| {
                 let _ = &pid_for_cover;

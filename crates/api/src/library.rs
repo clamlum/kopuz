@@ -47,6 +47,35 @@ pub struct TrackInfo {
     pub artwork: Option<crate::ArtworkRef>,
     /// Every credited artist in billing order; `artist` is the billing as the source shows it.
     pub credits: Vec<ArtistCredit>,
+    pub explicit: bool,
+    /// As the source wrote it ("1.2B plays"), on rows whose listing shows one.
+    pub plays: Option<String>,
+    pub counterpart: Option<TrackCounterpart>,
+}
+
+/// Which cut of a recording a row is, for a source that has both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrackVersion {
+    Song,
+    Video,
+}
+
+impl TrackVersion {
+    pub fn other(self) -> Self {
+        match self {
+            Self::Song => Self::Video,
+            Self::Video => Self::Song,
+        }
+    }
+}
+
+/// The other cut of a row, the target of [`crate::PlayerCommand::SetVersion`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackCounterpart {
+    pub key: String,
+    /// What the counterpart is; the row carrying it is the other one.
+    pub version: TrackVersion,
+    pub duration_ms: Option<u64>,
 }
 
 /// One artist a row credits: what the row calls them, and the key that opens them.
@@ -58,6 +87,11 @@ pub struct ArtistCredit {
 }
 
 impl TrackInfo {
+    /// Which cut this row is, known only when it has a counterpart.
+    pub fn version(&self) -> Option<TrackVersion> {
+        self.counterpart.as_ref().map(|other| other.version.other())
+    }
+
     /// The credit `artist` names in any case, else the lead: credits come in billing order.
     pub fn primary_credit(&self) -> Option<&ArtistCredit> {
         let billed = self.artist.trim();
@@ -183,12 +217,52 @@ pub struct ArtistPage {
     pub total: u32,
 }
 
+/// With no `filter` this is the plain search, answered with `tracks` and
+/// `albums`; a filtered search is answered with `shelves`. A `continuation`
+/// is sent with the filter of the page it continues.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchRequest {
+    pub query: String,
+    pub filter: Option<String>,
+    pub continuation: Option<String>,
+}
+
+impl SearchRequest {
+    pub fn new(query: impl Into<String>) -> Self {
+        Self {
+            query: query.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn filtered(query: impl Into<String>, filter: impl Into<String>) -> Self {
+        Self {
+            query: query.into(),
+            filter: Some(filter.into()),
+            continuation: None,
+        }
+    }
+}
+
 /// What a search turned up. Remote sources answer over the network, so this
 /// is one call rather than a filter the caller composes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SearchResults {
     pub tracks: Vec<TrackInfo>,
     pub albums: Vec<AlbumInfo>,
+    pub shelves: Vec<crate::CatalogShelf>,
+    pub continuation: Option<String>,
+    /// What the source searched for instead, when it corrected the query.
+    pub correction: Option<String>,
+}
+
+/// A query to run, or with `item`, a direct hit to open.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SearchSuggestion {
+    pub text: String,
+    /// A query the account searched for before.
+    pub from_history: bool,
+    pub item: Option<crate::CatalogItem>,
 }
 
 impl TrackInfo {

@@ -3,6 +3,7 @@
 
 pub mod lastfm;
 pub mod librefm;
+pub mod listenbrainz;
 pub mod musicbrainz;
 pub mod queue;
 

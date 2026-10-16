@@ -81,7 +81,13 @@ fn apply_state(ctrl: &mut PlayerController, state: PlayerState) -> DaemonClock {
     );
     set_if_changed(
         &mut ctrl.playback_error,
-        state.error.as_ref().map(|error| error.message.clone()),
+        state
+            .error
+            .as_ref()
+            .map(|error| crate::use_player_controller::PlaybackError {
+                code: Some(error.code),
+                message: error.message.clone(),
+            }),
     );
     // Which device an integration is playing on, so a picker can mark it and
     // the bottombar can say playback is somewhere else.

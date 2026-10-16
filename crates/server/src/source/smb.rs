@@ -10,8 +10,8 @@ use lofty::file::TaggedFileExt;
 use sha2::{Digest, Sha256};
 
 use super::{
-    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibrarySnapshot, MediaSource,
-    PlaylistOps, RadioSeeds, SourceError, StreamInfo,
+    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibraryActions,
+    LibrarySnapshot, MediaSource, PlaylistOps, RadioSeeds, SourceError, StreamInfo,
 };
 use crate::server_ops::ServerConn;
 use crate::smb::{Location, SmbStream};
@@ -62,18 +62,25 @@ impl MediaSource for SmbSource {
             browse_folders: false,
             external_devices: false,
             browser_playback: false,
+            accounts: false,
             sync: true,
             downloads: false,
             uploads: false,
             storage_quota: false,
             discover: false,
             dont_recommend: false,
+            music_videos: false,
             radio: RadioSeeds::NONE,
             play_queue: false,
             playlists: PlaylistOps::None,
             artist_view: ArtistView::Library,
             albums: AlbumType::Standard,
             favorites_sync: FavoritesSync::Instant,
+            account_avatar: false,
+            stream_quality: false,
+            explicit_flags: false,
+            watch_history: false,
+            library_actions: LibraryActions::NONE,
         }
     }
 
@@ -236,7 +243,11 @@ impl MediaSource for SmbSource {
         Ok(resolved)
     }
 
-    async fn resolve_stream(&self, _: &str) -> Result<StreamInfo, SourceError> {
+    async fn resolve_stream(
+        &self,
+        _: &str,
+        _: config::StreamQuality,
+    ) -> Result<StreamInfo, SourceError> {
         Err(SourceError::unsupported("SMB stream URLs"))
     }
 

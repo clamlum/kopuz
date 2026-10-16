@@ -26,7 +26,8 @@ pub use sources::{MAX_MUSIC_UPLOAD_BYTES, StorageQuota, TrackUpload};
 
 pub use artwork::{ArtworkData, ArtworkRef, ArtworkRequest, ArtworkTarget};
 pub use catalog::{
-    CatalogDetail, CatalogDetailRequest, CatalogItem, CatalogItemKind, CatalogPage, CatalogShelf,
+    CatalogActions, CatalogChip, CatalogDetail, CatalogDetailRequest, CatalogHeader, CatalogItem,
+    CatalogItemKind, CatalogPage, CatalogShelf, Rating, ShelfLayout,
 };
 pub use error::{ApiError, ErrorBody, ErrorCode};
 pub use events::{ApiEvent, JobKind, JobProgress, NoticeLevel, SourceState, Table};
@@ -35,15 +36,19 @@ pub use jobs::{
 };
 pub use library::{
     AlbumInfo, AlbumPage, ArtistCredit, ArtistDetail, ArtistInfo, ArtistPage, DEFAULT_PAGE_LIMIT,
-    LyricChunkView, LyricLineView, LyricsView, Page, SearchResults, StatsView, TrackFilter,
-    TrackInfo, TrackPage, TrackSort,
+    LyricChunkView, LyricLineView, LyricsView, Page, SearchRequest, SearchResults,
+    SearchSuggestion, StatsView, TrackCounterpart, TrackFilter, TrackInfo, TrackPage, TrackSort,
+    TrackVersion,
 };
 pub use mutations::{ArtworkChange, ArtworkUpload, TrackMetadataPatch};
 pub use player::{
     BufferedRange, ExternalDevice, ExternalPlayback, FadingState, Intent, LoopMode, Phase,
-    PlayerCommand, PlayerState, PositionAnchor, QueueSummary, TrackKind,
+    PlayerCommand, PlayerState, PositionAnchor, QueueSummary, TrackKind, VideoChunk, VideoRequest,
 };
-pub use playlists::{PlaylistCatalog, PlaylistFolderInfo, PlaylistInfo, PlaylistReorder};
+pub use playlists::{
+    PlaylistCatalog, PlaylistEdit, PlaylistFolderInfo, PlaylistInfo, PlaylistPrivacy,
+    PlaylistReorder,
+};
 pub use queue::{
     QueueContext, QueueEdit, QueueItem, QueueMode, QueueSnapshot, QueueWindow, SetQueueRequest,
 };
@@ -53,9 +58,11 @@ pub use schema::{
     encode_directories, spec_value, toggle_of, value_of,
 };
 pub use sources::{
-    AlbumPresentation, ArtistPresentation, ConnectKind, CredentialProvision, DraftCheck,
-    FavoritesSyncMode, IntegrationInfo, PlaylistCapability, ServiceInfo, ServiceRef, SignInKind,
-    SourceCapabilities, SourceDraft, SourceFolderEntry, SourceInfo, SourceLoginRequest,
+    AlbumPresentation, ArtistPresentation, BrowserProfile, BrowserSession, CheckOutcome, CheckStep,
+    ConnectKind, ConnectionCheck, CredentialProvision, DraftCheck, FavoritesSyncMode,
+    IntegrationInfo, PageEntry, PlaylistCapability, SearchFilter, ServiceInfo, ServiceRef,
+    SignInKind, SourceAccount, SourceCapabilities, SourceDraft, SourceFolderEntry, SourceInfo,
+    SourceLoginRequest,
 };
 
 /// The config view: the layered config with credential keys
@@ -152,6 +159,10 @@ pub trait PlayerApi: Send + Sync {
         source_id: String,
         device_id: Option<String>,
     ) -> Result<(), ApiError>;
+
+    /// A byte range of a queued music video's picture for a muted element, which follows
+    /// [`PlayerState::position`] less `output_latency_ms` one to one.
+    async fn video(&self, request: VideoRequest) -> Result<VideoChunk, ApiError>;
 }
 
 /// Reading the library, and the per-track state that belongs to it.
@@ -200,7 +211,10 @@ pub trait LibraryApi: Send + Sync {
 
     /// Search the active source. Remote sources answer over the network, so
     /// this is a daemon call and not a filter the caller composes.
-    async fn search(&self, query: String) -> Result<SearchResults, ApiError>;
+    async fn search(&self, request: SearchRequest) -> Result<SearchResults, ApiError>;
+
+    /// Completions for a half-typed query; empty for a source that offers none.
+    async fn search_suggestions(&self, query: String) -> Result<Vec<SearchSuggestion>, ApiError>;
 
     /// The source's public page for a row, for a share action. `None` when the
     /// source has no web pages, which is a client's cue to fall back to a
@@ -259,6 +273,15 @@ pub trait LibraryApi: Send + Sync {
     /// it holds for the track, so the local favorite row is cleared with it.
     async fn dont_recommend(&self, key: String) -> Result<(), ApiError>;
 
+    /// Takes a `rate_ref` or a track's key; a like on a song also sets its favorite.
+    async fn rate(&self, item_ref: String, rating: Rating) -> Result<(), ApiError>;
+
+    async fn follow(&self, artist_ref: String, follow: bool) -> Result<(), ApiError>;
+
+    async fn save(&self, item_ref: String, saved: bool) -> Result<(), ApiError>;
+
+    async fn remove_from_history(&self, token: String) -> Result<(), ApiError>;
+
     /// Rewrite one track's tags, and its embedded cover with them. Only
     /// files have tags to edit; a server track answers `unsupported`.
     async fn update_track_metadata(&self, patch: TrackMetadataPatch)
@@ -291,6 +314,9 @@ pub trait PlaylistApi: Send + Sync {
     async fn create_playlist(&self, name: String, keys: Vec<String>) -> Result<String, ApiError>;
 
     async fn rename_playlist(&self, id: String, name: String) -> Result<(), ApiError>;
+
+    /// A description or privacy needs `playlist_details` and goes to the source with the name.
+    async fn edit_playlist(&self, id: String, edit: PlaylistEdit) -> Result<(), ApiError>;
 
     async fn delete_playlist(&self, id: String) -> Result<(), ApiError>;
 
@@ -445,6 +471,16 @@ pub trait SourceApi: Send + Sync {
     /// learns that the source is authenticated, never with what.
     async fn authenticate_source(&self, id: String) -> Result<SourceInfo, ApiError>;
 
+    /// Profiles on the daemon's machine already signed in to `service`.
+    async fn browser_sessions(&self, service: String) -> Result<Vec<BrowserSession>, ApiError>;
+
+    /// The browser can stay open.
+    async fn import_browser_session(
+        &self,
+        id: String,
+        session: String,
+    ) -> Result<SourceInfo, ApiError>;
+
     /// List folders on a server that has them, for a folder picker.
     async fn browse_source(
         &self,
@@ -454,6 +490,20 @@ pub trait SourceApi: Send + Sync {
 
     /// Probe whether a source is reachable and still signed in.
     async fn validate_source(&self, id: String) -> Result<SourceState, ApiError>;
+
+    async fn accounts(&self, id: String) -> Result<Vec<SourceAccount>, ApiError>;
+
+    /// `None` is the signed-in account itself. On the active source playback
+    /// stops and the library, playlists and favorites sync again.
+    async fn switch_account(
+        &self,
+        id: String,
+        account: Option<String>,
+    ) -> Result<SourceInfo, ApiError>;
+
+    /// Walk each step of reaching a source and playing from it, and report
+    /// every one, so a failure says which part broke. Records nothing.
+    async fn test_source_connection(&self, id: String) -> Result<Vec<ConnectionCheck>, ApiError>;
 
     /// Whether this daemon can run a browser sign-in at all. A sandboxed
     /// daemon cannot spawn one, and a client asks before offering a source
@@ -476,6 +526,18 @@ pub trait SourceApi: Send + Sync {
 
     /// Run a service's web sign-in and keep the session key it returns.
     async fn authenticate_integration(&self, id: String) -> Result<IntegrationInfo, ApiError>;
+
+    /// The browser profiles on the daemon's machine, for an integration
+    /// connected from one.
+    async fn browser_profiles(&self) -> Result<Vec<BrowserProfile>, ApiError>;
+
+    /// Take an integration's credential from a browser profile signed in to
+    /// it, checked with the service before it is kept.
+    async fn connect_integration_from_browser(
+        &self,
+        id: String,
+        profile: String,
+    ) -> Result<IntegrationInfo, ApiError>;
 }
 
 /// The settings surface.

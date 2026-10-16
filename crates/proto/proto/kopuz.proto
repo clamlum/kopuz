@@ -28,6 +28,7 @@ service Kopuz {
   rpc SetVolume(SetVolume) returns (MutationResult);
   rpc SetMuted(SetMuted) returns (MutationResult);
   rpc SetMode(SetMode) returns (MutationResult);
+  rpc SetVersion(SetVersion) returns (MutationResult);
 
   rpc GetStatus(GetStatusRequest) returns (DaemonStatus);
   rpc GetPlayerState(GetPlayerStateRequest) returns (PlayerState);
@@ -49,6 +50,7 @@ service Kopuz {
   rpc GetGenreTracks(GenreTracksRequest) returns (TrackPage);
   rpc GetRecentTracks(Page) returns (TrackPage);
   rpc Search(SearchRequest) returns (SearchResults);
+  rpc GetSearchSuggestions(SearchSuggestionsRequest) returns (SearchSuggestions);
   rpc GetTrackWebUrl(TrackWebUrlRequest) returns (WebUrl);
   rpc GetAlbumWebUrl(AlbumWebUrlRequest) returns (WebUrl);
   rpc GetCatalog(CatalogRequest) returns (CatalogPage);
@@ -84,6 +86,10 @@ service Kopuz {
   rpc SelectExternalDevice(SelectExternalDeviceRequest) returns (Unit);
   rpc SetFavorite(FavoriteRequest) returns (SetFavoriteResponse);
   rpc DontRecommend(DontRecommendRequest) returns (Unit);
+  rpc Rate(RateRequest) returns (Unit);
+  rpc Follow(FollowRequest) returns (Unit);
+  rpc Save(SaveRequest) returns (Unit);
+  rpc RemoveFromHistory(RemoveFromHistoryRequest) returns (Unit);
   rpc UpdateTrackMetadata(TrackMetadataPatch) returns (TrackInfo);
   rpc DeleteTracks(DeleteTracksRequest) returns (Unit);
   rpc DeleteAlbum(DeleteAlbumRequest) returns (Unit);
@@ -119,15 +125,23 @@ service Kopuz {
   rpc LoginSource(SourceLoginRequest) returns (SourceInfo);
   rpc ClearCredentials(SourceId) returns (Unit);
   rpc AuthenticateSource(SourceId) returns (SourceInfo);
+  rpc GetBrowserSessions(GetBrowserSessionsRequest) returns (BrowserSessionList);
+  rpc ImportBrowserSession(ImportBrowserSessionRequest) returns (SourceInfo);
   rpc BrowseSource(BrowseSourceRequest) returns (SourceFolderList);
   rpc ValidateSource(SourceId) returns (SourceStateResponse);
+  rpc TestSourceConnection(SourceId) returns (ConnectionReport);
   rpc CanOpenBrowser(CanOpenBrowserRequest) returns (BrowserAccess);
+  rpc GetSourceAccounts(SourceId) returns (SourceAccountList);
+  rpc SwitchSourceAccount(SwitchSourceAccountRequest) returns (SourceInfo);
   rpc GetIntegrations(GetIntegrationsRequest) returns (IntegrationList);
   rpc SetIntegrationSettings(SetIntegrationSettingsRequest) returns (IntegrationInfo);
   rpc ClearIntegration(IntegrationId) returns (Unit);
   rpc AuthenticateIntegration(IntegrationId) returns (IntegrationInfo);
+  rpc GetBrowserProfiles(GetBrowserProfilesRequest) returns (BrowserProfileList);
+  rpc ConnectIntegrationFromBrowser(ConnectIntegrationFromBrowserRequest) returns (IntegrationInfo);
 
   rpc GetArtwork(ArtworkRequest) returns (stream ArtworkChunk);
+  rpc GetVideo(VideoRequest) returns (VideoChunk);
 }
 
 // One message per RPC even when it carries nothing, so any of them can gain
@@ -150,6 +164,20 @@ message GetConfigRequest {}
 message SetFavoriteResponse {}
 // Stop recommending one track, by its library key.
 message DontRecommendRequest { string key = 1; }
+// Rate by a CatalogActions.rate_ref or a track's key.
+message RateRequest {
+  string item_ref = 1;
+  Rating rating = 2;
+}
+message FollowRequest {
+  string artist_ref = 1;
+  bool follow = 2;
+}
+message SaveRequest {
+  string item_ref = 1;
+  bool saved = 2;
+}
+message RemoveFromHistoryRequest { string token = 1; }
 message CancelJobResponse {}
 message RemoveDownloadResponse {}
 
@@ -180,6 +208,11 @@ message SetMuted {
 message SetMode {
   optional bool shuffle = 1;
   optional LoopMode loop = 2;
+}
+
+// Swap the playing track for its other cut, at the same place in the song.
+message SetVersion {
+  TrackVersion version = 1;
 }
 
 message MutationResult {
@@ -579,6 +612,24 @@ message GenreTracksRequest {
 
 message SearchRequest {
   string query = 1;
+  // One of the source's search filters; absent is its plain search.
+  optional string filter = 2;
+  optional string continuation = 3;
+}
+
+message SearchSuggestionsRequest {
+  string query = 1;
+}
+
+// A query to run, or with item, a direct hit to open.
+message SearchSuggestion {
+  string text = 1;
+  bool from_history = 2;
+  optional CatalogItem item = 3;
+}
+
+message SearchSuggestions {
+  repeated SearchSuggestion suggestions = 1;
 }
 
 message TrackWebUrlRequest {
@@ -602,6 +653,9 @@ message RefreshArtistArtworkRequest {
 message SearchResults {
   repeated TrackInfo tracks = 1;
   repeated AlbumInfo albums = 2;
+  repeated CatalogShelf shelves = 3;
+  optional string continuation = 4;
+  optional string correction = 5;
 }
 
 // ---------------- settings schema ----------------
@@ -749,6 +803,37 @@ message SourceCapabilities {
   bool search_radio = 18;
   bool uploads = 19;
   bool storage_quota = 20;
+  // The catalog pages it offers, in the order to list them.
+  repeated PageEntry pages = 31;
+  bool rate = 32;
+  bool follow = 21;
+  bool save = 22;
+  bool remove_from_history = 23;
+  // A playlist has a description and a privacy to edit.
+  bool playlist_details = 24;
+  repeated SearchFilter search_filters = 25;
+  // Its rows can have a music video cut, whose picture GetVideo serves.
+  bool music_videos = 27;
+  // One sign-in holds several accounts a client can switch between.
+  bool accounts = 26;
+  // It offers several formats per track, chosen by stream_quality.
+  bool stream_quality = 28;
+  // Its listings mark explicit tracks.
+  bool explicit_flags = 29;
+  // It keeps a watch history of the account's plays.
+  bool watch_history = 30;
+}
+
+message SearchFilter {
+  string id = 1;
+  Text label = 2;
+}
+
+// A catalog page a frontend can link to; opened as CATALOG_ITEM_PAGE with id.
+message PageEntry {
+  string id = 1;
+  Text label = 2;
+  Icon icon = 3;
 }
 
 // What making a source usable takes.
@@ -810,6 +895,7 @@ message SourceInfo {
   bool permanent = 19;
   // What the daemon's last probe found; absent until it has probed this source.
   optional SourceState state = 20;
+  optional ArtworkRef avatar = 21;
 }
 
 message GetSourcesRequest {}
@@ -872,11 +958,75 @@ message SourceFolderList {
   repeated SourceFolderEntry entries = 1;
 }
 
+message GetBrowserSessionsRequest {
+  string service = 1;
+}
+
+// A browser profile on the daemon's machine signed in to a service.
+message BrowserSession {
+  string id = 1;
+  string browser = 2;
+  string profile = 3;
+  optional string account = 4;
+}
+
+message BrowserSessionList {
+  repeated BrowserSession sessions = 1;
+}
+
+message ImportBrowserSessionRequest {
+  string id = 1;
+  string session = 2;
+}
+
 message SourceStateResponse {
   SourceState state = 1;
 }
 
+message ConnectionReport {
+  repeated ConnectionCheck checks = 1;
+}
+
+message ConnectionCheck {
+  CheckStep step = 1;
+  CheckOutcome outcome = 2;
+  string detail = 3;
+}
+
+enum CheckStep {
+  CHECK_STEP_UNSPECIFIED = 0;
+  CHECK_STEP_REACH = 1;
+  CHECK_STEP_SESSION = 2;
+  CHECK_STEP_SIGNED_IN_PLAYBACK = 3;
+  CHECK_STEP_ANONYMOUS_PLAYBACK = 4;
+  CHECK_STEP_PLAYBACK_TOKEN = 5;
+}
+
+enum CheckOutcome {
+  CHECK_OUTCOME_UNSPECIFIED = 0;
+  CHECK_OUTCOME_PASSED = 1;
+  CHECK_OUTCOME_FAILED = 2;
+  CHECK_OUTCOME_SKIPPED = 3;
+}
+
 message CanOpenBrowserRequest {}
+
+// An absent id is the signed-in account itself.
+message SourceAccount {
+  optional string id = 1;
+  string name = 2;
+  optional string handle = 3;
+  bool active = 4;
+}
+
+message SourceAccountList {
+  repeated SourceAccount accounts = 1;
+}
+
+message SwitchSourceAccountRequest {
+  string id = 1;
+  optional string account = 2;
+}
 
 // False on a sandboxed daemon that cannot spawn a browser for a sign-in.
 message BrowserAccess {
@@ -889,6 +1039,8 @@ enum ConnectKind {
   // Nothing to press: filling the fields in is the whole of it.
   CONNECT_KIND_NONE = 1;
   CONNECT_KIND_WEB_SIGN_IN = 2;
+  // Pick a browser profile already signed in to the service.
+  CONNECT_KIND_BROWSER_PROFILE = 3;
 }
 
 message GetIntegrationsRequest {}
@@ -915,6 +1067,24 @@ message IntegrationId {
 message SetIntegrationSettingsRequest {
   string id = 1;
   repeated FieldValue values = 2;
+}
+
+message GetBrowserProfilesRequest {}
+
+// A browser profile on the daemon's machine. The id is opaque.
+message BrowserProfile {
+  string id = 1;
+  string browser = 2;
+  string name = 3;
+}
+
+message BrowserProfileList {
+  repeated BrowserProfile profiles = 1;
+}
+
+message ConnectIntegrationFromBrowserRequest {
+  string id = 1;
+  string profile = 2;
 }
 
 // ---------------- mutations ----------------
@@ -970,6 +1140,52 @@ enum CatalogItemKind {
   CATALOG_ITEM_PLAYLIST = 3;
   CATALOG_ITEM_ARTIST = 4;
   CATALOG_ITEM_MOOD = 5;
+  CATALOG_ITEM_PODCAST = 6;
+  CATALOG_ITEM_EPISODE = 7;
+  CATALOG_ITEM_VIDEO = 8;
+  CATALOG_ITEM_PAGE = 9;
+}
+
+enum ShelfLayout {
+  SHELF_LAYOUT_CAROUSEL = 0;
+  SHELF_LAYOUT_GRID = 1;
+  SHELF_LAYOUT_LIST = 2;
+  SHELF_LAYOUT_TRACK_GRID = 3;
+  SHELF_LAYOUT_HERO = 4;
+}
+
+enum CatalogHeader {
+  CATALOG_HEADER_NONE = 0;
+  CATALOG_HEADER_TITLE = 1;
+  CATALOG_HEADER_DETAIL = 2;
+  CATALOG_HEADER_ARTIST = 3;
+}
+
+enum Rating {
+  RATING_UNSPECIFIED = 0;
+  RATING_NONE = 1;
+  RATING_LIKE = 2;
+  RATING_DISLIKE = 3;
+}
+
+enum PlaylistPrivacy {
+  PLAYLIST_PRIVACY_UNSPECIFIED = 0;
+  PLAYLIST_PRIVACY_PRIVATE = 1;
+  PLAYLIST_PRIVACY_UNLISTED = 2;
+  PLAYLIST_PRIVACY_PUBLIC = 3;
+}
+
+// Refs are opaque. Unset means no such action, or for a state, that the page
+// did not say.
+message CatalogActions {
+  optional string rate_ref = 1;
+  optional Rating rating = 2;
+  optional string save_ref = 3;
+  optional bool saved = 4;
+  optional string follow_ref = 5;
+  optional bool followed = 6;
+  // Only on a row of the listening history.
+  optional string history_token = 7;
 }
 
 message CatalogItem {
@@ -978,8 +1194,13 @@ message CatalogItem {
   string title = 3;
   optional string subtitle = 4;
   optional ArtworkRef artwork = 5;
-  // Set for tracks, so a shelf of songs is playable without a second call.
+  // Set for tracks, videos and episodes.
   optional TrackInfo track = 6;
+  // #rrggbb
+  optional string accent = 7;
+  bool explicit = 9;
+  optional string web_url = 10;
+  CatalogActions actions = 8;
 }
 
 message CatalogShelf {
@@ -987,7 +1208,21 @@ message CatalogShelf {
   optional string strapline = 2;
   repeated CatalogItem items = 3;
   optional string more_ref = 4;
-  bool list = 5;
+  reserved 5; // was list, now layout LIST
+  ShelfLayout layout = 6;
+  // The kind that opens more_ref.
+  CatalogItemKind more_kind = 7;
+  // More items for this shelf.
+  optional string continuation = 8;
+  // On a search's "all" results, the filter showing every result of its kind.
+  optional string search_filter = 9;
+}
+
+// A filter over a page; id opens the filtered page as CATALOG_ITEM_PAGE.
+message CatalogChip {
+  string id = 1;
+  string label = 2;
+  bool selected = 3;
 }
 
 message CatalogRequest {
@@ -1020,6 +1255,18 @@ message CatalogDetail {
   optional string continuation = 11;
   // For an album, the artist its header opens; absent when it bills nobody.
   optional string artist_key = 12;
+  CatalogHeader header = 13;
+  repeated CatalogChip chips = 14;
+  // For an album: "Album", "Single", "EP", as the source labels it.
+  optional string album_type = 17;
+  // For an artist; subtitle carries its subscribers.
+  optional string monthly_listeners = 18;
+  optional string owner = 19;
+  optional string plays = 20;
+  optional string web_url = 21;
+  CatalogActions actions = 15;
+  // Set for a playlist the account owns.
+  optional PlaylistPrivacy privacy = 16;
 }
 
 // ---------------- radio ----------------
@@ -1106,6 +1353,10 @@ message CreatePlaylistRequest {
 message RenamePlaylistRequest {
   string id = 1;
   string name = 2;
+  // Either of these makes it an edit: the source is sent the description,
+  // the privacy and a non-empty name together.
+  optional string description = 3;
+  optional PlaylistPrivacy privacy = 4;
 }
 
 message AddPlaylistTracksRequest {
@@ -1168,6 +1419,24 @@ message TrackInfo {
   optional ArtworkRef artwork = 21;
   // Every credited artist in billing order, each with the key that opens it where there is one.
   repeated ArtistCredit credits = 23;
+  bool explicit = 24;
+  // How often it was played or watched, as the source wrote it ("1.2B plays").
+  optional string plays = 25;
+  optional TrackCounterpart counterpart = 26;
+}
+
+// Which cut of a recording a row is, for a source that has both.
+enum TrackVersion {
+  TRACK_VERSION_UNSPECIFIED = 0;
+  TRACK_VERSION_SONG = 1;
+  TRACK_VERSION_VIDEO = 2;
+}
+
+message TrackCounterpart {
+  string key = 1;
+  // What the counterpart is; the row carrying it is the other one.
+  TrackVersion version = 2;
+  optional uint64 duration_ms = 3;
 }
 
 // An artist key is minted by the daemon; a frontend compares and passes it back, never reads it.
@@ -1507,6 +1776,10 @@ message Config {
   uint32 lyrics_depth_blur_strength = 68;
   ReplayGainSettings replay_gain = 70;
   bool muted = 71;
+  StreamQuality stream_quality = 72;
+  bool autoplay_radio = 73;
+  bool skip_explicit = 74;
+  bool pause_watch_history = 75;
 }
 
 enum AlbumViewMode {
@@ -1534,6 +1807,13 @@ enum ChannelMode {
   CHANNEL_MODE_LEFT_ONLY = 3;
   CHANNEL_MODE_RIGHT_ONLY = 4;
   CHANNEL_MODE_SWAP_LEFT_RIGHT = 5;
+}
+
+enum StreamQuality {
+  STREAM_QUALITY_UNSPECIFIED = 0;
+  STREAM_QUALITY_LOW = 1;
+  STREAM_QUALITY_NORMAL = 2;
+  STREAM_QUALITY_HIGH = 3;
 }
 
 enum DeviceChangeBehavior {
@@ -1673,6 +1953,8 @@ message ArtworkTarget {
     string catalog = 5;
     string station = 6;
     string artist_key = 7;
+    // A source id: the picture of the account it is signed in as.
+    string account = 8;
   }
 }
 
@@ -1693,8 +1975,26 @@ message ArtworkRequest {
     string catalog = 6;
     string station = 7;
     string artist_key = 8;
+    string account = 9;
   }
   bool hq = 4;
+}
+
+// The picture follows the playing cut's position anchor one to one.
+message VideoRequest {
+  // A queued track whose version is the video.
+  string key = 1;
+  uint64 start = 2;
+  // At most this many bytes; the daemon may send fewer.
+  optional uint64 length = 3;
+}
+
+message VideoChunk {
+  string content_type = 1;
+  uint64 start = 2;
+  // The whole stream's length, when the source says.
+  optional uint64 total = 3;
+  bytes data = 4;
 }
 
 message ArtworkChunk {
@@ -1724,6 +2024,9 @@ enum ErrorCode {
   ERROR_CODE_DAEMON_GONE = 9;
   ERROR_CODE_UNSUPPORTED = 7;
   ERROR_CODE_INTERNAL = 8;
+  ERROR_CODE_SOURCE_CHALLENGED = 10;
+  ERROR_CODE_SOURCE_REFUSED = 11;
+  ERROR_CODE_ITEM_UNAVAILABLE = 12;
 }
 
 enum Phase {

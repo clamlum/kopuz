@@ -14,12 +14,22 @@ pub fn capabilities_to_proto(value: &api::SourceCapabilities) -> SourceCapabilit
         storage_quota: value.storage_quota,
         discover: value.discover,
         dont_recommend: value.dont_recommend,
+        rate: value.rate,
+        follow: value.follow,
+        save: value.save,
+        remove_from_history: value.remove_from_history,
+        playlist_details: value.playlist_details,
         track_radio: value.track_radio,
         playlist_radio: value.playlist_radio,
         search_radio: value.search_radio,
         browse_folders: value.browse_folders,
         external_devices: value.external_devices,
         browser_playback: value.browser_playback,
+        music_videos: value.music_videos,
+        accounts: value.accounts,
+        stream_quality: value.stream_quality,
+        explicit_flags: value.explicit_flags,
+        watch_history: value.watch_history,
         playlists: match value.playlists {
             PlaylistCapability::None => crate::PlaylistCapability::None,
             PlaylistCapability::AddRemove => crate::PlaylistCapability::AddRemove,
@@ -37,6 +47,53 @@ pub fn capabilities_to_proto(value: &api::SourceCapabilities) -> SourceCapabilit
             FavoritesSyncMode::Instant => crate::FavoritesSyncMode::FavoritesSyncInstant,
             FavoritesSyncMode::Paginated => crate::FavoritesSyncMode::FavoritesSyncPaginated,
         } as i32,
+        pages: value.pages.iter().map(page_entry_to_proto).collect(),
+        search_filters: value
+            .search_filters
+            .iter()
+            .map(|filter| SearchFilter {
+                id: filter.id.clone(),
+                label: Some(text_to_proto(&filter.label)),
+            })
+            .collect(),
+    }
+}
+
+pub fn page_entry_to_proto(value: &api::PageEntry) -> PageEntry {
+    PageEntry {
+        id: value.id.clone(),
+        label: Some(text_to_proto(&value.label)),
+        icon: Some(icon_to_proto(&value.icon)),
+    }
+}
+
+pub fn page_entry_from_proto(value: &PageEntry) -> api::PageEntry {
+    api::PageEntry {
+        id: value.id.clone(),
+        label: value
+            .label
+            .as_ref()
+            .map(text_from_proto)
+            .unwrap_or_default(),
+        icon: value.icon.as_ref().map(icon_from_proto).unwrap_or_default(),
+    }
+}
+
+pub fn source_account_to_proto(value: &api::SourceAccount) -> SourceAccount {
+    SourceAccount {
+        id: value.id.clone(),
+        name: value.name.clone(),
+        handle: value.handle.clone(),
+        active: value.active,
+    }
+}
+
+pub fn source_account_from_proto(value: &SourceAccount) -> api::SourceAccount {
+    api::SourceAccount {
+        id: value.id.clone(),
+        name: value.name.clone(),
+        handle: value.handle.clone(),
+        active: value.active,
     }
 }
 
@@ -55,12 +112,22 @@ pub fn capabilities_from_proto(value: Option<&SourceCapabilities>) -> api::Sourc
         storage_quota: value.storage_quota,
         discover: value.discover,
         dont_recommend: value.dont_recommend,
+        rate: value.rate,
+        follow: value.follow,
+        save: value.save,
+        remove_from_history: value.remove_from_history,
+        playlist_details: value.playlist_details,
         track_radio: value.track_radio,
         playlist_radio: value.playlist_radio,
         search_radio: value.search_radio,
         browse_folders: value.browse_folders,
         external_devices: value.external_devices,
         browser_playback: value.browser_playback,
+        music_videos: value.music_videos,
+        accounts: value.accounts,
+        stream_quality: value.stream_quality,
+        explicit_flags: value.explicit_flags,
+        watch_history: value.watch_history,
         playlists: match crate::PlaylistCapability::try_from(value.playlists) {
             Ok(crate::PlaylistCapability::AddRemove) => api::PlaylistCapability::AddRemove,
             Ok(crate::PlaylistCapability::Reorder) => api::PlaylistCapability::Reorder,
@@ -80,6 +147,19 @@ pub fn capabilities_from_proto(value: Option<&SourceCapabilities>) -> api::Sourc
             }
             _ => api::FavoritesSyncMode::Instant,
         },
+        pages: value.pages.iter().map(page_entry_from_proto).collect(),
+        search_filters: value
+            .search_filters
+            .iter()
+            .map(|filter| api::SearchFilter {
+                id: filter.id.clone(),
+                label: filter
+                    .label
+                    .as_ref()
+                    .map(text_from_proto)
+                    .unwrap_or_default(),
+            })
+            .collect(),
     }
 }
 
@@ -171,6 +251,7 @@ pub fn source_info_to_proto(value: &api::SourceInfo) -> SourceInfo {
         state: value
             .state
             .map(|state| super::enums::source_state_to_proto(state) as i32),
+        avatar: value.avatar.as_ref().map(artwork_ref_to_proto),
     }
 }
 
@@ -194,6 +275,7 @@ pub fn source_info_from_proto(value: &SourceInfo) -> api::SourceInfo {
         needs_network: value.needs_network,
         permanent: value.permanent,
         state: value.state.map(super::enums::source_state_from_proto),
+        avatar: value.avatar.as_ref().and_then(artwork_ref_from_proto),
     }
 }
 
@@ -239,12 +321,14 @@ pub fn connect_kind_to_proto(value: api::ConnectKind) -> ConnectKind {
     match value {
         api::ConnectKind::None => ConnectKind::None,
         api::ConnectKind::WebSignIn => ConnectKind::WebSignIn,
+        api::ConnectKind::BrowserProfile => ConnectKind::BrowserProfile,
     }
 }
 
 pub fn connect_kind_from_proto(value: i32) -> api::ConnectKind {
     match ConnectKind::try_from(value) {
         Ok(ConnectKind::WebSignIn) => api::ConnectKind::WebSignIn,
+        Ok(ConnectKind::BrowserProfile) => api::ConnectKind::BrowserProfile,
         Ok(ConnectKind::None) | Ok(ConnectKind::Unspecified) | Err(_) => api::ConnectKind::None,
     }
 }
@@ -268,6 +352,22 @@ pub fn integration_info_from_proto(value: &IntegrationInfo) -> api::IntegrationI
         configured: value.configured,
         connect: connect_kind_from_proto(value.connect),
         fields: value.fields.iter().map(field_spec_from_proto).collect(),
+    }
+}
+
+pub fn browser_profile_to_proto(value: &api::BrowserProfile) -> BrowserProfile {
+    BrowserProfile {
+        id: value.id.clone(),
+        browser: value.browser.clone(),
+        name: value.name.clone(),
+    }
+}
+
+pub fn browser_profile_from_proto(value: &BrowserProfile) -> api::BrowserProfile {
+    api::BrowserProfile {
+        id: value.id.clone(),
+        browser: value.browser.clone(),
+        name: value.name.clone(),
     }
 }
 
@@ -295,6 +395,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_account_round_trips_with_and_without_an_id() {
+        for account in [
+            api::SourceAccount {
+                id: None,
+                name: "Ada".into(),
+                handle: Some("@ada".into()),
+                active: false,
+            },
+            api::SourceAccount {
+                id: Some("1122".into()),
+                name: "Ada Records".into(),
+                handle: None,
+                active: true,
+            },
+        ] {
+            assert_eq!(
+                account,
+                source_account_from_proto(&source_account_to_proto(&account))
+            );
+        }
+    }
+
     /// A source row is what a settings page renders, so every field of it has
     /// to survive the wire -- and none of them may be a credential.
     #[test]
@@ -318,10 +441,24 @@ mod tests {
                 storage_quota: true,
                 browse_folders: true,
                 external_devices: false,
+                music_videos: true,
+                accounts: true,
+                stream_quality: true,
+                explicit_flags: true,
+                watch_history: true,
                 playlists: api::PlaylistCapability::Reorder,
                 artists: api::ArtistPresentation::Library,
                 albums: api::AlbumPresentation::Standard,
                 favorites_sync: api::FavoritesSyncMode::Paginated,
+                pages: vec![api::PageEntry {
+                    id: "FEmusic_home".into(),
+                    label: api::Text::key("home"),
+                    icon: api::Icon::Class("fa-solid fa-house".into()),
+                }],
+                search_filters: vec![api::SearchFilter {
+                    id: "songs".into(),
+                    label: api::Text::key("search_filter_songs"),
+                }],
                 ..Default::default()
             },
             detail: Some("https://jelly.example".into()),
@@ -330,6 +467,10 @@ mod tests {
             needs_network: true,
             permanent: true,
             state: Some(api::SourceState::AuthExpired),
+            avatar: Some(api::ArtworkRef::new(
+                api::ArtworkTarget::Account("yt".into()),
+                9,
+            )),
         };
         assert_eq!(info, source_info_from_proto(&source_info_to_proto(&info)));
         let unprobed = api::SourceInfo {
@@ -398,7 +539,11 @@ mod tests {
     /// carries the same field list -- and, like a source, never a credential.
     #[test]
     fn an_integration_row_round_trips_for_every_connect_kind() {
-        for connect in [api::ConnectKind::None, api::ConnectKind::WebSignIn] {
+        for connect in [
+            api::ConnectKind::None,
+            api::ConnectKind::WebSignIn,
+            api::ConnectKind::BrowserProfile,
+        ] {
             let info = api::IntegrationInfo {
                 id: "listenbrainz".into(),
                 name: api::Text::literal("ListenBrainz"),
@@ -420,6 +565,19 @@ mod tests {
                 integration_info_from_proto(&integration_info_to_proto(&info))
             );
         }
+    }
+
+    #[test]
+    fn a_browser_profile_round_trips() {
+        let profile = api::BrowserProfile {
+            id: "/home/me/.mozilla/firefox/a.default".into(),
+            browser: "Firefox".into(),
+            name: "default".into(),
+        };
+        assert_eq!(
+            profile,
+            browser_profile_from_proto(&browser_profile_to_proto(&profile))
+        );
     }
 
     /// A connect flow this build cannot name is one it cannot run: offer no

@@ -120,7 +120,10 @@ pub fn track_from_song_data(song: &types::TrackData) -> Track {
         playlist_item_id: None,
         artists,
         replay_gain: config::ReplayGainInfo::default(),
+        counterpart: None,
         credits,
+        explicit: false,
+        plays: None,
     }
 }
 
@@ -207,6 +210,9 @@ pub fn track_from_library_song(song: &types::LibrarySongResource) -> Track {
         )],
         artists: vec![song.attributes.artistName.clone()],
         replay_gain: config::ReplayGainInfo::default(),
+        explicit: false,
+        plays: None,
+        counterpart: None,
     }
 }
 

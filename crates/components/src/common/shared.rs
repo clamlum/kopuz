@@ -21,3 +21,11 @@ pub fn fmt_time(secs: u64) -> String {
     let s = secs % 60;
     format!("{m}:{s:02}")
 }
+
+pub(crate) fn copy_to_clipboard(text: &str) {
+    let value = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+    let js = format!(
+        "navigator.clipboard.writeText({value}).catch((e) => console.error('clipboard writeText failed', e));"
+    );
+    let _ = dioxus::document::eval(&js);
+}

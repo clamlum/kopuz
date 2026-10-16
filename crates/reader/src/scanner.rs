@@ -254,6 +254,9 @@ mod tests {
             musicbrainz_track_id: None,
             playlist_item_id: None,
             replay_gain: config::ReplayGainInfo::default(),
+            explicit: false,
+            plays: None,
+            counterpart: None,
         }
     }
 

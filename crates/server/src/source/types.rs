@@ -11,6 +11,24 @@ pub enum SourceError {
     Auth,
     InvalidInput(String),
     Backend(String),
+    /// The source answered, and the answer says why it will not serve this.
+    Refused(Refusal, String),
+}
+
+/// Why a source refused to play something, as far as its answer tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The account's session is no longer accepted.
+    SessionExpired,
+    /// The service wants proof this is not a bot, from this network.
+    Challenged,
+    /// Every way of asking was refused with nothing pointing at the account,
+    /// the network or the item: an outage or a change on the service's side.
+    ServiceRefused,
+    /// No answer came back at all.
+    Network,
+    /// This item cannot be played: removed, private or region-locked.
+    Unavailable,
 }
 
 impl SourceError {
@@ -27,7 +45,9 @@ impl fmt::Display for SourceError {
             SourceError::Auth => {
                 f.write_str("this source isn't signed in - open Settings to re-sign in")
             }
-            SourceError::InvalidInput(m) | SourceError::Backend(m) => f.write_str(m),
+            SourceError::InvalidInput(m) | SourceError::Backend(m) | SourceError::Refused(_, m) => {
+                f.write_str(m)
+            }
         }
     }
 }
@@ -132,6 +152,44 @@ pub struct FavoritesPage {
 pub struct PlaylistPage {
     pub tracks: Vec<reader::Track>,
     pub next: Option<String>,
+    /// Set on the first page, by sources that read a header.
+    pub header: Option<crate::ytmusic::discover::BrowsePage>,
+}
+
+/// Account actions beyond favorites, each backing an optional `MediaSource` op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LibraryActions {
+    pub rate: bool,
+    pub follow: bool,
+    pub save: bool,
+    pub remove_from_history: bool,
+    pub playlist_details: bool,
+}
+
+impl LibraryActions {
+    pub const NONE: Self = Self {
+        rate: false,
+        follow: false,
+        save: false,
+        remove_from_history: false,
+        playlist_details: false,
+    };
+
+    pub const ALL: Self = Self {
+        rate: true,
+        follow: true,
+        save: true,
+        remove_from_history: true,
+        playlist_details: true,
+    };
+}
+
+/// A field left `None` keeps its value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaylistDetails {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub privacy: Option<crate::ytmusic::discover::Privacy>,
 }
 
 /// What looking one artist up found: a photo, and the name the source's own record gives when the lookup went by id.
@@ -161,6 +219,8 @@ pub struct Capabilities {
     pub external_devices: bool,
     /// It plays through a browser on the host, not the engine.
     pub browser_playback: bool,
+    /// One sign-in holds several accounts (YouTube brand accounts).
+    pub accounts: bool,
     pub sync: bool,
     pub downloads: bool,
     pub uploads: bool,
@@ -169,6 +229,8 @@ pub struct Capabilities {
     /// The person can tell it to stop recommending a track — a negative
     /// signal to the source's recommender, not a library edit.
     pub dont_recommend: bool,
+    /// Its tracks can have a music video cut, which plays with a picture.
+    pub music_videos: bool,
     pub radio: RadioSeeds,
     /// It keeps a play queue of its own that other clients read and write.
     pub play_queue: bool,
@@ -176,6 +238,93 @@ pub struct Capabilities {
     pub artist_view: ArtistView,
     pub albums: AlbumType,
     pub favorites_sync: FavoritesSync,
+    pub account_avatar: bool,
+    /// It offers several formats per track, chosen by [`config::StreamQuality`].
+    pub stream_quality: bool,
+    /// Its listings mark explicit tracks, so skipping them can work.
+    pub explicit_flags: bool,
+    /// It keeps a watch history, which `pause_watch_history` stops feeding.
+    pub watch_history: bool,
+    pub library_actions: LibraryActions,
+}
+
+/// `label` is a translation key, `icon` an icon class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogPageEntry {
+    pub id: String,
+    pub label: &'static str,
+    pub icon: &'static str,
+}
+
+/// `label` is a translation key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFilterEntry {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+/// One account a sign-in can act as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceAccount {
+    /// `None` for the signed-in account itself.
+    pub id: Option<String>,
+    pub name: String,
+    pub handle: Option<String>,
+    pub active: bool,
+}
+
+/// One step of a connection test. Mirrors `api::ConnectionCheck`, which this
+/// crate does not depend on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub step: CheckStep,
+    pub outcome: CheckOutcome,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckStep {
+    Reach,
+    Session,
+    SignedInPlayback,
+    AnonymousPlayback,
+    PlaybackToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckOutcome {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+impl Check {
+    pub fn of<T>(
+        step: CheckStep,
+        result: Result<T, String>,
+        detail: impl FnOnce(T) -> String,
+    ) -> Self {
+        match result {
+            Ok(value) => Check {
+                step,
+                outcome: CheckOutcome::Passed,
+                detail: detail(value),
+            },
+            Err(error) => Check {
+                step,
+                outcome: CheckOutcome::Failed,
+                detail: error,
+            },
+        }
+    }
+
+    pub fn skipped(step: CheckStep, why: &str) -> Self {
+        Check {
+            step,
+            outcome: CheckOutcome::Skipped,
+            detail: why.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +344,16 @@ pub struct StreamInfo {
     pub loudness_db: Option<f32>,
 }
 
+/// A picture-only stream, fetched by range. The URL is the source's and is
+/// never handed to a frontend.
+#[derive(Debug, Clone)]
+pub struct VideoStream {
+    pub url: String,
+    pub content_type: String,
+    pub user_agent: Option<String>,
+    pub content_length: Option<u64>,
+}
+
 pub struct PlaylistMeta {
     pub id: String,
     pub name: String,
@@ -208,9 +367,12 @@ pub struct RemoteAlbum {
     pub artist: Option<String>,
     pub artist_id: Option<String>,
     pub year: Option<String>,
+    pub album_type: Option<String>,
+    pub description: Option<String>,
     pub thumbnail: Option<String>,
     pub audio_playlist_id: Option<String>,
     pub tracks: Vec<reader::Track>,
+    pub actions: crate::ytmusic::discover::ItemActions,
 }
 
 impl From<crate::ytmusic::discover::YtAlbum> for RemoteAlbum {
@@ -221,9 +383,12 @@ impl From<crate::ytmusic::discover::YtAlbum> for RemoteAlbum {
             artist: a.artist,
             artist_id: a.artist_id,
             year: a.year,
+            album_type: a.album_type,
+            description: a.description,
             thumbnail: a.thumbnail,
             audio_playlist_id: a.audio_playlist_id,
             tracks: a.tracks,
+            actions: a.actions,
         }
     }
 }

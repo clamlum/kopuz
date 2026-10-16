@@ -12,25 +12,17 @@
 
 use std::sync::Arc;
 
-use api::{ApiError, PlaylistCatalog, PlaylistFolderInfo, PlaylistInfo, PlaylistReorder, Table};
+use api::{
+    ApiError, PlaylistCatalog, PlaylistEdit, PlaylistFolderInfo, PlaylistInfo, PlaylistPrivacy,
+    PlaylistReorder, Table,
+};
 
 use crate::session::SessionHandle;
+use crate::sources::source_error;
 
 pub struct PlaylistService {
     db: db::Db,
     session: SessionHandle,
-}
-
-fn source_error(error: server::source::SourceError) -> ApiError {
-    use api::ErrorCode;
-    use server::source::SourceError;
-    match &error {
-        SourceError::Unsupported(what) => ApiError::unsupported(*what),
-        SourceError::Auth => ApiError::new(ErrorCode::SourceAuthExpired, error.to_string()),
-        SourceError::Connectivity => ApiError::new(ErrorCode::SourceUnreachable, error.to_string()),
-        SourceError::InvalidInput(message) => ApiError::invalid_input(message.clone()),
-        SourceError::Backend(message) => ApiError::internal(message.clone()),
-    }
 }
 
 fn db_error(error: db::DbError) -> ApiError {
@@ -154,11 +146,51 @@ impl PlaylistService {
         Ok(())
     }
 
+    /// A name alone is a local rename. A description or privacy goes to the
+    /// source first, name and all.
+    pub async fn edit(&self, id: &str, edit: PlaylistEdit) -> Result<(), ApiError> {
+        use server::ytmusic::discover::Privacy;
+        if edit.description.is_some() || edit.privacy.is_some() {
+            let source = self.active_source();
+            if !source.capabilities().library_actions.playlist_details {
+                return Err(ApiError::unsupported("playlist details"));
+            }
+            let details = server::source::PlaylistDetails {
+                name: edit.name.clone(),
+                description: edit.description,
+                privacy: edit.privacy.map(|privacy| match privacy {
+                    PlaylistPrivacy::Private => Privacy::Private,
+                    PlaylistPrivacy::Unlisted => Privacy::Unlisted,
+                    PlaylistPrivacy::Public => Privacy::Public,
+                }),
+            };
+            source
+                .edit_playlist(id, &details)
+                .await
+                .map_err(source_error)?;
+        }
+        match edit.name {
+            Some(name) => self.rename(id, &name).await,
+            None => {
+                self.session.invalidate(Table::Playlists);
+                Ok(())
+            }
+        }
+    }
+
     pub async fn delete(&self, id: &str) -> Result<(), ApiError> {
-        self.active_source()
-            .delete_playlist(id)
-            .await
-            .map_err(source_error)?;
+        let source = self.active_source();
+        // Only an expired sign-in stops the delete: an unreachable source or a
+        // playlist the remote no longer has would otherwise leave a row nobody
+        // can remove.
+        match source.delete_remote_playlist(id).await {
+            Ok(()) => {}
+            Err(error @ server::source::SourceError::Auth) => return Err(source_error(error)),
+            Err(error) => {
+                tracing::warn!(%error, playlist = id, "remote playlist delete failed; deleting locally");
+            }
+        }
+        source.delete_playlist(id).await.map_err(source_error)?;
         self.session.invalidate(Table::Playlists);
         // A deleted playlist leaves every folder that held it.
         self.session.invalidate(Table::Folders);

@@ -147,10 +147,12 @@ pub fn BottombarVaxry(
         PlayerBarPosition::Top => "bottom",
     };
     let bar_as_fullscreen = *is_fullscreen.read() && config.read().fullscreen_use_player_bar;
+    // `backdrop-blur-xl` makes the bar a stacking context, so its menus can
+    // only rise as high as the bar itself does over the page.
     let lift_class = if bar_as_fullscreen {
         "relative z-[60]"
     } else {
-        ""
+        "relative z-30"
     };
     let bg_class =
         if config.read().cover_art_background || !config.read().custom_background_path.is_empty() {

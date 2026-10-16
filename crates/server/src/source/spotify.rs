@@ -5,7 +5,7 @@ use db::Db;
 use crate::server_ops::ServerConn;
 
 use super::{
-    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesPage, FavoritesSync,
+    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesPage, FavoritesSync, LibraryActions,
     LibrarySnapshot, MediaSource, PlaylistMeta, PlaylistOps, RadioSeeds, SourceError, StreamInfo,
 };
 
@@ -64,22 +64,33 @@ impl MediaSource for SpotifySource {
             browse_folders: false,
             external_devices: true,
             browser_playback: true,
+            accounts: false,
             sync: true,
             downloads: false,
             uploads: false,
             storage_quota: false,
             discover: true,
             dont_recommend: false,
+            music_videos: false,
             radio: RadioSeeds::NONE,
             play_queue: false,
             playlists: PlaylistOps::None,
             artist_view: ArtistView::Library,
             albums: AlbumType::Standard,
             favorites_sync: FavoritesSync::Paginated,
+            account_avatar: false,
+            stream_quality: false,
+            explicit_flags: false,
+            watch_history: false,
+            library_actions: LibraryActions::NONE,
         }
     }
 
-    async fn resolve_stream(&self, _item_id: &str) -> Result<StreamInfo, SourceError> {
+    async fn resolve_stream(
+        &self,
+        _item_id: &str,
+        _: config::StreamQuality,
+    ) -> Result<StreamInfo, SourceError> {
         Err(SourceError::unsupported(
             "Spotify playback (handled by the browser player)",
         ))

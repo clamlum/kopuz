@@ -744,6 +744,10 @@ impl Storage for Native {
         writes::clear_favorite_dirty(&self.pool(), server_id, ref_).await
     }
 
+    async fn discard_pending_favorites(&self, server_id: &str) -> Result<(), DbError> {
+        writes::discard_pending_favorites(&self.pool(), server_id).await
+    }
+
     async fn replace_favorites_clean(
         &self,
         server_id: &str,

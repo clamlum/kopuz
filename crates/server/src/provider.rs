@@ -109,12 +109,11 @@ impl ProviderClient {
     }
 }
 
-/// Whether a YT Music cookie string is still a valid signed-in session. Used by
-/// the session-resume flow, which has no resolved source yet (the server may not
+/// What YouTube says about a YT Music cookie string. Used by the
+/// session-resume flow, which has no resolved source yet (the server may not
 /// be the active one), so it can't go through [`MediaSource`](crate::source).
-pub async fn validate_ytmusic_cookies(cookies: &str) -> bool {
+pub async fn check_ytmusic_session(cookies: &str) -> crate::ytmusic::SessionCheck {
     YouTubeMusicClient::with_cookies(cookies.to_string())
-        .validate_cookies()
+        .check_session()
         .await
-        .is_ok()
 }

@@ -618,6 +618,10 @@ pub trait Storage: ReadStore {
     /// clean, a pending-unlike tombstone is deleted.
     async fn clear_favorite_dirty(&self, server_id: &str, ref_: &str) -> Result<(), DbError>;
 
+    /// Drop a server's unpushed favorite changes, likes and unlike tombstones
+    /// alike. Synced rows stay for the next pull to reconcile.
+    async fn discard_pending_favorites(&self, server_id: &str) -> Result<(), DbError>;
+
     /// Replace a server's favorites with the remote set (a sync pull): rows not in
     /// `refs` and not `dirty` are dropped, rows in `refs` are added clean. Dirty
     /// local rows are preserved (push-before-pull hasn't flushed them yet).

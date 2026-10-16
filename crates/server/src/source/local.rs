@@ -3,8 +3,8 @@ use config::Source;
 use db::Db;
 
 use super::{
-    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, MediaSource, PlaylistOps,
-    RadioSeeds, SourceError, StreamInfo, mirror_created,
+    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibraryActions, MediaSource,
+    PlaylistOps, RadioSeeds, SourceError, StreamInfo, mirror_created,
 };
 
 pub(super) struct LocalSource {
@@ -30,18 +30,25 @@ impl MediaSource for LocalSource {
             browse_folders: false,
             external_devices: false,
             browser_playback: false,
+            accounts: false,
             sync: false,
             downloads: false,
             uploads: false,
             storage_quota: false,
             discover: false,
             dont_recommend: false,
+            music_videos: false,
             radio: RadioSeeds::NONE,
             play_queue: false,
             playlists: PlaylistOps::Reorder,
             artist_view: ArtistView::Library,
             albums: AlbumType::Standard,
             favorites_sync: FavoritesSync::Instant,
+            account_avatar: false,
+            stream_quality: false,
+            explicit_flags: false,
+            watch_history: false,
+            library_actions: LibraryActions::NONE,
         }
     }
 
@@ -88,7 +95,11 @@ impl MediaSource for LocalSource {
             .map_err(SourceError::from)
     }
 
-    async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError> {
+    async fn resolve_stream(
+        &self,
+        item_id: &str,
+        _: config::StreamQuality,
+    ) -> Result<StreamInfo, SourceError> {
         Ok(StreamInfo {
             url: item_id.to_string(),
             format: None,

@@ -21,9 +21,37 @@ pub struct LocalApi {
     pub(super) integrations: Option<Arc<crate::integrations::IntegrationService>>,
     pub(super) downloader: Option<Arc<crate::url_download::UrlDownloadService>>,
     pub(super) spotify: Option<Arc<crate::spotify::SpotifySink>>,
+    pub(super) video: Option<Arc<crate::video::VideoService>>,
 }
 
 impl LocalApi {
+    fn resync_after_account_switch(&self) {
+        let Some(runner) = self.jobs.clone() else {
+            return;
+        };
+        let (library, playlists, favorites) = (
+            self.library.clone(),
+            self.playlists.clone(),
+            self.favorites.clone(),
+        );
+        let start = move |kind: api::JobKind| {
+            let started = match kind {
+                api::JobKind::LibrarySync => library
+                    .as_ref()
+                    .map(|library| library.spawn_remote_sync(&runner)),
+                api::JobKind::PlaylistSync => playlists
+                    .as_ref()
+                    .map(|playlists| playlists.spawn_sync(&runner)),
+                api::JobKind::FavoritesSync => favorites
+                    .as_ref()
+                    .map(|favorites| favorites.spawn_sync(&runner)),
+                _ => None,
+            };
+            started.unwrap_or_else(|| Err(ApiError::unsupported("no service for this sync")))
+        };
+        start_syncs(start, self.session.subscribe());
+    }
+
     pub fn new(session: SessionHandle) -> Self {
         Self {
             session,
@@ -42,7 +70,13 @@ impl LocalApi {
             integrations: None,
             downloader: None,
             spotify: None,
+            video: None,
         }
+    }
+
+    pub fn with_video(mut self, video: Arc<crate::video::VideoService>) -> Self {
+        self.video = Some(video);
+        self
     }
 
     pub fn with_library(mut self, library: Arc<crate::library::LibraryService>) -> Self {
@@ -107,6 +141,12 @@ impl LocalApi {
             .ok_or_else(|| ApiError::unsupported("this daemon runs read-only"))
     }
 
+    fn favorites_service(&self) -> Result<&crate::favorites::FavoritesService, ApiError> {
+        self.favorites
+            .as_deref()
+            .ok_or_else(|| ApiError::unsupported("this daemon runs without a favorites service"))
+    }
+
     fn catalog(&self) -> Result<&crate::catalog::CatalogService, ApiError> {
         self.catalog
             .as_deref()
@@ -136,6 +176,16 @@ impl LocalApi {
     ) -> Self {
         self.integrations = Some(integrations);
         self
+    }
+
+    async fn recovering<T, A>(&self, mut attempt: impl FnMut() -> A) -> Result<T, ApiError>
+    where
+        A: std::future::Future<Output = Result<T, ApiError>>,
+    {
+        match &self.sources {
+            Some(sources) => sources.recovering(attempt).await,
+            None => attempt().await,
+        }
     }
 
     fn sources(&self) -> Result<&crate::sources::SourceService, ApiError> {
@@ -209,23 +259,39 @@ impl api::PlaylistApi for LocalApi {
     }
 
     async fn create_playlist(&self, name: String, keys: Vec<String>) -> Result<String, ApiError> {
-        self.playlists()?.create(&name, &keys).await
+        let (name, keys) = (&name, &keys);
+        self.recovering(|| async move { self.playlists()?.create(name, keys).await })
+            .await
     }
 
     async fn rename_playlist(&self, id: String, name: String) -> Result<(), ApiError> {
-        self.playlists()?.rename(&id, &name).await
+        let (id, name) = (&id, &name);
+        self.recovering(|| async move { self.playlists()?.rename(id, name).await })
+            .await
+    }
+
+    async fn edit_playlist(&self, id: String, edit: api::PlaylistEdit) -> Result<(), ApiError> {
+        let (id, edit) = (&id, &edit);
+        self.recovering(|| async move { self.playlists()?.edit(id, edit.clone()).await })
+            .await
     }
 
     async fn delete_playlist(&self, id: String) -> Result<(), ApiError> {
-        self.playlists()?.delete(&id).await
+        let id = &id;
+        self.recovering(|| async move { self.playlists()?.delete(id).await })
+            .await
     }
 
     async fn add_playlist_tracks(&self, id: String, keys: Vec<String>) -> Result<(), ApiError> {
-        self.playlists()?.add_tracks(&id, &keys).await
+        let (id, keys) = (&id, &keys);
+        self.recovering(|| async move { self.playlists()?.add_tracks(id, keys).await })
+            .await
     }
 
     async fn remove_playlist_track(&self, id: String, index: u32) -> Result<(), ApiError> {
-        self.playlists()?.remove_track(&id, index).await
+        let id = &id;
+        self.recovering(|| async move { self.playlists()?.remove_track(id, index).await })
+            .await
     }
 
     async fn reorder_playlist(
@@ -233,7 +299,9 @@ impl api::PlaylistApi for LocalApi {
         id: String,
         reorder: api::PlaylistReorder,
     ) -> Result<(), ApiError> {
-        self.playlists()?.reorder(&id, reorder).await
+        let id = &id;
+        self.recovering(|| async move { self.playlists()?.reorder(id, reorder).await })
+            .await
     }
 
     async fn refresh_playlist(&self, id: String) -> Result<(), ApiError> {
@@ -241,15 +309,21 @@ impl api::PlaylistApi for LocalApi {
     }
 
     async fn create_playlist_folder(&self, name: String) -> Result<String, ApiError> {
-        self.playlists()?.create_folder(&name).await
+        let name = &name;
+        self.recovering(|| async move { self.playlists()?.create_folder(name).await })
+            .await
     }
 
     async fn rename_playlist_folder(&self, id: String, name: String) -> Result<(), ApiError> {
-        self.playlists()?.rename_folder(&id, &name).await
+        let (id, name) = (&id, &name);
+        self.recovering(|| async move { self.playlists()?.rename_folder(id, name).await })
+            .await
     }
 
     async fn delete_playlist_folder(&self, id: String) -> Result<(), ApiError> {
-        self.playlists()?.delete_folder(&id).await
+        let id = &id;
+        self.recovering(|| async move { self.playlists()?.delete_folder(id).await })
+            .await
     }
 
     async fn move_playlist(
@@ -257,9 +331,13 @@ impl api::PlaylistApi for LocalApi {
         playlist_id: String,
         folder_id: Option<String>,
     ) -> Result<(), ApiError> {
-        self.playlists()?
-            .move_playlist(&playlist_id, folder_id.as_deref())
-            .await
+        let (playlist_id, folder_id) = (&playlist_id, folder_id.as_deref());
+        self.recovering(|| async move {
+            self.playlists()?
+                .move_playlist(playlist_id, folder_id)
+                .await
+        })
+        .await
     }
 }
 
@@ -322,6 +400,14 @@ impl api::PlayerApi for LocalApi {
             .select_device(device_id)
             .await
     }
+
+    async fn video(&self, request: api::VideoRequest) -> Result<api::VideoChunk, ApiError> {
+        self.video
+            .as_deref()
+            .ok_or_else(|| ApiError::unsupported("this daemon runs without music videos"))?
+            .chunk(request)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -364,14 +450,18 @@ impl api::LibraryApi for LocalApi {
     }
 
     async fn catalog(&self, continuation: Option<String>) -> Result<api::CatalogPage, ApiError> {
-        self.catalog()?.catalog(continuation.as_deref()).await
+        let continuation = continuation.as_deref();
+        self.recovering(|| async move { self.catalog()?.catalog(continuation).await })
+            .await
     }
 
     async fn catalog_detail(
         &self,
         request: api::CatalogDetailRequest,
     ) -> Result<api::CatalogDetail, ApiError> {
-        self.catalog()?.detail(request).await
+        let request = &request;
+        self.recovering(|| async move { self.catalog()?.detail(request.clone()).await })
+            .await
     }
 
     async fn radio_stations(&self) -> Result<Vec<api::RadioStationInfo>, ApiError> {
@@ -402,19 +492,27 @@ impl api::LibraryApi for LocalApi {
     }
 
     async fn delete_tracks(&self, keys: Vec<String>, from_disk: bool) -> Result<(), ApiError> {
-        self.mutations()?.delete_tracks(&keys, from_disk).await
+        let keys = &keys;
+        self.recovering(|| async move { self.mutations()?.delete_tracks(keys, from_disk).await })
+            .await
     }
 
     async fn delete_album(&self, id: String, from_disk: bool) -> Result<(), ApiError> {
-        self.mutations()?.delete_album(&id, from_disk).await
+        let id = &id;
+        self.recovering(|| async move { self.mutations()?.delete_album(id, from_disk).await })
+            .await
     }
 
     async fn upload_artwork(&self, upload: api::ArtworkUpload) -> Result<(), ApiError> {
-        self.mutations()?.upload_artwork(upload).await
+        let upload = &upload;
+        self.recovering(|| async move { self.mutations()?.upload_artwork(upload.clone()).await })
+            .await
     }
 
     async fn remove_artwork(&self, target: api::ArtworkTarget) -> Result<(), ApiError> {
-        self.mutations()?.remove_artwork(target).await
+        let target = &target;
+        self.recovering(|| async move { self.mutations()?.remove_artwork(target.clone()).await })
+            .await
     }
 
     async fn artist_tracks(&self, artist: String, page: Page) -> Result<api::TrackPage, ApiError> {
@@ -445,8 +543,18 @@ impl api::LibraryApi for LocalApi {
         self.library()?.recent_tracks(page).await
     }
 
-    async fn search(&self, query: String) -> Result<api::SearchResults, ApiError> {
-        self.library()?.search(&query).await
+    async fn search(&self, request: api::SearchRequest) -> Result<api::SearchResults, ApiError> {
+        match (&request.filter, &request.continuation) {
+            (None, None) => self.library()?.search(&request.query).await,
+            _ => self.catalog()?.search(request).await,
+        }
+    }
+
+    async fn search_suggestions(
+        &self,
+        query: String,
+    ) -> Result<Vec<api::SearchSuggestion>, ApiError> {
+        self.catalog()?.search_suggestions(&query).await
     }
 
     async fn track_web_url(&self, key: String) -> Result<Option<String>, ApiError> {
@@ -462,30 +570,44 @@ impl api::LibraryApi for LocalApi {
     }
 
     async fn favorites(&self) -> Result<api::FavoritesView, ApiError> {
-        match &self.favorites {
-            Some(service) => service.list().await,
-            None => Err(ApiError::unsupported(
-                "this daemon runs without a favorites service",
-            )),
-        }
+        self.recovering(|| async move { self.favorites_service()?.list().await })
+            .await
     }
 
     async fn set_favorite(&self, key: String, favorite: bool) -> Result<(), ApiError> {
-        match &self.favorites {
-            Some(service) => service.set(&key, favorite).await,
-            None => Err(ApiError::unsupported(
-                "this daemon runs without a favorites service",
-            )),
-        }
+        let key = &key;
+        self.recovering(|| async move { self.favorites_service()?.set(key, favorite).await })
+            .await
     }
 
     async fn dont_recommend(&self, key: String) -> Result<(), ApiError> {
-        match &self.favorites {
-            Some(service) => service.dont_recommend(&key).await,
-            None => Err(ApiError::unsupported(
-                "this daemon runs without a favorites service",
-            )),
-        }
+        let key = &key;
+        self.recovering(|| async move { self.favorites_service()?.dont_recommend(key).await })
+            .await
+    }
+
+    async fn rate(&self, item_ref: String, rating: api::Rating) -> Result<(), ApiError> {
+        let item_ref = &item_ref;
+        self.recovering(|| async move { self.favorites_service()?.rate(item_ref, rating).await })
+            .await
+    }
+
+    async fn follow(&self, artist_ref: String, follow: bool) -> Result<(), ApiError> {
+        let artist_ref = &artist_ref;
+        self.recovering(|| async move { self.catalog()?.follow(artist_ref, follow).await })
+            .await
+    }
+
+    async fn save(&self, item_ref: String, saved: bool) -> Result<(), ApiError> {
+        let item_ref = &item_ref;
+        self.recovering(|| async move { self.catalog()?.save(item_ref, saved).await })
+            .await
+    }
+
+    async fn remove_from_history(&self, token: String) -> Result<(), ApiError> {
+        let token = &token;
+        self.recovering(|| async move { self.catalog()?.remove_from_history(token).await })
+            .await
     }
 
     async fn folder_tracks(&self, prefix: String, page: Page) -> Result<api::TrackPage, ApiError> {
@@ -796,6 +918,21 @@ impl api::SourceApi for LocalApi {
         self.sources()?.authenticate_source(&id).await
     }
 
+    async fn browser_sessions(
+        &self,
+        service: String,
+    ) -> Result<Vec<api::BrowserSession>, ApiError> {
+        self.sources()?.browser_sessions(&service).await
+    }
+
+    async fn import_browser_session(
+        &self,
+        id: String,
+        session: String,
+    ) -> Result<api::SourceInfo, ApiError> {
+        self.sources()?.import_browser_session(&id, &session).await
+    }
+
     async fn browse_source(
         &self,
         id: String,
@@ -806,6 +943,29 @@ impl api::SourceApi for LocalApi {
 
     async fn validate_source(&self, id: String) -> Result<api::SourceState, ApiError> {
         self.sources()?.validate_source(&id).await
+    }
+
+    async fn accounts(&self, id: String) -> Result<Vec<api::SourceAccount>, ApiError> {
+        self.sources()?.accounts(&id).await
+    }
+
+    async fn switch_account(
+        &self,
+        id: String,
+        account: Option<String>,
+    ) -> Result<api::SourceInfo, ApiError> {
+        let (info, resync) = self.sources()?.switch_account(&id, account).await?;
+        if resync {
+            self.resync_after_account_switch();
+        }
+        Ok(info)
+    }
+
+    async fn test_source_connection(
+        &self,
+        id: String,
+    ) -> Result<Vec<api::ConnectionCheck>, ApiError> {
+        self.sources()?.test_connection(&id).await
     }
 
     async fn can_open_browser(&self) -> Result<bool, ApiError> {
@@ -830,5 +990,129 @@ impl api::SourceApi for LocalApi {
 
     async fn authenticate_integration(&self, id: String) -> Result<api::IntegrationInfo, ApiError> {
         self.integrations()?.authenticate(&id).await
+    }
+
+    async fn browser_profiles(&self) -> Result<Vec<api::BrowserProfile>, ApiError> {
+        Ok(crate::integrations::browser_profiles())
+    }
+
+    async fn connect_integration_from_browser(
+        &self,
+        id: String,
+        profile: String,
+    ) -> Result<api::IntegrationInfo, ApiError> {
+        self.integrations()?
+            .connect_from_browser(&id, &profile)
+            .await
+    }
+}
+
+/// Start the three sync kinds. A sync already running belongs to the old
+/// account, so a kind that conflicts starts again once that run finishes.
+/// `events` must be subscribed before the call, or a finish that lands right
+/// after a conflict is missed.
+fn start_syncs(
+    mut start: impl FnMut(api::JobKind) -> Result<api::JobRef, ApiError> + Send + 'static,
+    mut events: broadcast::Receiver<ApiEvent>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let mut waiting = Vec::new();
+    let mut attempt = move |kind: api::JobKind, waiting: &mut Vec<api::JobKind>| {
+        waiting.retain(|queued| *queued != kind);
+        match start(kind) {
+            Ok(_) => {}
+            Err(error) if error.code == api::ErrorCode::Conflict => waiting.push(kind),
+            Err(error) => {
+                tracing::debug!(%error, ?kind, "sync after an account switch not started")
+            }
+        }
+    };
+    for kind in [
+        api::JobKind::LibrarySync,
+        api::JobKind::PlaylistSync,
+        api::JobKind::FavoritesSync,
+    ] {
+        attempt(kind, &mut waiting);
+    }
+    if waiting.is_empty() {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        while !waiting.is_empty() {
+            let due = match events.recv().await {
+                Ok(ApiEvent::JobFinished { kind, .. }) if waiting.contains(&kind) => vec![kind],
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => waiting.clone(),
+                Err(broadcast::error::RecvError::Closed) => return,
+            };
+            for kind in due {
+                attempt(kind, &mut waiting);
+            }
+        }
+    }))
+}
+
+#[cfg(test)]
+mod start_syncs_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn finished(kind: api::JobKind) -> ApiEvent {
+        ApiEvent::JobFinished {
+            id: "job-1".into(),
+            kind,
+            ok: true,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sync_already_running_starts_again_when_it_finishes() {
+        let running = Arc::new(Mutex::new(vec![api::JobKind::LibrarySync]));
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let start = {
+            let (running, started) = (running.clone(), started.clone());
+            move |kind| {
+                if running.lock().unwrap().contains(&kind) {
+                    return Err(ApiError::new(api::ErrorCode::Conflict, "running"));
+                }
+                started.lock().unwrap().push(kind);
+                Ok(api::JobRef {
+                    job_id: "job-2".into(),
+                })
+            }
+        };
+        let (events, rx) = broadcast::channel(8);
+        let retry = start_syncs(start, rx).expect("library sync was busy");
+        assert_eq!(
+            *started.lock().unwrap(),
+            [api::JobKind::PlaylistSync, api::JobKind::FavoritesSync]
+        );
+
+        events.send(finished(api::JobKind::PlaylistSync)).unwrap();
+        running.lock().unwrap().clear();
+        events.send(finished(api::JobKind::LibrarySync)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), retry)
+            .await
+            .expect("retry finishes once every kind started")
+            .unwrap();
+        assert_eq!(
+            *started.lock().unwrap(),
+            [
+                api::JobKind::PlaylistSync,
+                api::JobKind::FavoritesSync,
+                api::JobKind::LibrarySync
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_waits_when_every_sync_starts() {
+        let (_events, rx) = broadcast::channel(8);
+        let start = |_| {
+            Ok(api::JobRef {
+                job_id: "job-1".into(),
+            })
+        };
+        assert!(start_syncs(start, rx).is_none());
     }
 }

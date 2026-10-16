@@ -13,6 +13,14 @@ pub enum ErrorCode {
     DaemonGone,
     Unsupported,
     Internal,
+    /// The source wants proof the request is not a bot, from this network.
+    SourceChallenged,
+    /// The source answered and refused, with nothing pointing at the
+    /// account, the network or the item: an outage or a change on its side.
+    SourceRefused,
+    /// The source will not serve this item: removed, private or
+    /// region-locked.
+    ItemUnavailable,
 }
 
 /// A failure carried inside a message rather than as an RPC status: the

@@ -5,9 +5,9 @@ use db::Db;
 use crate::{server_ops::ServerConn, subsonic::SubsonicClient};
 
 use super::{
-    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibrarySnapshot, MediaSource,
-    PlaylistMeta, PlaylistOps, RadioPage, RadioSeeds, RemotePlayQueue, SourceError, StreamInfo,
-    mirror_added, mirror_created,
+    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibraryActions,
+    LibrarySnapshot, MediaSource, PlaylistMeta, PlaylistOps, RadioPage, RadioSeeds,
+    RemotePlayQueue, SourceError, StreamInfo, mirror_added, mirror_created,
 };
 
 pub(super) struct SubsonicSource {
@@ -95,6 +95,9 @@ fn song_to_track(
         artists: credits.iter().map(|credit| credit.name.clone()).collect(),
         credits,
         replay_gain,
+        explicit: false,
+        plays: None,
+        counterpart: None,
     }
 }
 
@@ -250,6 +253,9 @@ impl MediaSource for SubsonicSource {
                         artists: credits.iter().map(|credit| credit.name.clone()).collect(),
                         credits,
                         replay_gain,
+                        explicit: false,
+                        plays: None,
+                        counterpart: None,
                     });
                 }
             }
@@ -275,18 +281,25 @@ impl MediaSource for SubsonicSource {
             browse_folders: false,
             external_devices: false,
             browser_playback: false,
+            accounts: false,
             sync: true,
             downloads: true,
             uploads: false,
             storage_quota: false,
             discover: false,
             dont_recommend: false,
+            music_videos: false,
             radio: RadioSeeds::TRACK,
             play_queue: true,
             playlists: PlaylistOps::Reorder,
             artist_view: ArtistView::Library,
             albums: AlbumType::Standard,
             favorites_sync: FavoritesSync::Instant,
+            account_avatar: false,
+            stream_quality: false,
+            explicit_flags: false,
+            watch_history: false,
+            library_actions: LibraryActions::NONE,
         }
     }
 
@@ -328,7 +341,11 @@ impl MediaSource for SubsonicSource {
         self.remove_playlist_entry(playlist_id, position).await
     }
 
-    async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError> {
+    async fn resolve_stream(
+        &self,
+        item_id: &str,
+        _: config::StreamQuality,
+    ) -> Result<StreamInfo, SourceError> {
         Ok(StreamInfo {
             url: self.client.stream_url(item_id)?,
             format: None,
@@ -622,6 +639,7 @@ mod tests {
             device_id: "test".to_string(),
             apple_music_storefront: String::new(),
             apple_music_language: String::new(),
+            account: None,
             folders: Vec::new(),
         };
         let src = SubsonicSource::new(db, Source::Server("test".to_string()), &conn);

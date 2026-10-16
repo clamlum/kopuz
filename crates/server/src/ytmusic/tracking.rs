@@ -11,7 +11,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use super::clients::{ORIGIN_YOUTUBE_MUSIC, WEB_REMIX};
-use super::innertube::{http_client, sapisid_hash};
+use super::innertube::{http_client, page_id, sapisid_hash};
 
 const SCHEDULED_FLUSH_MS: [u64; 3] = [10_000, 20_000, 30_000];
 const FLUSH_INTERVAL_MS: u64 = 40_000;
@@ -151,10 +151,7 @@ impl Watch {
 /// Which client played it. Left out, the play is taken for youtube.com's
 /// player and stays out of YouTube Music's History.
 fn client_params() -> String {
-    format!(
-        "c={}&cver={}",
-        WEB_REMIX.client_name, WEB_REMIX.client_version
-    )
+    format!("c={}&cver={}", WEB_REMIX.client_name, WEB_REMIX.version())
 }
 
 fn secs(ms: u64) -> String {
@@ -178,7 +175,7 @@ pub async fn ping(url: &str, cookies: &str, visitor: Option<&str>) -> Result<u16
         .header("User-Agent", WEB_REMIX.user_agent)
         .header("X-Goog-Api-Format-Version", "1")
         .header("X-YouTube-Client-Name", WEB_REMIX.client_id)
-        .header("X-YouTube-Client-Version", WEB_REMIX.client_version)
+        .header("X-YouTube-Client-Version", WEB_REMIX.version())
         .header("Origin", ORIGIN_YOUTUBE_MUSIC)
         .header("X-Origin", ORIGIN_YOUTUBE_MUSIC)
         .header("Referer", format!("{ORIGIN_YOUTUBE_MUSIC}/"))
@@ -187,6 +184,9 @@ pub async fn ping(url: &str, cookies: &str, visitor: Option<&str>) -> Result<u16
         .header("Authorization", auth);
     if let Some(visitor) = visitor {
         req = req.header("X-Goog-Visitor-Id", visitor);
+    }
+    if let Some(page_id) = page_id() {
+        req = req.header("X-Goog-PageId", page_id);
     }
     let status = req
         .send()
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(param(&url, "state"), "paused");
         assert_eq!(param(&url, "docid"), "v");
         assert_eq!(param(&url, "c"), "WEB_REMIX");
-        assert_eq!(param(&url, "cver"), WEB_REMIX.client_version);
+        assert_eq!(param(&url, "cver"), WEB_REMIX.version());
     }
 
     #[test]

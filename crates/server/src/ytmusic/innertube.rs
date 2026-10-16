@@ -12,7 +12,7 @@ use super::clients::{ORIGIN_YOUTUBE_MUSIC, YouTubeClient};
 /// Shared HTTP client for all InnerTube + keepalive calls. Keeps the
 /// TLS session and connection pool warm across the dozens of
 /// /youtubei/v1 hits a typical library sync makes.
-pub(super) fn http_client() -> &'static reqwest::Client {
+pub fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new)
 }
@@ -28,6 +28,44 @@ pub fn sapisid_hash(cookies: &str, origin: &str) -> Option<String> {
         "SAPISIDHASH {ts}_{}",
         hex::encode(hasher.finalize())
     ))
+}
+
+tokio::task_local! {
+    /// Unscoped calls act as the Google account itself.
+    static PAGE_ID: Option<String>;
+}
+
+/// Run `call` with every signed-in request in it acting as `page_id`.
+pub(crate) async fn as_account<F: std::future::Future>(
+    page_id: Option<String>,
+    call: F,
+) -> F::Output {
+    PAGE_ID.scope(page_id, call).await
+}
+
+pub(super) fn page_id() -> Option<String> {
+    PAGE_ID.try_with(Clone::clone).ok().flatten()
+}
+
+/// A brand account needs both `X-Goog-PageId` and `context.user.onBehalfOfUser`;
+/// YouTube ignores either one alone.
+pub(super) fn signed(
+    mut req: reqwest::RequestBuilder,
+    body: &mut Value,
+    cookies: &str,
+    auth: String,
+) -> reqwest::RequestBuilder {
+    req = req.header("Cookie", cookies).header("Authorization", auth);
+    if let Some(page_id) = page_id() {
+        req = req.header("X-Goog-PageId", page_id.as_str());
+        if let Some(context) = body.get_mut("context").and_then(Value::as_object_mut) {
+            let user = context.entry("user").or_insert_with(|| json!({}));
+            if let Some(user) = user.as_object_mut() {
+                user.insert("onBehalfOfUser".into(), Value::String(page_id));
+            }
+        }
+    }
+    req
 }
 
 fn cookie_value(header: &str, name: &str) -> Option<String> {
@@ -49,7 +87,7 @@ fn build_context(client: YouTubeClient) -> Value {
     );
     obj.insert(
         "clientVersion".into(),
-        Value::String(client.client_version.into()),
+        Value::String(client.version().into()),
     );
     obj.insert("hl".into(), Value::String("en".into()));
     obj.insert("gl".into(), Value::String("US".into()));
@@ -162,7 +200,7 @@ pub async fn player(
         .header("Content-Type", "application/json")
         .header("X-Goog-Api-Format-Version", "1")
         .header("X-YouTube-Client-Name", client.client_id)
-        .header("X-YouTube-Client-Version", client.client_version);
+        .header("X-YouTube-Client-Version", client.version());
     if client.client_name.starts_with("WEB") {
         req = req
             .header("X-Origin", ORIGIN_YOUTUBE_MUSIC)
@@ -177,7 +215,7 @@ pub async fn player(
     {
         let auth =
             sapisid_hash(c, ORIGIN_YOUTUBE_MUSIC).ok_or_else(|| "SAPISID missing".to_string())?;
-        req = req.header("Cookie", c).header("Authorization", auth);
+        req = signed(req, &mut body, c, auth);
     }
 
     let resp = match req.json(&body).send().await {
@@ -222,9 +260,25 @@ pub async fn post(
     payload: Value,
     cookies: Option<&str>,
 ) -> Result<Value, String> {
+    post_as_visitor(client, endpoint, payload, cookies, None).await
+}
+
+/// Anonymous continuation tokens only answer the visitor they were issued to;
+/// anyone else gets an empty page.
+pub async fn post_as_visitor(
+    client: YouTubeClient,
+    endpoint: &str,
+    payload: Value,
+    cookies: Option<&str>,
+    visitor: Option<&str>,
+) -> Result<Value, String> {
+    let mut context = build_context(client);
+    if let (Some(visitor), Some(fields)) = (visitor, context.as_object_mut()) {
+        fields.insert("visitorData".into(), Value::String(visitor.into()));
+    }
     let mut body = json!({
         "context": {
-            "client": build_context(client),
+            "client": context,
             "user": { "lockedSafetyMode": false }
         },
     });
@@ -239,18 +293,21 @@ pub async fn post(
         .header("Content-Type", "application/json")
         .header("X-Goog-Api-Format-Version", "1")
         .header("X-YouTube-Client-Name", client.client_id)
-        .header("X-YouTube-Client-Version", client.client_version);
+        .header("X-YouTube-Client-Version", client.version());
     if client.client_name.starts_with("WEB") {
         req = req
             .header("X-Origin", ORIGIN_YOUTUBE_MUSIC)
             .header("Referer", format!("{ORIGIN_YOUTUBE_MUSIC}/"));
+    }
+    if let Some(visitor) = visitor {
+        req = req.header("X-Goog-Visitor-Id", visitor);
     }
     if client.login_supported
         && let Some(c) = cookies.filter(|c| !c.is_empty())
     {
         let auth =
             sapisid_hash(c, ORIGIN_YOUTUBE_MUSIC).ok_or_else(|| "SAPISID missing".to_string())?;
-        req = req.header("Cookie", c).header("Authorization", auth);
+        req = signed(req, &mut body, c, auth);
     }
     let resp = req
         .json(&body)
@@ -280,7 +337,7 @@ pub async fn browse(browse_id: &str, cookies: &str) -> Result<Value, String> {
 pub async fn browse_maybe_auth(browse_id: &str, cookies: Option<&str>) -> Result<Value, String> {
     let client = super::clients::WEB_REMIX;
     let context = build_context(client);
-    let body = json!({
+    let mut body = json!({
         "context": { "client": context, "user": { "lockedSafetyMode": false } },
         "browseId": browse_id,
     });
@@ -292,13 +349,13 @@ pub async fn browse_maybe_auth(browse_id: &str, cookies: Option<&str>) -> Result
         .header("Content-Type", "application/json")
         .header("X-Goog-Api-Format-Version", "1")
         .header("X-YouTube-Client-Name", client.client_id)
-        .header("X-YouTube-Client-Version", client.client_version)
+        .header("X-YouTube-Client-Version", client.version())
         .header("X-Origin", ORIGIN_YOUTUBE_MUSIC)
         .header("Referer", format!("{ORIGIN_YOUTUBE_MUSIC}/"));
     if let Some(c) = cookies {
         let auth =
             sapisid_hash(c, ORIGIN_YOUTUBE_MUSIC).ok_or_else(|| "SAPISID missing".to_string())?;
-        req = req.header("Cookie", c).header("Authorization", auth);
+        req = signed(req, &mut body, c, auth);
     }
     let resp = req
         .json(&body)
@@ -336,7 +393,7 @@ pub async fn browse_continuation_maybe_auth(
 ) -> Result<Value, String> {
     let client = super::clients::WEB_REMIX;
     let context = build_context(client);
-    let body = json!({
+    let mut body = json!({
         "context": { "client": context, "user": { "lockedSafetyMode": false } },
     });
     let mut req = http_client()
@@ -347,13 +404,13 @@ pub async fn browse_continuation_maybe_auth(
         .header("Content-Type", "application/json")
         .header("X-Goog-Api-Format-Version", "1")
         .header("X-YouTube-Client-Name", client.client_id)
-        .header("X-YouTube-Client-Version", client.client_version)
+        .header("X-YouTube-Client-Version", client.version())
         .header("X-Origin", ORIGIN_YOUTUBE_MUSIC)
         .header("Referer", format!("{ORIGIN_YOUTUBE_MUSIC}/"));
     if let Some(c) = cookies {
         let auth =
             sapisid_hash(c, ORIGIN_YOUTUBE_MUSIC).ok_or_else(|| "SAPISID missing".to_string())?;
-        req = req.header("Cookie", c).header("Authorization", auth);
+        req = signed(req, &mut body, c, auth);
     }
     let resp = req
         .json(&body)
@@ -373,7 +430,7 @@ pub async fn browse_continuation_maybe_auth(
 pub async fn visitor_id(cookies: Option<&str>) -> Result<String, String> {
     let client = super::clients::WEB_REMIX;
     let context = build_context(client);
-    let body = json!({ "context": { "client": context } });
+    let mut body = json!({ "context": { "client": context } });
     let mut req = http_client()
         .post(format!(
             "{ORIGIN_YOUTUBE_MUSIC}/youtubei/v1/visitor_id?prettyPrint=false"
@@ -381,13 +438,13 @@ pub async fn visitor_id(cookies: Option<&str>) -> Result<String, String> {
         .header("User-Agent", client.user_agent)
         .header("Content-Type", "application/json")
         .header("X-YouTube-Client-Name", client.client_id)
-        .header("X-YouTube-Client-Version", client.client_version)
+        .header("X-YouTube-Client-Version", client.version())
         .header("X-Origin", ORIGIN_YOUTUBE_MUSIC)
         .header("Referer", format!("{ORIGIN_YOUTUBE_MUSIC}/"));
     if let Some(c) = cookies {
         let auth =
             sapisid_hash(c, ORIGIN_YOUTUBE_MUSIC).ok_or_else(|| "SAPISID missing".to_string())?;
-        req = req.header("Cookie", c).header("Authorization", auth);
+        req = signed(req, &mut body, c, auth);
     }
     let resp = req
         .json(&body)
@@ -411,6 +468,43 @@ mod tests {
     const SORRY_PAGE: &str = "<html><head><meta http-equiv=\"content-type\" \
         content=\"text/html; charset=utf-8\"/><title>Sorry...</title><style> body \
         { font-family: verdana, arial, sans-serif; }</style></head><body>...";
+
+    fn sign(body: &mut Value) -> reqwest::Request {
+        let req = reqwest::Client::new().post("https://music.youtube.com/youtubei/v1/browse");
+        signed(req, body, "SAPISID=abc", "SAPISIDHASH 1_x".into())
+            .build()
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn a_brand_account_rides_on_the_header_and_the_context() {
+        let mut body =
+            json!({ "context": { "client": {}, "user": { "lockedSafetyMode": false } } });
+        let req = as_account(Some("4242".into()), async { sign(&mut body) }).await;
+        assert_eq!(req.headers()["X-Goog-PageId"], "4242");
+        assert_eq!(req.headers()["Cookie"], "SAPISID=abc");
+        assert_eq!(body["context"]["user"]["onBehalfOfUser"], "4242");
+        assert_eq!(body["context"]["user"]["lockedSafetyMode"], false);
+
+        let mut bare = json!({ "context": { "client": {} } });
+        as_account(Some("4242".into()), async { sign(&mut bare) }).await;
+        assert_eq!(bare["context"]["user"]["onBehalfOfUser"], "4242");
+    }
+
+    #[tokio::test]
+    async fn the_google_account_itself_sends_no_page_id() {
+        for scoped in [false, true] {
+            let mut body = json!({ "context": { "client": {}, "user": {} } });
+            let req = if scoped {
+                as_account(None, async { sign(&mut body) }).await
+            } else {
+                sign(&mut body)
+            };
+            assert!(req.headers().get("X-Goog-PageId").is_none());
+            assert!(body["context"]["user"].get("onBehalfOfUser").is_none());
+            assert_eq!(req.headers()["Authorization"], "SAPISIDHASH 1_x");
+        }
+    }
 
     #[test]
     fn the_abuse_page_is_recognised_and_nothing_else_is() {

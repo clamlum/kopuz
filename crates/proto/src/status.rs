@@ -18,6 +18,9 @@ pub fn to_status(error: api::ApiError) -> Status {
         api::ErrorCode::Conflict => Code::AlreadyExists,
         api::ErrorCode::Unsupported => Code::Unimplemented,
         api::ErrorCode::SourceUnreachable => Code::Unavailable,
+        api::ErrorCode::SourceChallenged => Code::ResourceExhausted,
+        api::ErrorCode::SourceRefused => Code::Aborted,
+        api::ErrorCode::ItemUnavailable => Code::PermissionDenied,
         // Never sent: the daemon is the thing that would be missing.
         api::ErrorCode::DaemonGone | api::ErrorCode::Internal => Code::Internal,
     };
@@ -38,6 +41,9 @@ pub fn from_status(status: &Status) -> api::ApiError {
         Code::Unimplemented => api::ErrorCode::Unsupported,
         Code::Unavailable if from_transport => api::ErrorCode::DaemonGone,
         Code::Unavailable => api::ErrorCode::SourceUnreachable,
+        Code::ResourceExhausted => api::ErrorCode::SourceChallenged,
+        Code::Aborted => api::ErrorCode::SourceRefused,
+        Code::PermissionDenied => api::ErrorCode::ItemUnavailable,
         _ => api::ErrorCode::Internal,
     };
     api::ApiError {
@@ -62,6 +68,9 @@ mod tests {
             api::ErrorCode::SourceUnreachable,
             api::ErrorCode::Unsupported,
             api::ErrorCode::Internal,
+            api::ErrorCode::SourceChallenged,
+            api::ErrorCode::SourceRefused,
+            api::ErrorCode::ItemUnavailable,
         ];
         for code in codes {
             let error = api::ApiError {

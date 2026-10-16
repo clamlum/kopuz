@@ -28,7 +28,7 @@ const TRACK_COLUMNS: &str = "t.rowid_pk, t.track_key, t.service, \
     t.source_album_id, t.title, \
     t.artist, t.album, t.duration, t.khz, t.bitrate, t.track_number, t.disc_number, \
     mb.release_id AS mb_release_id, mb.recording_id AS mb_recording_id, mb.track_id AS mb_track_id, \
-    t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak";
+    t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays";
 
 /// The rows as tracks, their credits read in one query for the lot.
 async fn with_credits(pool: &SqlitePool, rows: Vec<TrackRow>) -> Result<Vec<Track>, DbError> {
@@ -190,7 +190,7 @@ pub async fn album_tracks(
                   t.source_album_id, t.title, t.artist, t.album, t.duration, t.khz, t.bitrate,
                   t.track_number, t.disc_number,
                   mb.release_id AS "mb_release_id?", mb.recording_id AS "mb_recording_id?", mb.track_id AS "mb_track_id?",
-                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak
+                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays
              FROM tracks t
              LEFT JOIN albums a ON a.source = t.source AND a.source_album_id = t.source_album_id
              LEFT JOIN track_musicbrainz mb ON mb.track_pk = t.rowid_pk
@@ -221,7 +221,7 @@ pub async fn artist_tracks(
                   t.source_album_id, t.title, t.artist, t.album, t.duration, t.khz, t.bitrate,
                   t.track_number, t.disc_number,
                   mb.release_id AS "mb_release_id?", mb.recording_id AS "mb_recording_id?", mb.track_id AS "mb_track_id?",
-                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak
+                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays
              FROM tracks t
              LEFT JOIN albums a ON a.source = t.source AND a.source_album_id = t.source_album_id
              LEFT JOIN track_musicbrainz mb ON mb.track_pk = t.rowid_pk
@@ -273,7 +273,7 @@ pub async fn genre_tracks(
                   t.source_album_id, t.title, t.artist, t.album, t.duration, t.khz, t.bitrate,
                   t.track_number, t.disc_number,
                   mb.release_id AS "mb_release_id?", mb.recording_id AS "mb_recording_id?", mb.track_id AS "mb_track_id?",
-                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak
+                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays
              FROM tracks t
              JOIN albums a ON a.source = t.source AND a.source_album_id = t.source_album_id
              LEFT JOIN track_musicbrainz mb ON mb.track_pk = t.rowid_pk
@@ -308,7 +308,7 @@ pub async fn folder_tracks(
                   t.source_album_id, t.title, t.artist, t.album, t.duration, t.khz, t.bitrate,
                   t.track_number, t.disc_number,
                   mb.release_id AS "mb_release_id?", mb.recording_id AS "mb_recording_id?", mb.track_id AS "mb_track_id?",
-                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak
+                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays
              FROM tracks t
              LEFT JOIN albums a ON a.source = t.source AND a.source_album_id = t.source_album_id
              LEFT JOIN track_musicbrainz mb ON mb.track_pk = t.rowid_pk
@@ -337,7 +337,7 @@ pub async fn artist_sample_tracks(
                   t.source_album_id, t.title, t.artist, t.album, t.duration, t.khz, t.bitrate,
                   t.track_number, t.disc_number,
                   mb.release_id AS "mb_release_id?", mb.recording_id AS "mb_recording_id?", mb.track_id AS "mb_track_id?",
-                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak
+                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays
              FROM tracks t
              JOIN (SELECT MIN(s.rowid_pk) AS track_pk,
                           COALESCE(
@@ -388,7 +388,7 @@ pub async fn search_corpus(pool: &SqlitePool, source: &Source) -> Result<Vec<Tra
                   t.source_album_id, t.title, t.artist, t.album, t.duration, t.khz, t.bitrate,
                   t.track_number, t.disc_number,
                   mb.release_id AS "mb_release_id?", mb.recording_id AS "mb_recording_id?", mb.track_id AS "mb_track_id?",
-                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak
+                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays
              FROM tracks t
              LEFT JOIN albums a ON a.source = t.source AND a.source_album_id = t.source_album_id
              LEFT JOIN track_musicbrainz mb ON mb.track_pk = t.rowid_pk
@@ -428,7 +428,7 @@ pub async fn tracks_by_keys(
                   t.source_album_id, t.title, t.artist, t.album, t.duration, t.khz, t.bitrate,
                   t.track_number, t.disc_number,
                   mb.release_id AS "mb_release_id?", mb.recording_id AS "mb_recording_id?", mb.track_id AS "mb_track_id?",
-                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak
+                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays
              FROM tracks t
              LEFT JOIN albums a ON a.source = t.source AND a.source_album_id = t.source_album_id
              LEFT JOIN track_musicbrainz mb ON mb.track_pk = t.rowid_pk
@@ -466,7 +466,7 @@ pub(crate) async fn refresh_from_library(
                   t.source_album_id, t.title, t.artist, t.album, t.duration, t.khz, t.bitrate,
                   t.track_number, t.disc_number,
                   mb.release_id AS "mb_release_id?", mb.recording_id AS "mb_recording_id?", mb.track_id AS "mb_track_id?",
-                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak
+                  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak, t.explicit, t.plays
              FROM tracks t
              LEFT JOIN albums a ON a.source = t.source AND a.source_album_id = t.source_album_id
              LEFT JOIN track_musicbrainz mb ON mb.track_pk = t.rowid_pk
@@ -761,7 +761,10 @@ mod tests {
             playlist_item_id: None,
             artists: credits.iter().map(|name| name.to_string()).collect(),
             replay_gain: config::ReplayGainInfo::default(),
+            counterpart: None,
             credits: Vec::new(),
+            explicit: false,
+            plays: None,
         }
     }
 

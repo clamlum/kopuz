@@ -9,6 +9,7 @@ kopuz_rust_library(
     name = "server",
     compile_data = glob([
         "src/ytmusic/decipher/solver/*",
+        "src/ytmusic/fixtures/*",
         "tests/fixtures/*",
     ]),
     extra_deps = [
@@ -17,7 +18,10 @@ kopuz_rust_library(
         "//crates/reader",
         "//crates/utils",
     ],
-    test_compile_data = glob(["src/ytmusic/fixtures/*"]),
+    test_compile_data = glob([
+        "src/ytmusic/fixtures/*",
+        "src/ytmusic/testdata/*.json",
+    ]),
 )
 
 rust_test(

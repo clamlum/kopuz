@@ -286,7 +286,15 @@ pub(crate) async fn read_cookies(
 ) -> Result<Vec<Cookie>, String> {
     use sqlx::{ConnectOptions, Row};
 
-    let src = profile_root.join("Default").join("Network").join("Cookies");
+    // An isolated profile is a user-data dir with its store under `Default`;
+    // a listed profile is the profile dir, with `Local State` one level up.
+    let (user_data, src) = match profile_root.join("Network").join("Cookies") {
+        own if own.exists() => (profile_root.parent().unwrap_or(profile_root), own),
+        _ => (
+            profile_root,
+            profile_root.join("Default").join("Network").join("Cookies"),
+        ),
+    };
     if !src.exists() {
         return Err(format!("no Cookies store under {}", profile_root.display()));
     }
@@ -307,8 +315,8 @@ pub(crate) async fn read_cookies(
         }
     }
 
-    let dpapi = load_v10_key(profile_root);
-    let app_bound = load_v20_key(profile_root);
+    let dpapi = load_v10_key(user_data);
+    let app_bound = load_v20_key(user_data);
 
     // Read-write (not read_only) so the rollback journal can recover if the
     // browser was killed mid-write.
@@ -340,7 +348,11 @@ pub(crate) async fn read_cookies(
                 None => continue,
             }
         };
-        out.push(Cookie { name, value });
+        out.push(Cookie {
+            domain: host,
+            name,
+            value,
+        });
     }
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(out)

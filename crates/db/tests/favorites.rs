@@ -119,5 +119,12 @@ async fn favorites_dirty_and_reconcile() {
         vec!["VID_dirty".to_string()]
     );
 
+    // Discarding drops pending likes and unlike tombstones, keeps synced rows.
+    db.set_favorite("srv-1", "VID9", false).await.unwrap(); // tombstone
+    db.discard_pending_favorites("srv-1").await.unwrap();
+    assert!(db.dirty_favorites("srv-1").await.unwrap().is_empty());
+    assert!(db.dirty_unlikes("srv-1").await.unwrap().is_empty());
+    assert_eq!(db.favorites("srv-1").await.unwrap(), vec!["VID_new"]);
+
     let _ = std::fs::remove_dir_all(db_path.parent().unwrap());
 }

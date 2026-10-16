@@ -6,13 +6,19 @@ use db::Db;
 
 use crate::server_ops::ServerConn;
 use crate::ytmusic::tracking::{self, Watch};
-use crate::ytmusic::{YouTubeMusicClient, player};
+use crate::ytmusic::{SessionCheck, YouTubeMusicClient, innertube, player};
 
 use super::{
-    AlbumType, ArtistLookup, ArtistView, AuthOutcome, Capabilities, FavoritesPage, FavoritesSync,
-    MediaSource, PlaylistMeta, PlaylistOps, PlaylistPage, RadioPage, RadioSeeds, RemoteAlbum,
-    SourceError, StreamInfo, mirror_added, mirror_created,
+    AlbumType, ArtistLookup, ArtistView, AuthOutcome, Capabilities, CatalogPageEntry, Check,
+    FavoritesPage, FavoritesSync, LibraryActions, MediaSource, PlaylistDetails, PlaylistMeta,
+    PlaylistOps, PlaylistPage, RadioPage, RadioSeeds, RemoteAlbum, SearchFilterEntry,
+    SourceAccount, SourceError, StreamInfo, VideoStream, mirror_added, mirror_created,
 };
+use crate::ytmusic::browse::{
+    self,
+    search::{self, SearchPage, Suggestion},
+};
+use crate::ytmusic::discover::{self, BrowsePage};
 
 /// YT Music's "Liked Music" auto-playlist. It is not browsed like the user's
 /// other playlists: its contents are the liked songs, which kopuz already keeps
@@ -32,6 +38,7 @@ pub(super) struct YtSource {
     source: Source,
     client: YouTubeMusicClient,
     reported: Arc<Mutex<Option<Reported>>>,
+    account: Option<String>,
 }
 
 impl YtSource {
@@ -39,8 +46,9 @@ impl YtSource {
         Self {
             db,
             source,
-            client: YouTubeMusicClient::with_cookies(conn.token.clone()),
+            client: YouTubeMusicClient::signed_in_as(conn.token.clone(), conn.account.clone()),
             reported: Arc::default(),
+            account: conn.account.clone(),
         }
     }
 
@@ -76,12 +84,14 @@ impl MediaSource for YtSource {
             browse_folders: false,
             external_devices: false,
             browser_playback: false,
+            accounts: self.client.is_authenticated(),
             sync: true,
             downloads: true,
             uploads: false,
             storage_quota: false,
             discover: true,
             dont_recommend: true,
+            music_videos: true,
             radio: RadioSeeds {
                 search: true,
                 ..RadioSeeds::ALL
@@ -91,7 +101,86 @@ impl MediaSource for YtSource {
             artist_view: ArtistView::Remote,
             albums: AlbumType::YtMusic,
             favorites_sync: FavoritesSync::Paginated,
+            account_avatar: true,
+            stream_quality: true,
+            explicit_flags: true,
+            watch_history: self.client.is_authenticated(),
+            library_actions: if self.client.is_authenticated() {
+                LibraryActions::ALL
+            } else {
+                LibraryActions::NONE
+            },
         }
+    }
+
+    async fn rate(&self, item_ref: &str, rating: discover::Rating) -> Result<(), SourceError> {
+        if item_ref.trim().is_empty() {
+            return Err(SourceError::InvalidInput("nothing to rate".into()));
+        }
+        Ok(self.client.rate(item_ref, rating).await?)
+    }
+
+    async fn follow(&self, artist_ref: &str, follow: bool) -> Result<(), SourceError> {
+        if !artist_ref.starts_with("UC") {
+            return Err(SourceError::InvalidInput("not a channel to follow".into()));
+        }
+        Ok(self.client.subscribe(artist_ref, follow).await?)
+    }
+
+    async fn save(&self, item_ref: &str, saved: bool) -> Result<(), SourceError> {
+        if item_ref.trim().is_empty() {
+            return Err(SourceError::InvalidInput("nothing to save".into()));
+        }
+        Ok(self.client.save(item_ref, saved).await?)
+    }
+
+    async fn remove_from_history(&self, token: &str) -> Result<(), SourceError> {
+        if token.trim().is_empty() {
+            return Err(SourceError::InvalidInput("no history token".into()));
+        }
+        Ok(self.client.remove_from_history(token).await?)
+    }
+
+    async fn edit_playlist(
+        &self,
+        playlist_id: &str,
+        details: &PlaylistDetails,
+    ) -> Result<(), SourceError> {
+        if playlist_id == LIKED_MUSIC_ID {
+            return Err(SourceError::InvalidInput(
+                "Liked Music cannot be edited".into(),
+            ));
+        }
+        Ok(self
+            .client
+            .edit_playlist(
+                playlist_id,
+                details.name.as_deref(),
+                details.description.as_deref(),
+                details.privacy,
+            )
+            .await?)
+    }
+
+    /// An owned playlist is deleted; a saved one is only taken out of the library.
+    async fn delete_remote_playlist(&self, playlist_id: &str) -> Result<(), SourceError> {
+        if playlist_id == LIKED_MUSIC_ID || !self.client.is_authenticated() {
+            return Ok(());
+        }
+        let (_, _, header) = self.client.playlist_page(playlist_id, None).await?;
+        // Only an owned playlist's header carries a privacy, so no header means
+        // no telling, and guessing wrong leaves it on YouTube.
+        let header = header.ok_or_else(|| {
+            SourceError::Backend("YouTube Music sent no header for the playlist".into())
+        })?;
+        if header.privacy.is_some() {
+            self.client.delete_playlist(playlist_id).await?;
+        } else {
+            self.client
+                .save(&crate::ytmusic::actions::playlist_ref(playlist_id), false)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn dont_recommend(&self, item_id: &str) -> Result<(), SourceError> {
@@ -102,6 +191,20 @@ impl MediaSource for YtSource {
             .dislike_video(item_id)
             .await
             .map_err(SourceError::from)
+    }
+
+    async fn accounts(&self) -> Result<Vec<SourceAccount>, SourceError> {
+        let listed = self.client.accounts().await?;
+        let chosen = self.account.as_deref();
+        Ok(listed
+            .into_iter()
+            .map(|account| SourceAccount {
+                active: account.page_id.as_deref() == chosen,
+                id: account.page_id,
+                name: account.name,
+                handle: account.handle,
+            })
+            .collect())
     }
 
     async fn start_radio(&self, seed_ref: &str) -> Result<RadioPage, SourceError> {
@@ -145,6 +248,33 @@ impl MediaSource for YtSource {
             .then(|| format!("https://music.youtube.com/browse/{browse_id}"))
     }
 
+    fn artist_web_url(&self, channel_id: &str) -> Option<String> {
+        (!channel_id.trim().is_empty())
+            .then(|| format!("https://music.youtube.com/channel/{channel_id}"))
+    }
+
+    fn playlist_web_url(&self, playlist_id: &str) -> Option<String> {
+        let id = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
+        (!id.trim().is_empty()).then(|| format!("https://music.youtube.com/playlist?list={id}"))
+    }
+
+    async fn fetch_track(&self, item_id: &str) -> Result<Option<reader::Track>, SourceError> {
+        if item_id.trim().is_empty() {
+            return Ok(None);
+        }
+        self.client
+            .fetch_track(item_id)
+            .await
+            .map_err(SourceError::from)
+    }
+
+    async fn account_avatar(&self) -> Result<Option<String>, SourceError> {
+        self.client
+            .account_avatar()
+            .await
+            .map_err(SourceError::from)
+    }
+
     async fn search(
         &self,
         query: &str,
@@ -168,6 +298,156 @@ impl MediaSource for YtSource {
             .discover_continuation(token)
             .await
             .map_err(SourceError::from)
+    }
+
+    fn catalog_pages(&self) -> Vec<CatalogPageEntry> {
+        let page = |id: &str, label, icon| CatalogPageEntry {
+            id: id.to_string(),
+            label,
+            icon,
+        };
+        let mut pages = vec![
+            page(discover::HOME, "home", "fa-solid fa-house"),
+            page(
+                browse::EXPLORE,
+                "catalog_page_explore",
+                "fa-solid fa-compass",
+            ),
+            page(
+                browse::NEW_RELEASES,
+                "new_releases",
+                "fa-solid fa-compact-disc",
+            ),
+            page(
+                browse::CHARTS,
+                "catalog_page_charts",
+                "fa-solid fa-chart-simple",
+            ),
+            page(
+                browse::MOODS,
+                "catalog_page_moods",
+                "fa-solid fa-masks-theater",
+            ),
+            page(
+                browse::PODCASTS,
+                "catalog_page_podcasts",
+                "fa-solid fa-podcast",
+            ),
+        ];
+        if self.client.is_authenticated() {
+            pages.extend([
+                page(
+                    browse::LIBRARY_SONGS,
+                    "catalog_page_library_songs",
+                    "fa-solid fa-music",
+                ),
+                page(
+                    browse::LIBRARY_ALBUMS,
+                    "catalog_page_library_albums",
+                    "fa-solid fa-record-vinyl",
+                ),
+                page(
+                    browse::LIBRARY_ARTISTS,
+                    "catalog_page_library_artists",
+                    "fa-solid fa-microphone",
+                ),
+                page(
+                    browse::LIBRARY_SUBSCRIPTIONS,
+                    "catalog_page_subscriptions",
+                    "fa-solid fa-user-check",
+                ),
+                page(
+                    browse::LIBRARY_PODCASTS,
+                    "catalog_page_library_podcasts",
+                    "fa-solid fa-podcast",
+                ),
+                page(
+                    browse::LIBRARY_UPLOADS,
+                    "catalog_page_uploads",
+                    "fa-solid fa-upload",
+                ),
+                page(
+                    browse::HISTORY,
+                    "catalog_page_history",
+                    "fa-solid fa-clock-rotate-left",
+                ),
+            ]);
+        }
+        pages
+    }
+
+    async fn browse_page(
+        &self,
+        id: &str,
+        continuation: Option<&str>,
+    ) -> Result<BrowsePage, SourceError> {
+        if id.trim().is_empty() {
+            return Err(SourceError::InvalidInput(
+                "a page is opened by its id".into(),
+            ));
+        }
+        Ok(match continuation {
+            Some(token) => self.client.browse_continuation(token).await?,
+            None => self.client.browse_page(id).await?,
+        })
+    }
+
+    fn search_filters(&self) -> Vec<SearchFilterEntry> {
+        let all = SearchFilterEntry {
+            id: search::ALL,
+            label: search::ALL_LABEL,
+        };
+        let library = self.client.is_authenticated().then_some(&search::LIBRARY);
+        std::iter::once(all)
+            .chain(
+                search::FILTERS
+                    .iter()
+                    .chain(library)
+                    .map(|filter| SearchFilterEntry {
+                        id: filter.id,
+                        label: filter.label,
+                    }),
+            )
+            .collect()
+    }
+
+    async fn search_shelves(
+        &self,
+        query: &str,
+        filter: &str,
+        continuation: Option<&str>,
+    ) -> Result<SearchPage, SourceError> {
+        let filter = match filter {
+            search::ALL => None,
+            id => Some(
+                search::filter(id)
+                    .ok_or_else(|| SourceError::InvalidInput(format!("no such filter: {id}")))?,
+            ),
+        };
+        if let Some(token) = continuation {
+            return Ok(search::continued(
+                filter,
+                self.client.browse_continuation(token).await?,
+            ));
+        }
+        if query.trim().is_empty() {
+            return Ok(SearchPage::default());
+        }
+        Ok(self.client.search_page(query, filter).await?)
+    }
+
+    async fn search_suggestions(&self, query: &str) -> Result<Vec<Suggestion>, SourceError> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self.client.search_suggestions(query).await?)
+    }
+
+    async fn related(&self, item_id: &str) -> Result<BrowsePage, SourceError> {
+        if item_id.trim().is_empty() {
+            return Err(SourceError::InvalidInput("track has no video id".into()));
+        }
+        Ok(self.client.related(item_id).await?)
     }
 
     async fn fetch_album_tracks(&self, browse_id: &str) -> Result<Vec<reader::Track>, SourceError> {
@@ -225,10 +505,11 @@ impl MediaSource for YtSource {
         playlist_id: &str,
         cursor: Option<String>,
     ) -> Result<(Vec<reader::Track>, Option<String>), SourceError> {
-        self.client
+        let (tracks, next, _) = self
+            .client
             .playlist_page(playlist_id, cursor.as_deref())
-            .await
-            .map_err(SourceError::from)
+            .await?;
+        Ok((tracks, next))
     }
 
     async fn resolve_album_browse_id(
@@ -381,8 +662,12 @@ impl MediaSource for YtSource {
         self.remove_playlist_entry(playlist_id, position).await
     }
 
-    async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError> {
-        let info = self.client.get_stream(item_id).await?;
+    async fn resolve_stream(
+        &self,
+        item_id: &str,
+        quality: config::StreamQuality,
+    ) -> Result<StreamInfo, SourceError> {
+        let info = self.client.get_stream(item_id, quality).await?;
         Ok(StreamInfo {
             url: info.url,
             format: Some((info.format, info.range_safe)),
@@ -408,12 +693,15 @@ impl MediaSource for YtSource {
                 watch,
             });
         }
-        let (reported, cookies, video_id) = (
+        let (reported, cookies, page_id, video_id) = (
             self.reported.clone(),
             cookies.to_owned(),
+            self.client.page_id().map(str::to_owned),
             item_id.to_owned(),
         );
-        tokio::spawn(async move {
+        // A spawned task leaves the account scope, and a play fetched or
+        // reported as the Google account lands in its History, not the brand's.
+        tokio::spawn(innertube::as_account(page_id.clone(), async move {
             let tracking = match player::playback_tracking(&video_id, &cookies).await {
                 Ok(tracking) => tracking,
                 Err(error) => {
@@ -428,9 +716,9 @@ impl MediaSource for YtSource {
                     .map(|r| r.watch.attach(tracking))
             });
             if let Some(url) = url {
-                send_report(cookies, url);
+                send_report(cookies, page_id, url);
             }
-        });
+        }));
         Ok(())
     }
 
@@ -450,7 +738,11 @@ impl MediaSource for YtSource {
                 .and_then(|r| r.watch.on_position(position_ticks / 10_000))
         });
         if let Some(url) = url {
-            send_report(cookies.to_owned(), url);
+            send_report(
+                cookies.to_owned(),
+                self.client.page_id().map(str::to_owned),
+                url,
+            );
         }
         Ok(())
     }
@@ -473,19 +765,49 @@ impl MediaSource for YtSource {
         };
         let due = watch.on_position(position_ticks / 10_000);
         for url in due.into_iter().chain(watch.finish()) {
-            send_report(cookies.to_owned(), url);
+            send_report(
+                cookies.to_owned(),
+                self.client.page_id().map(str::to_owned),
+                url,
+            );
         }
         Ok(())
     }
 
-    async fn validate(&self) -> AuthOutcome {
-        match self.client.validate_cookies().await {
-            Ok(()) => AuthOutcome::Valid,
-            Err(e) if e.contains("cookies expired") || e.contains("signed out") => {
-                AuthOutcome::Expired
-            }
-            Err(_) => AuthOutcome::Unreachable,
+    async fn counterpart(
+        &self,
+        track: &reader::Track,
+    ) -> Result<Option<reader::Counterpart>, SourceError> {
+        let video_id = track.id.key();
+        if video_id.trim().is_empty() {
+            return Ok(None);
         }
+        Ok(self.client.counterpart(&video_id).await?)
+    }
+
+    async fn video_stream(&self, item_id: &str) -> Result<VideoStream, SourceError> {
+        let stream = self.client.get_video_stream(item_id).await?;
+        Ok(VideoStream {
+            url: stream.url,
+            content_type: stream.mime,
+            user_agent: Some(stream.user_agent),
+            content_length: stream.content_length,
+        })
+    }
+
+    async fn validate(&self) -> AuthOutcome {
+        match self.client.check_session().await {
+            SessionCheck::Valid => AuthOutcome::Valid,
+            SessionCheck::SignedOut => AuthOutcome::Expired,
+            SessionCheck::Unknown(error) => {
+                tracing::warn!(%error, "YouTube Music gave no verdict on the session; keeping it");
+                AuthOutcome::Unreachable
+            }
+        }
+    }
+
+    async fn diagnose(&self) -> Vec<Check> {
+        crate::ytmusic::diagnose::run(&self.client).await
     }
 
     async fn fetch_favorites(&self) -> Result<Vec<String>, SourceError> {
@@ -560,15 +882,20 @@ impl MediaSource for YtSource {
             return Ok(PlaylistPage {
                 tracks: self.liked_music_entries().await?,
                 next: None,
+                header: None,
             });
         }
         // True per-page InnerTube walk so a long playlist streams into the cache
         // (and the UI) instead of blocking on a full fetch every visit.
-        let (tracks, next) = self
+        let (tracks, next, header) = self
             .client
             .playlist_page(playlist_id, cursor.as_deref())
             .await?;
-        Ok(PlaylistPage { tracks, next })
+        Ok(PlaylistPage {
+            tracks,
+            next,
+            header,
+        })
     }
 
     async fn fetch_favorites_page(
@@ -580,15 +907,15 @@ impl MediaSource for YtSource {
     }
 }
 
-fn send_report(cookies: String, url: String) {
-    tokio::spawn(async move {
+fn send_report(cookies: String, page_id: Option<String>, url: String) {
+    tokio::spawn(innertube::as_account(page_id, async move {
         let visitor = player::signed_in_visitor(&cookies).await;
         let endpoint = url.split('?').next().unwrap_or_default();
         match tracking::ping(&url, &cookies, visitor).await {
             Ok(status) => tracing::debug!(endpoint, status, "reported playback"),
             Err(error) => tracing::debug!(endpoint, %error, "playback report failed"),
         }
-    });
+    }));
 }
 
 /// A continuation only answers alongside the mix's playlist id, so the cursor
@@ -623,6 +950,7 @@ mod tests {
             apple_music_storefront: String::new(),
             apple_music_language: String::new(),
             folders: Vec::new(),
+            account: None,
         };
         let src = YtSource::new(db, Source::Server("test".to_string()), &conn);
         (src, dir)

@@ -522,7 +522,7 @@ fn render_listen_now(
                         rsx! {
                         div {
                             key: "{album_id}",
-                            class: "flex items-center bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl cursor-pointer transition-all duration-300 group overflow-hidden pr-4",
+                            class: "flex items-center bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl cursor-pointer transition-all duration-300 group pr-4",
                             onclick: {
                                 let id = album_id.clone();
                                 move |_| on_select_album.call(id.clone())
@@ -532,7 +532,7 @@ fn render_listen_now(
                                 components::dots_menu::open_at_pointer(&evt);
                                 active_card_menu.set(Some(ctx_key.clone()));
                             },
-                            div { class: "w-16 h-16 md:w-20 md:h-20 flex-shrink-0 bg-stone-800/50 relative overflow-hidden",
+                            div { class: "w-16 h-16 md:w-20 md:h-20 flex-shrink-0 bg-stone-800/50 relative overflow-hidden rounded-s-[11px]",
                                 if let Some(url) = cover_url {
                                     img { src: "{url}", class: "w-full h-full object-cover", decoding: "async", loading: "lazy" }
                                 } else {

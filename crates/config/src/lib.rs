@@ -664,6 +664,44 @@ impl OfflineQuality {
     }
 }
 
+/// A source with only one format per track ignores this.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum StreamQuality {
+    Low,
+    /// Never a format a subscription unlocks.
+    Normal,
+    #[default]
+    High,
+}
+
+impl StreamQuality {
+    pub const ALL: &'static [Self] = &[Self::Low, Self::Normal, Self::High];
+
+    pub const fn value_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_value_str(value: &str) -> Self {
+        match value {
+            "low" => Self::Low,
+            "normal" => Self::Normal,
+            _ => Self::High,
+        }
+    }
+
+    pub const fn i18n_key(self) -> &'static str {
+        match self {
+            Self::Low => "stream_quality_low",
+            Self::Normal => "stream_quality_normal",
+            Self::High => "stream_quality_high",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub enum TitlebarMode {
     #[default]
@@ -908,6 +946,15 @@ pub struct AppConfig {
     #[serde(default)]
     pub offline_tracks: HashMap<String, String>,
     #[serde(default)]
+    pub stream_quality: StreamQuality,
+    /// Only a source with track radio can do this.
+    #[serde(default)]
+    pub autoplay_radio: bool,
+    #[serde(default)]
+    pub skip_explicit: bool,
+    #[serde(default)]
+    pub pause_watch_history: bool,
+    #[serde(default)]
     pub player_bar_position: PlayerBarPosition,
     #[serde(default)]
     pub ui_style: UiStyle,
@@ -1129,6 +1176,10 @@ impl Default for AppConfig {
             titlebar_mode: TitlebarMode::Custom,
             offline_quality: OfflineQuality::default(),
             offline_tracks: HashMap::new(),
+            stream_quality: StreamQuality::High,
+            autoplay_radio: false,
+            skip_explicit: false,
+            pause_watch_history: false,
             player_bar_position: PlayerBarPosition::Bottom,
             ui_style: UiStyle::Normal,
             settings_layout: SettingsLayout::Cd,

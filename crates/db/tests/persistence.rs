@@ -45,7 +45,10 @@ fn server_track(id: &str, title: &str) -> Track {
         playlist_item_id: None,
         artists: vec!["Art".into()],
         replay_gain: config::ReplayGainInfo::default(),
+        counterpart: None,
         credits: Vec::new(),
+        explicit: false,
+        plays: None,
     }
 }
 
@@ -58,6 +61,8 @@ async fn seed_active_server(db: &db::Db, id: &str) {
             service: MusicService::YtMusic,
             yt_browser: None,
             yt_anonymous: false,
+            yt_profile: None,
+            account: None,
             apple_music_storefront: "us".into(),
             apple_music_language: "en".into(),
         }],
@@ -70,6 +75,8 @@ async fn seed_active_server(db: &db::Db, id: &str) {
             id: Some(id.into()),
             yt_browser: None,
             yt_anonymous: false,
+            yt_profile: None,
+            account: None,
             apple_music_storefront: "us".into(),
             apple_music_language: "en".into(),
         }),

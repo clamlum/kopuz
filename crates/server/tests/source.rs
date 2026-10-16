@@ -30,6 +30,9 @@ fn track(id: TrackId) -> Track {
         credits: Vec::new(),
         artists: Vec::new(),
         replay_gain: config::ReplayGainInfo::default(),
+        explicit: false,
+        plays: None,
+        counterpart: None,
     }
 }
 

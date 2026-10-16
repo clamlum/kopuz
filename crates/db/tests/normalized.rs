@@ -40,7 +40,10 @@ fn track(key: &str, credits: Vec<ArtistCredit>) -> Track {
         playlist_item_id: None,
         artists: vec!["Ada".into()],
         replay_gain: config::ReplayGainInfo::default(),
+        counterpart: None,
         credits,
+        explicit: false,
+        plays: None,
     }
 }
 
@@ -170,6 +173,8 @@ fn server(token: Option<&str>) -> AppConfig {
             service: MusicService::AppleMusic,
             yt_browser: Some(Browser::Brave),
             yt_anonymous: true,
+            yt_profile: None,
+            account: None,
             apple_music_storefront: "jp".into(),
             apple_music_language: "en".into(),
         }],
@@ -182,6 +187,8 @@ fn server(token: Option<&str>) -> AppConfig {
             id: Some("s1".into()),
             yt_browser: Some(Browser::Brave),
             yt_anonymous: true,
+            yt_profile: None,
+            account: None,
             apple_music_storefront: "jp".into(),
             apple_music_language: "en".into(),
         }),
@@ -559,6 +566,8 @@ async fn a_queue_round_trips_through_its_rows() {
         ..ArtistCredit::linked("Ada", "UC-ada")
     }];
     listed.playlist_item_id = Some("entry-1".into());
+    listed.explicit = true;
+    listed.plays = Some("6.9M plays".into());
     let mut stream = track("station", vec![ArtistCredit::unlinked("Radio")]);
     stream.duration = u64::MAX;
     stream.artists = vec!["Radio".into()];

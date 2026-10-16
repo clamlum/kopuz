@@ -44,10 +44,24 @@ pub enum FavoritesSyncMode {
     Paginated,
 }
 
+/// A catalog page a frontend can link to, opened with [`crate::CatalogItemKind::Page`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageEntry {
+    pub id: String,
+    pub label: Text,
+    pub icon: Icon,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchFilter {
+    pub id: String,
+    pub label: Text,
+}
+
 /// What the active source supports. Every "should this button exist?" question
 /// in a frontend is answered from here, so none of them branches on a service
 /// name.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceCapabilities {
     pub edit_tags: bool,
     pub delete_from_disk: bool,
@@ -63,6 +77,12 @@ pub struct SourceCapabilities {
     pub discover: bool,
     /// It takes a "stop recommending this" signal for a track.
     pub dont_recommend: bool,
+    pub rate: bool,
+    pub follow: bool,
+    pub save: bool,
+    pub remove_from_history: bool,
+    /// A playlist has a description and a privacy `edit_playlist` can change.
+    pub playlist_details: bool,
     pub track_radio: bool,
     pub playlist_radio: bool,
     /// Playing a search result starts a track radio from it rather than
@@ -72,10 +92,24 @@ pub struct SourceCapabilities {
     pub external_devices: bool,
     /// It plays through a browser on the host, not the engine.
     pub browser_playback: bool,
+    /// Rows can have a music video cut, whose picture [`crate::PlayerApi::video`] serves.
+    pub music_videos: bool,
+    /// One sign-in holds several accounts a client can switch between.
+    pub accounts: bool,
+    /// It offers several formats per track, chosen by `stream_quality`.
+    pub stream_quality: bool,
+    /// Its listings mark explicit tracks, so `skip_explicit` has something to skip.
+    pub explicit_flags: bool,
+    /// It keeps a watch history, which `pause_watch_history` stops feeding.
+    pub watch_history: bool,
     pub playlists: PlaylistCapability,
     pub artists: ArtistPresentation,
     pub albums: AlbumPresentation,
     pub favorites_sync: FavoritesSyncMode,
+    /// The catalog pages it offers, in the order to list them.
+    pub pages: Vec<PageEntry>,
+    /// The filters its search takes, in the order to offer them.
+    pub search_filters: Vec<SearchFilter>,
 }
 
 /// What making a source usable takes.
@@ -140,6 +174,17 @@ pub struct SourceInfo {
     pub permanent: bool,
     /// What the daemon's last probe found; `None` until it has probed this source.
     pub state: Option<crate::SourceState>,
+    pub avatar: Option<crate::ArtworkRef>,
+}
+
+/// One account a source's sign-in can act as, such as a YouTube brand account.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceAccount {
+    /// What to switch to; `None` is the signed-in account itself.
+    pub id: Option<String>,
+    pub name: String,
+    pub handle: Option<String>,
+    pub active: bool,
 }
 
 /// A source to create or update, as the answers to a [`ServiceInfo`]'s form.
@@ -193,6 +238,15 @@ pub struct SourceLoginRequest {
     pub password: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrowserSession {
+    pub id: String,
+    pub browser: String,
+    pub profile: String,
+    /// The account the browser itself is signed in to, where it says.
+    pub account: Option<String>,
+}
+
 /// One entry when browsing a server's folder tree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceFolderEntry {
@@ -208,6 +262,19 @@ pub enum ConnectKind {
     None,
     /// The daemon opens a sign-in page and keeps what it returns.
     WebSignIn,
+    /// The person picks one of [`BrowserProfile`]s already signed in to the
+    /// service and the daemon takes the credential from it. The fields stay
+    /// the manual route.
+    BrowserProfile,
+}
+
+/// A profile of a browser on the daemon's machine. `id` is opaque: a client
+/// hands it back to connect from that profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrowserProfile {
+    pub id: String,
+    pub browser: String,
+    pub name: String,
 }
 
 /// Something configured per account rather than per source: a scrobbler, a
@@ -221,6 +288,39 @@ pub struct IntegrationInfo {
     pub configured: bool,
     pub connect: ConnectKind,
     pub fields: Vec<FieldSpec>,
+}
+
+/// One step of a connection test, in the order it ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionCheck {
+    pub step: CheckStep,
+    pub outcome: CheckOutcome,
+    /// What the source answered, for a bug report. Not localized.
+    pub detail: String,
+}
+
+/// What a connection test step looked at. A source runs the steps that apply
+/// to it, so most report only a few.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckStep {
+    /// The service answers at all.
+    Reach,
+    /// The stored sign-in is still accepted.
+    Session,
+    /// A stream for the signed-in account.
+    SignedInPlayback,
+    /// A stream with no account.
+    AnonymousPlayback,
+    /// The token the service asks for when it doubts a request.
+    PlaybackToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckOutcome {
+    Passed,
+    Failed,
+    /// Did not apply, such as a signed-in step with no account.
+    Skipped,
 }
 
 /// Maximum audio payload accepted by either daemon transport.

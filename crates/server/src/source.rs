@@ -104,8 +104,12 @@ pub trait MediaSource: Send + Sync {
     ) -> Result<(), SourceError>;
 
     /// Resolve a playable stream for one item id (local = a file path, server =
-    /// the remote's URL / deciphered stream).
-    async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError>;
+    /// the remote's URL / deciphered stream). One-format sources ignore `quality`.
+    async fn resolve_stream(
+        &self,
+        item_id: &str,
+        quality: config::StreamQuality,
+    ) -> Result<StreamInfo, SourceError>;
 
     /// A seekable protocol-native stream, or `None` to use the resolved URL.
     async fn open_stream(
@@ -133,6 +137,20 @@ pub trait MediaSource: Send + Sync {
 
     /// Check stored creds against the source (local is always [`Valid`](AuthOutcome::Valid)).
     async fn validate(&self) -> AuthOutcome;
+
+    /// Each step of reaching this source and playing from it, for a
+    /// connection test. A source with nothing more to show reports its
+    /// sign-in check alone.
+    async fn diagnose(&self) -> Vec<Check> {
+        let result = match self.validate().await {
+            AuthOutcome::Valid => Ok(()),
+            AuthOutcome::Expired => Err("the sign-in is no longer accepted".to_string()),
+            AuthOutcome::Unreachable => Err("the server did not answer".to_string()),
+        };
+        vec![Check::of(CheckStep::Session, result, |()| {
+            "accepted".to_string()
+        })]
+    }
 
     async fn storage_quota(&self) -> Result<StorageQuota, SourceError> {
         Err(SourceError::unsupported("storage quota"))
@@ -166,12 +184,65 @@ pub trait MediaSource: Send + Sync {
         Err(SourceError::unsupported("playlist reorder"))
     }
 
+    /// The other cut of `track`, when the source pairs them and the track does not say.
+    /// `None` is an answer, not a failure: most tracks have no counterpart.
+    async fn counterpart(
+        &self,
+        _track: &reader::Track,
+    ) -> Result<Option<reader::Counterpart>, SourceError> {
+        Ok(None)
+    }
+
+    /// A video track's picture stream, which the daemon fetches by range for a frontend.
+    async fn video_stream(&self, _item_id: &str) -> Result<VideoStream, SourceError> {
+        Err(SourceError::unsupported("music videos"))
+    }
+
     /// Tell the source to stop recommending `item_id` — YT Music's dislike,
     /// which is a signal to its recommender rather than a library edit. Only
     /// sources whose [`Capabilities::dont_recommend`] is set override this; the
     /// rest inherit the unsupported default.
     async fn dont_recommend(&self, _item_id: &str) -> Result<(), SourceError> {
         Err(SourceError::unsupported("don't recommend"))
+    }
+
+    async fn accounts(&self) -> Result<Vec<SourceAccount>, SourceError> {
+        Err(SourceError::unsupported("accounts"))
+    }
+
+    /// `item_ref` is a ref this source handed out, or a track's key.
+    async fn rate(
+        &self,
+        _item_ref: &str,
+        _rating: crate::ytmusic::discover::Rating,
+    ) -> Result<(), SourceError> {
+        Err(SourceError::unsupported("rating"))
+    }
+
+    async fn follow(&self, _artist_ref: &str, _follow: bool) -> Result<(), SourceError> {
+        Err(SourceError::unsupported("following"))
+    }
+
+    async fn save(&self, _item_ref: &str, _saved: bool) -> Result<(), SourceError> {
+        Err(SourceError::unsupported("saving to the library"))
+    }
+
+    async fn remove_from_history(&self, _token: &str) -> Result<(), SourceError> {
+        Err(SourceError::unsupported("history removal"))
+    }
+
+    async fn edit_playlist(
+        &self,
+        _playlist_id: &str,
+        _details: &PlaylistDetails,
+    ) -> Result<(), SourceError> {
+        Err(SourceError::unsupported("playlist details"))
+    }
+
+    /// Runs before the local delete. Kept apart from `delete_playlist`, which the
+    /// sync's sweep also calls for playlists the remote already dropped.
+    async fn delete_remote_playlist(&self, _playlist_id: &str) -> Result<(), SourceError> {
+        Ok(())
     }
 
     /// Start a radio/mix seeded from a track, returning the generated queue. Only
@@ -225,6 +296,24 @@ pub trait MediaSource: Send + Sync {
         None
     }
 
+    fn artist_web_url(&self, _artist_id: &str) -> Option<String> {
+        None
+    }
+
+    fn playlist_web_url(&self, _playlist_id: &str) -> Option<String> {
+        None
+    }
+
+    /// For a key nothing has listed this session; `None` when the source has no such track.
+    async fn fetch_track(&self, _item_id: &str) -> Result<Option<reader::Track>, SourceError> {
+        Ok(None)
+    }
+
+    /// `None` anonymously, and for a source whose accounts have no picture.
+    async fn account_avatar(&self) -> Result<Option<String>, SourceError> {
+        Ok(None)
+    }
+
     /// Search this source for `query`, returning matching tracks and albums. The
     /// default searches the source's library corpus (the behavior local, Jellyfin
     /// and Subsonic all share); catalog-backed remotes (YT) override to query the
@@ -242,6 +331,27 @@ pub trait MediaSource: Send + Sync {
         Ok(search::filter(&q, tracks, albums))
     }
 
+    fn search_filters(&self) -> Vec<SearchFilterEntry> {
+        Vec::new()
+    }
+
+    /// Shelves for an "all" filter, one long shelf under any other.
+    async fn search_shelves(
+        &self,
+        _query: &str,
+        _filter: &str,
+        _continuation: Option<&str>,
+    ) -> Result<crate::ytmusic::browse::search::SearchPage, SourceError> {
+        Err(SourceError::unsupported("search filters"))
+    }
+
+    async fn search_suggestions(
+        &self,
+        _query: &str,
+    ) -> Result<Vec<crate::ytmusic::browse::search::Suggestion>, SourceError> {
+        Ok(Vec::new())
+    }
+
     /// The discover/home feed. Default unsupported — gated by
     /// [`Capabilities::discover`]; only catalog remotes (YT) override.
     async fn discover_home(&self) -> Result<crate::ytmusic::discover::DiscoverHome, SourceError> {
@@ -255,6 +365,27 @@ pub trait MediaSource: Send + Sync {
         _token: &str,
     ) -> Result<crate::ytmusic::discover::DiscoverHome, SourceError> {
         Err(SourceError::unsupported("discover"))
+    }
+
+    fn catalog_pages(&self) -> Vec<CatalogPageEntry> {
+        Vec::new()
+    }
+
+    /// A page by an id that `catalog_pages`, a chip or a link handed out.
+    async fn browse_page(
+        &self,
+        _id: &str,
+        _continuation: Option<&str>,
+    ) -> Result<crate::ytmusic::discover::BrowsePage, SourceError> {
+        Err(SourceError::unsupported("catalog pages"))
+    }
+
+    /// Similar songs, artists and albums for one of its tracks.
+    async fn related(
+        &self,
+        _item_id: &str,
+    ) -> Result<crate::ytmusic::discover::BrowsePage, SourceError> {
+        Err(SourceError::unsupported("related"))
     }
 
     /// The tracks of a remote album / browse id. Standard library remotes use
@@ -379,6 +510,7 @@ pub trait MediaSource: Send + Sync {
         Ok(PlaylistPage {
             tracks: self.fetch_playlist_entries(playlist_id).await?,
             next: None,
+            header: None,
         })
     }
 

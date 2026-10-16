@@ -155,6 +155,8 @@ async fn config_round_trips_with_creds_in_servers_table() {
                 service: MusicService::Jellyfin,
                 yt_browser: None,
                 yt_anonymous: false,
+                yt_profile: None,
+                account: None,
                 apple_music_storefront: "us".into(),
                 apple_music_language: "en".into(),
             },
@@ -165,6 +167,8 @@ async fn config_round_trips_with_creds_in_servers_table() {
                 service: MusicService::YtMusic,
                 yt_browser: Some(config::Browser::Brave),
                 yt_anonymous: false,
+                yt_profile: Some("brave:/profiles/Default".into()),
+                account: Some("brand-7".into()),
                 apple_music_storefront: "us".into(),
                 apple_music_language: "en".into(),
             },
@@ -178,6 +182,8 @@ async fn config_round_trips_with_creds_in_servers_table() {
             id: Some("srv-b".into()),
             yt_browser: Some(config::Browser::Brave),
             yt_anonymous: false,
+            yt_profile: Some("brave:/profiles/Default".into()),
+            account: Some("brand-7".into()),
             apple_music_storefront: "us".into(),
             apple_music_language: "en".into(),
         }),
@@ -209,6 +215,22 @@ async fn config_round_trips_with_creds_in_servers_table() {
     assert_eq!(active.id.as_deref(), Some("srv-b"));
     assert_eq!(active.access_token.as_deref(), Some("TOPSECRET_COOKIE"));
     assert_eq!(active.yt_browser, Some(config::Browser::Brave));
+    let saved = loaded.servers.iter().find(|s| s.id == "srv-b").unwrap();
+    let jelly = loaded.servers.iter().find(|s| s.id == "srv-a").unwrap();
+    let hydrated = db.load_server("srv-b").await.unwrap().unwrap();
+    assert_eq!(active.account.as_deref(), Some("brand-7"));
+    assert_eq!(saved.account.as_deref(), Some("brand-7"));
+    assert_eq!(
+        jelly.account, None,
+        "only the server that chose one has one"
+    );
+    assert_eq!(hydrated.account.as_deref(), Some("brand-7"));
+    assert_eq!(
+        hydrated.yt_profile.as_deref(),
+        Some("brave:/profiles/Default")
+    );
+    assert_eq!(saved.yt_profile, hydrated.yt_profile);
+    assert_eq!(jelly.yt_profile, None);
     assert_eq!(loaded.listen_counts.get("ytmusic:VID1"), Some(&7));
     assert_eq!(loaded.listen_counts.get("/music/a.flac"), Some(&3));
 

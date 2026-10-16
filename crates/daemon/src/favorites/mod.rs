@@ -11,21 +11,23 @@ use tokio::sync::Notify;
 
 use crate::jobs::JobRunner;
 use crate::session::SessionHandle;
+use crate::sources::source_error;
 
 mod pull;
 
 const NUDGE_DEBOUNCE: Duration = Duration::from_secs(2);
 const BACKOFF_CAP_SECS: u64 = 30 * 60;
 
-fn source_error(error: server::source::SourceError) -> ApiError {
-    use server::source::SourceError;
-    match &error {
-        SourceError::Unsupported(what) => ApiError::unsupported(*what),
-        SourceError::Auth => ApiError::new(ErrorCode::SourceAuthExpired, error.to_string()),
-        SourceError::Connectivity => ApiError::new(ErrorCode::SourceUnreachable, error.to_string()),
-        SourceError::InvalidInput(message) => ApiError::invalid_input(message.clone()),
-        SourceError::Backend(message) => ApiError::internal(message.clone()),
+/// An expired session says nothing here: the caller recovers it and pushes again.
+fn push_rejected_notice(error: &server::source::SourceError) -> Option<ApiEvent> {
+    if matches!(error, server::source::SourceError::Auth) {
+        return None;
     }
+    Some(ApiEvent::Notice {
+        level: api::NoticeLevel::Error,
+        code: "favorite_push_rejected".to_string(),
+        message: Some(error.to_string()),
+    })
 }
 
 pub struct FavoritesService {
@@ -111,11 +113,9 @@ impl FavoritesService {
             let _ = source.record_favorite(&track, !favorite).await;
             self.bump(Table::Favorites);
             self.bump(Table::Tracks);
-            self.session.emit_event(ApiEvent::Notice {
-                level: api::NoticeLevel::Error,
-                code: "favorite_push_rejected".to_string(),
-                message: Some(error.to_string()),
-            });
+            if let Some(notice) = push_rejected_notice(&error) {
+                self.session.emit_event(notice);
+            }
             return Err(source_error(error));
         }
         self.mutation_nudge.store(true, Ordering::Relaxed);
@@ -138,6 +138,41 @@ impl FavoritesService {
             let track = self.resolve_track(key).await?;
             source
                 .record_favorite(&track, false)
+                .await
+                .map_err(source_error)?;
+            self.bump(Table::Favorites);
+            self.bump(Table::Tracks);
+        }
+        Ok(())
+    }
+
+    /// A song's like is its favorite, so the heart follows once the source answers.
+    pub async fn rate(&self, item_ref: &str, rating: api::Rating) -> Result<(), ApiError> {
+        use server::ytmusic::discover::Rating;
+        if item_ref.trim().is_empty() {
+            return Err(ApiError::invalid_input("nothing to rate"));
+        }
+        let source = self.active_source();
+        if !source.capabilities().library_actions.rate {
+            return Err(ApiError::unsupported("rating"));
+        }
+        let remote = match rating {
+            api::Rating::None => Rating::Indifferent,
+            api::Rating::Like => Rating::Like,
+            api::Rating::Dislike => Rating::Dislike,
+        };
+        source.rate(item_ref, remote).await.map_err(source_error)?;
+
+        let Ok(track) = self.resolve_track(item_ref).await else {
+            // An album or a playlist: rating one saves it or takes it out.
+            self.session.invalidate(Table::Albums);
+            self.session.invalidate(Table::Playlists);
+            return Ok(());
+        };
+        let favorite = rating == api::Rating::Like;
+        if source.is_favorite(item_ref).await != favorite {
+            source
+                .record_favorite(&track, favorite)
                 .await
                 .map_err(source_error)?;
             self.bump(Table::Favorites);
@@ -286,5 +321,22 @@ impl FavoritesService {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use server::source::SourceError;
+
+    #[test]
+    fn an_expired_session_does_not_announce_a_rejected_push() {
+        assert!(push_rejected_notice(&SourceError::Auth).is_none());
+        let Some(ApiEvent::Notice { code, .. }) =
+            push_rejected_notice(&SourceError::Backend("refused".into()))
+        else {
+            panic!("a refusal is announced");
+        };
+        assert_eq!(code, "favorite_push_rejected");
     }
 }

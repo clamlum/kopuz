@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibrarySnapshot, MediaSource,
-    PlaylistOps, RadioSeeds, SourceError, StreamInfo,
+    AlbumType, ArtistView, AuthOutcome, Capabilities, FavoritesSync, LibraryActions,
+    LibrarySnapshot, MediaSource, PlaylistOps, RadioSeeds, SourceError, StreamInfo,
 };
 
 /// Item ids are remote paths: oc:fileid survives renames but needs a lookup to
@@ -51,18 +51,25 @@ const CAPABILITIES: Capabilities = Capabilities {
     browse_folders: true,
     external_devices: false,
     browser_playback: false,
+    accounts: false,
     sync: true,
     downloads: true,
     uploads: false,
     storage_quota: false,
     discover: false,
     dont_recommend: false,
+    music_videos: false,
     radio: RadioSeeds::NONE,
     play_queue: false,
     playlists: PlaylistOps::None, // none over raw WebDAV, the Music app's are Subsonic
     artist_view: ArtistView::Library,
     albums: AlbumType::Standard,
     favorites_sync: FavoritesSync::Instant,
+    account_avatar: false,
+    stream_quality: false,
+    explicit_flags: false,
+    watch_history: false,
+    library_actions: LibraryActions::NONE,
 };
 
 /// Art fetches in flight at once, enough to hide the round trips without
@@ -230,6 +237,9 @@ impl MediaSource for NextcloudSource {
                     credits: Vec::new(),
                     artists: vec![track.artist],
                     replay_gain: config::ReplayGainInfo::default(),
+                    explicit: false,
+                    plays: None,
+                    counterpart: None,
                 }
             })
             .collect();
@@ -241,7 +251,11 @@ impl MediaSource for NextcloudSource {
         })
     }
 
-    async fn resolve_stream(&self, item_id: &str) -> Result<StreamInfo, SourceError> {
+    async fn resolve_stream(
+        &self,
+        item_id: &str,
+        _: config::StreamQuality,
+    ) -> Result<StreamInfo, SourceError> {
         Ok(StreamInfo {
             url: self.client()?.stream_url(item_id),
             format: None,

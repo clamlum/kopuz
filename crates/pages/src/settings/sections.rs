@@ -1,7 +1,7 @@
 use components::settings_items::{
     AppSelect, ChannelModeSelector, DeviceChangeBehaviorSelector, EqualizerPanel, GainSlider,
     ReplayGainModeSelector, SampleRateModeSelector, SettingItem, SettingsGroup, SettingsSection,
-    ToggleSetting,
+    StreamQualitySelector, ToggleSetting,
 };
 use config::{AppConfig, LYRICS_OFFSET_LIMIT_MS, OfflineQuality, ReplayGainMode};
 use dioxus::prelude::*;
@@ -63,6 +63,76 @@ fn IntegrationRows(integration: api::IntegrationInfo, changed: Signal<u64>) -> E
                     }
                 },
             }
+        }
+        if integration.connect == api::ConnectKind::BrowserProfile {
+            BrowserConnectRow { id: integration.id.clone(), name: name.clone(), changed }
+        }
+    }
+}
+
+/// Connect from a browser profile already signed in to the service, beside
+/// the fields that take a pasted credential.
+#[component]
+fn BrowserConnectRow(id: String, name: String, changed: Signal<u64>) -> Element {
+    let profiles = hooks::integrations::use_browser_profiles();
+    let mut picked = use_signal(String::new);
+    let busy = use_signal(|| false);
+    let listed = profiles.read().clone().unwrap_or_default();
+    let selected = listed
+        .iter()
+        .find(|profile| profile.id == picked())
+        .or(listed.first())
+        .map(|profile| profile.id.clone())
+        .unwrap_or_default();
+    let options: Vec<(String, String)> = listed
+        .iter()
+        .map(|profile| {
+            (
+                profile.id.clone(),
+                i18n::t_with(
+                    "integration_browser_profile",
+                    &[
+                        ("name", profile.name.clone()),
+                        ("browser", profile.browser.clone()),
+                    ],
+                ),
+            )
+        })
+        .collect();
+    rsx! {
+        SettingItem {
+            title: i18n::t("integration_browser_title").to_string(),
+            control: rsx! {
+                if options.is_empty() {
+                    p { class: "text-sm text-white/60", "{i18n::t(\"integration_browser_none\")}" }
+                } else {
+                    div { class: "flex items-center gap-2",
+                        AppSelect {
+                            class: "settings-select",
+                            value: selected.clone(),
+                            options,
+                            on_change: move |value: String| picked.set(value),
+                        }
+                        button {
+                            class: "app-button-tonal bg-white/10 hover:bg-white/20 text-white px-3 py-2 rounded-xl text-sm transition-colors disabled:opacity-50",
+                            disabled: busy(),
+                            onclick: move |_| {
+                                hooks::integrations::connect_from_browser(
+                                    id.clone(),
+                                    selected.clone(),
+                                    busy,
+                                    changed,
+                                );
+                            },
+                            if busy() {
+                                "{i18n::t(\"integration_connecting\")}"
+                            } else {
+                                "{i18n::t_with(\"integration_connect\", &[(\"name\", name.clone())])}"
+                            }
+                        }
+                    }
+                }
+            },
         }
     }
 }
@@ -188,6 +258,8 @@ pub(super) fn MetadataSection(mut config: Signal<AppConfig>) -> Element {
 
 #[component]
 pub(super) fn PlayerSection(mut config: Signal<AppConfig>) -> Element {
+    let caps = hooks::sources::use_capabilities();
+    let caps = caps.read().clone();
     let crossfade_label = if config.read().crossfade_seconds == 0 {
         i18n::t("crossfade_off")
     } else {
@@ -249,6 +321,57 @@ pub(super) fn PlayerSection(mut config: Signal<AppConfig>) -> Element {
                                 class: "text-xs font-mono text-white/80 w-16 text-right",
                                 "{(config.read().volume_scroll_step * 100.0).round() as i32}%"
                             }
+                        }
+                    }
+                }
+            }
+            if caps.track_radio {
+                SettingItem {
+                    title: i18n::t("autoplay_radio").to_string(),
+                    config_key: "autoplay_radio",
+                    control: rsx! {
+                        ToggleSetting {
+                            enabled: config.read().autoplay_radio,
+                            on_change: move |val| config.write().autoplay_radio = val,
+                        }
+                    }
+                }
+            }
+            if caps.explicit_flags {
+                SettingItem {
+                    title: i18n::t("skip_explicit").to_string(),
+                    config_key: "skip_explicit",
+                    control: rsx! {
+                        ToggleSetting {
+                            enabled: config.read().skip_explicit,
+                            on_change: move |val| config.write().skip_explicit = val,
+                        }
+                    }
+                }
+            }
+            if caps.stream_quality || caps.watch_history {
+                SettingsGroup { label: i18n::t("settings_group_streaming") }
+            }
+            if caps.stream_quality {
+                SettingItem {
+                    title: i18n::t("stream_quality").to_string(),
+                    config_key: "stream_quality",
+                    control: rsx! {
+                        StreamQualitySelector {
+                            current: config.read().stream_quality,
+                            on_change: move |quality| config.write().stream_quality = quality,
+                        }
+                    }
+                }
+            }
+            if caps.watch_history {
+                SettingItem {
+                    title: i18n::t("pause_watch_history").to_string(),
+                    config_key: "pause_watch_history",
+                    control: rsx! {
+                        ToggleSetting {
+                            enabled: config.read().pause_watch_history,
+                            on_change: move |val| config.write().pause_watch_history = val,
                         }
                     }
                 }

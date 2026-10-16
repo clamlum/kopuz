@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Where the next menu should open, when a right-click asked for it.
 ///
@@ -27,6 +28,8 @@ pub async fn close_open_sheet() -> bool {
     .await
     .unwrap_or(false)
 }
+
+static NEXT_MENU_ID: AtomicU64 = AtomicU64::new(0);
 
 fn take_context_point() -> Option<(f64, f64)> {
     CONTEXT_POINT.lock().ok().and_then(|mut slot| slot.take())
@@ -96,6 +99,8 @@ pub fn DotsMenu(props: DotsMenuProps) -> Element {
     let mut trigger_element = use_signal(|| None::<MountedEvent>);
     let mut panel_geometry = use_signal(|| None::<(f64, f64, f64, f64)>);
     let is_rtl = i18n::is_rtl();
+    let root_id =
+        use_hook(|| format!("dots-menu-{}", NEXT_MENU_ID.fetch_add(1, Ordering::Relaxed)));
 
     let base_button_class = format!(
         "w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10 text-slate-400 hover:text-white transition-colors {}",
@@ -112,6 +117,7 @@ pub fn DotsMenu(props: DotsMenuProps) -> Element {
 
     rsx! {
         div {
+            id: "{root_id}",
             // `cursor-default` because rows that own a menu are often drag
             // handles carrying `cursor-grab`, and `cursor` inherits.
             class: if props.is_open {
@@ -155,6 +161,8 @@ pub fn DotsMenu(props: DotsMenuProps) -> Element {
             }
 
             if props.is_open {
+                OutsidePress { root_id: root_id.clone(), on_close: props.on_close }
+
                 div {
                     class: if sheet { "fixed inset-0 dots-menu-backdrop bg-black/60" } else { "fixed inset-0 dots-menu-backdrop" },
                     aria_hidden: "true",
@@ -284,4 +292,43 @@ pub fn DotsMenu(props: DotsMenuProps) -> Element {
             }
         }
     }
+}
+
+/// Closes the menu on a press outside its root. The backdrop alone cannot be
+/// relied on: an ancestor with `backdrop-filter` (the player bars) becomes the
+/// containing block for `position: fixed` in WebKitGTK, so the backdrop only
+/// covers that ancestor and presses elsewhere never reach it.
+#[component]
+fn OutsidePress(root_id: String, on_close: EventHandler<()>) -> Element {
+    use_hook(|| {
+        let script = format!(
+            r#"
+            const id = {root_id:?};
+            const stops = window.__dotsMenuOutside ??= new Map();
+            stops.get(id)?.();
+            const onDown = (evt) => {{
+                const root = document.getElementById(id);
+                if (root && root.contains(evt.target)) return;
+                stop();
+                dioxus.send(true);
+            }};
+            const stop = () => {{
+                document.removeEventListener("pointerdown", onDown, true);
+                stops.delete(id);
+            }};
+            document.addEventListener("pointerdown", onDown, true);
+            stops.set(id, stop);
+            "#
+        );
+        spawn(async move {
+            let mut listener = document::eval(&script);
+            if listener.recv::<bool>().await.is_ok() {
+                on_close.call(());
+            }
+        });
+    });
+    use_drop(move || {
+        document::eval(&format!("window.__dotsMenuOutside?.get({root_id:?})?.();"));
+    });
+    rsx! {}
 }

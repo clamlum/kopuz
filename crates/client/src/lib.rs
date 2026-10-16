@@ -225,6 +225,13 @@ impl api::PlayerApi for GrpcApi {
                     }))
                     .await
             }
+            PlayerCommand::SetVersion { version } => {
+                self.client()
+                    .set_version(Request::new(proto::SetVersion {
+                        version: convert::track_version_to_proto(version) as i32,
+                    }))
+                    .await
+            }
         }
         .map_err(wire_error)?;
         Ok(CommandAck {
@@ -302,6 +309,25 @@ impl api::PlayerApi for GrpcApi {
             .await
             .map_err(wire_error)?;
         Ok(())
+    }
+
+    async fn video(&self, request: api::VideoRequest) -> Result<api::VideoChunk, ApiError> {
+        let chunk = self
+            .client()
+            .get_video(Request::new(proto::VideoRequest {
+                key: request.key,
+                start: request.start,
+                length: request.length,
+            }))
+            .await
+            .map_err(wire_error)?
+            .into_inner();
+        Ok(api::VideoChunk {
+            content_type: chunk.content_type,
+            start: chunk.start,
+            total: chunk.total,
+            bytes: chunk.data,
+        })
     }
 }
 
@@ -456,13 +482,30 @@ impl api::LibraryApi for GrpcApi {
         Ok(convert::track_page_from_proto(tracks.get_ref()))
     }
 
-    async fn search(&self, query: String) -> Result<api::SearchResults, ApiError> {
+    async fn search(&self, request: api::SearchRequest) -> Result<api::SearchResults, ApiError> {
         let results = self
             .client()
-            .search(Request::new(proto::SearchRequest { query }))
+            .search(Request::new(convert::search_request_to_proto(&request)))
             .await
             .map_err(wire_error)?;
         Ok(convert::search_results_from_proto(results.get_ref()))
+    }
+
+    async fn search_suggestions(
+        &self,
+        query: String,
+    ) -> Result<Vec<api::SearchSuggestion>, ApiError> {
+        let suggestions = self
+            .client()
+            .get_search_suggestions(Request::new(proto::SearchSuggestionsRequest { query }))
+            .await
+            .map_err(wire_error)?;
+        Ok(suggestions
+            .get_ref()
+            .suggestions
+            .iter()
+            .map(convert::search_suggestion_from_proto)
+            .collect())
     }
 
     async fn track_web_url(&self, key: String) -> Result<Option<String>, ApiError> {
@@ -630,6 +673,41 @@ impl api::LibraryApi for GrpcApi {
     async fn dont_recommend(&self, key: String) -> Result<(), ApiError> {
         self.client()
             .dont_recommend(Request::new(proto::DontRecommendRequest { key }))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+
+    async fn rate(&self, item_ref: String, rating: api::Rating) -> Result<(), ApiError> {
+        self.client()
+            .rate(Request::new(proto::RateRequest {
+                item_ref,
+                rating: convert::rating_to_proto(rating) as i32,
+            }))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+
+    async fn follow(&self, artist_ref: String, follow: bool) -> Result<(), ApiError> {
+        self.client()
+            .follow(Request::new(proto::FollowRequest { artist_ref, follow }))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+
+    async fn save(&self, item_ref: String, saved: bool) -> Result<(), ApiError> {
+        self.client()
+            .save(Request::new(proto::SaveRequest { item_ref, saved }))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+
+    async fn remove_from_history(&self, token: String) -> Result<(), ApiError> {
+        self.client()
+            .remove_from_history(Request::new(proto::RemoveFromHistoryRequest { token }))
             .await
             .map_err(wire_error)?;
         Ok(())
@@ -1038,7 +1116,30 @@ impl api::PlaylistApi for GrpcApi {
 
     async fn rename_playlist(&self, id: String, name: String) -> Result<(), ApiError> {
         self.client()
-            .rename_playlist(Request::new(proto::RenamePlaylistRequest { id, name }))
+            .rename_playlist(Request::new(proto::RenamePlaylistRequest {
+                id,
+                name,
+                description: None,
+                privacy: None,
+            }))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+
+    async fn edit_playlist(&self, id: String, edit: api::PlaylistEdit) -> Result<(), ApiError> {
+        if edit.name.is_none() && edit.description.is_none() && edit.privacy.is_none() {
+            return Ok(());
+        }
+        self.client()
+            .rename_playlist(Request::new(proto::RenamePlaylistRequest {
+                id,
+                name: edit.name.unwrap_or_default(),
+                description: edit.description,
+                privacy: edit
+                    .privacy
+                    .map(|privacy| convert::playlist_privacy_to_proto(privacy) as i32),
+            }))
             .await
             .map_err(wire_error)?;
         Ok(())
@@ -1312,6 +1413,44 @@ impl api::SourceApi for GrpcApi {
         Ok(convert::source_info_from_proto(info.get_ref()))
     }
 
+    async fn browser_sessions(
+        &self,
+        service: String,
+    ) -> Result<Vec<api::BrowserSession>, ApiError> {
+        let list = self
+            .client()
+            .get_browser_sessions(Request::new(proto::GetBrowserSessionsRequest { service }))
+            .await
+            .map_err(wire_error)?;
+        Ok(list
+            .into_inner()
+            .sessions
+            .into_iter()
+            .map(|session| api::BrowserSession {
+                id: session.id,
+                browser: session.browser,
+                profile: session.profile,
+                account: session.account,
+            })
+            .collect())
+    }
+
+    async fn import_browser_session(
+        &self,
+        id: String,
+        session: String,
+    ) -> Result<api::SourceInfo, ApiError> {
+        let info = self
+            .client()
+            .import_browser_session(Request::new(proto::ImportBrowserSessionRequest {
+                id,
+                session,
+            }))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::source_info_from_proto(info.get_ref()))
+    }
+
     async fn browse_source(
         &self,
         id: String,
@@ -1340,6 +1479,53 @@ impl api::SourceApi for GrpcApi {
             .await
             .map_err(wire_error)?;
         Ok(convert::source_state_from_proto(state.get_ref().state))
+    }
+
+    async fn accounts(&self, id: String) -> Result<Vec<api::SourceAccount>, ApiError> {
+        let list = self
+            .client()
+            .get_source_accounts(Request::new(proto::SourceId { id }))
+            .await
+            .map_err(wire_error)?;
+        Ok(list
+            .get_ref()
+            .accounts
+            .iter()
+            .map(convert::source_account_from_proto)
+            .collect())
+    }
+
+    async fn switch_account(
+        &self,
+        id: String,
+        account: Option<String>,
+    ) -> Result<api::SourceInfo, ApiError> {
+        let info = self
+            .client()
+            .switch_source_account(Request::new(proto::SwitchSourceAccountRequest {
+                id,
+                account,
+            }))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::source_info_from_proto(info.get_ref()))
+    }
+
+    async fn test_source_connection(
+        &self,
+        id: String,
+    ) -> Result<Vec<api::ConnectionCheck>, ApiError> {
+        let report = self
+            .client()
+            .test_source_connection(Request::new(proto::SourceId { id }))
+            .await
+            .map_err(wire_error)?;
+        Ok(report
+            .get_ref()
+            .checks
+            .iter()
+            .filter_map(convert::connection_check_from_proto)
+            .collect())
     }
 
     async fn can_open_browser(&self) -> Result<bool, ApiError> {
@@ -1393,6 +1579,35 @@ impl api::SourceApi for GrpcApi {
         let info = self
             .client()
             .authenticate_integration(Request::new(proto::IntegrationId { id }))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::integration_info_from_proto(info.get_ref()))
+    }
+
+    async fn browser_profiles(&self) -> Result<Vec<api::BrowserProfile>, ApiError> {
+        let list = self
+            .client()
+            .get_browser_profiles(Request::new(proto::GetBrowserProfilesRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(list
+            .get_ref()
+            .profiles
+            .iter()
+            .map(convert::browser_profile_from_proto)
+            .collect())
+    }
+
+    async fn connect_integration_from_browser(
+        &self,
+        id: String,
+        profile: String,
+    ) -> Result<api::IntegrationInfo, ApiError> {
+        let info = self
+            .client()
+            .connect_integration_from_browser(Request::new(
+                proto::ConnectIntegrationFromBrowserRequest { id, profile },
+            ))
             .await
             .map_err(wire_error)?;
         Ok(convert::integration_info_from_proto(info.get_ref()))

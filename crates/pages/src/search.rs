@@ -25,6 +25,53 @@ pub fn Search(
     queue: Signal<Vec<api::TrackInfo>>,
     current_queue_index: Signal<usize>,
     on_select_album: EventHandler<String>,
+    on_select_playlist: EventHandler<(api::CatalogItemKind, String, String)>,
+) -> Element {
+    let filters = hooks::sources::use_capabilities()().search_filters;
+    if !filters.is_empty() {
+        return rsx! {
+            crate::server::search::CatalogSearch {
+                search_query,
+                filters,
+                on_select_album,
+                on_select_playlist,
+            }
+        };
+    }
+    rsx! {
+        LocalSearch {
+            config,
+            search_query,
+            is_playing,
+            current_playing,
+            current_song_title,
+            current_song_artist,
+            current_song_duration,
+            current_song_progress,
+            queue,
+            current_queue_index,
+            on_select_album,
+            on_select_playlist,
+        }
+    }
+}
+
+/// Split from `Search` so the hook order stays fixed when the active source
+/// switches between filtered catalogue search and this one.
+#[component]
+fn LocalSearch(
+    config: Signal<AppConfig>,
+    search_query: Signal<String>,
+    is_playing: Signal<bool>,
+    current_playing: Signal<u64>,
+    current_song_title: Signal<String>,
+    current_song_artist: Signal<String>,
+    current_song_duration: Signal<u64>,
+    current_song_progress: Signal<u64>,
+    queue: Signal<Vec<api::TrackInfo>>,
+    current_queue_index: Signal<usize>,
+    on_select_album: EventHandler<String>,
+    on_select_playlist: EventHandler<(api::CatalogItemKind, String, String)>,
 ) -> Element {
     let data = use_search_data(search_query);
     let mut selected_genre = use_signal(|| None::<String>);

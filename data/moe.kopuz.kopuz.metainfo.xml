@@ -48,6 +48,13 @@
   </screenshots>
 
   <releases>
+    <release version="0.21.0" date="2026-10-14">
+      <description>
+        <p>
+          Kopuz can play music from SMB shares and Clippsly Listener, with uploads and downloads for Clippsly libraries. Playback is gapless when crossfade is off, track radio keeps adding songs, and Subsonic queue sync lets you resume listening across clients. YouTube Music gains volume normalization, listening history updates and synced lyrics for music videos, alongside more reliable stream loading. SoundCloud sign-in and false offline detection are fixed, and kopuzctl adds command-line control of the daemon.
+        </p>
+      </description>
+    </release>
     <release version="0.20.0" date="2026-10-08"/>
     <release version="0.19.0" date="2026-10-03">
       <description>

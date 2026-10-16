@@ -181,6 +181,16 @@ impl Kopuz for KopuzGrpc {
         .await
     }
 
+    async fn set_version(
+        &self,
+        request: Request<proto::SetVersion>,
+    ) -> Result<Response<proto::MutationResult>, Status> {
+        let version = convert::track_version_from_proto(request.get_ref().version)
+            .ok_or_else(|| Status::invalid_argument("pass the song or the video version"))?;
+        self.player_mutation(api::PlayerCommand::SetVersion { version })
+            .await
+    }
+
     async fn get_status(
         &self,
         _request: Request<proto::GetStatusRequest>,
@@ -410,10 +420,28 @@ impl Kopuz for KopuzGrpc {
         let results = self
             .0
             .api
-            .search(request.into_inner().query)
+            .search(convert::search_request_from_proto(request.get_ref()))
             .await
             .map_err(failed)?;
         Ok(Response::new(convert::search_results_to_proto(&results)))
+    }
+
+    async fn get_search_suggestions(
+        &self,
+        request: Request<proto::SearchSuggestionsRequest>,
+    ) -> Result<Response<proto::SearchSuggestions>, Status> {
+        let suggestions = self
+            .0
+            .api
+            .search_suggestions(request.into_inner().query)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::SearchSuggestions {
+            suggestions: suggestions
+                .iter()
+                .map(convert::search_suggestion_to_proto)
+                .collect(),
+        }))
     }
 
     async fn get_track_web_url(
@@ -626,9 +654,29 @@ impl Kopuz for KopuzGrpc {
         request: Request<proto::RenamePlaylistRequest>,
     ) -> Result<Response<proto::Unit>, Status> {
         let request = request.into_inner();
+        let privacy = match request.privacy {
+            Some(value) => Some(
+                convert::playlist_privacy_from_proto(value)
+                    .ok_or_else(|| failed(ApiError::invalid_input("unknown playlist privacy")))?,
+            ),
+            None => None,
+        };
+        if request.description.is_none() && privacy.is_none() {
+            self.0
+                .api
+                .rename_playlist(request.id, request.name)
+                .await
+                .map_err(failed)?;
+            return Ok(Response::new(proto::Unit {}));
+        }
+        let edit = api::PlaylistEdit {
+            name: (!request.name.is_empty()).then_some(request.name),
+            description: request.description,
+            privacy,
+        };
         self.0
             .api
-            .rename_playlist(request.id, request.name)
+            .edit_playlist(request.id, edit)
             .await
             .map_err(failed)?;
         Ok(Response::new(proto::Unit {}))
@@ -880,6 +928,59 @@ impl Kopuz for KopuzGrpc {
         self.0
             .api
             .dont_recommend(request.get_ref().key.clone())
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
+    }
+
+    async fn rate(
+        &self,
+        request: Request<proto::RateRequest>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        let request = request.into_inner();
+        let rating = convert::rating_from_proto(request.rating)
+            .ok_or_else(|| failed(ApiError::invalid_input("a rating is required")))?;
+        self.0
+            .api
+            .rate(request.item_ref, rating)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
+    }
+
+    async fn follow(
+        &self,
+        request: Request<proto::FollowRequest>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        let request = request.into_inner();
+        self.0
+            .api
+            .follow(request.artist_ref, request.follow)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
+    }
+
+    async fn save(
+        &self,
+        request: Request<proto::SaveRequest>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        let request = request.into_inner();
+        self.0
+            .api
+            .save(request.item_ref, request.saved)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
+    }
+
+    async fn remove_from_history(
+        &self,
+        request: Request<proto::RemoveFromHistoryRequest>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        self.0
+            .api
+            .remove_from_history(request.into_inner().token)
             .await
             .map_err(failed)?;
         Ok(Response::new(proto::Unit {}))
@@ -1144,6 +1245,29 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(Box::pin(futures_util::stream::iter(chunks))))
     }
 
+    async fn get_video(
+        &self,
+        request: Request<proto::VideoRequest>,
+    ) -> Result<Response<proto::VideoChunk>, Status> {
+        let request = request.into_inner();
+        let chunk = self
+            .0
+            .api
+            .video(api::VideoRequest {
+                key: request.key,
+                start: request.start,
+                length: request.length,
+            })
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::VideoChunk {
+            content_type: chunk.content_type,
+            start: chunk.start,
+            total: chunk.total,
+            data: chunk.bytes,
+        }))
+    }
+
     async fn get_sources(
         &self,
         _: Request<proto::GetSourcesRequest>,
@@ -1373,6 +1497,43 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(convert::source_info_to_proto(&info)))
     }
 
+    async fn get_browser_sessions(
+        &self,
+        request: Request<proto::GetBrowserSessionsRequest>,
+    ) -> Result<Response<proto::BrowserSessionList>, Status> {
+        let sessions = self
+            .0
+            .api
+            .browser_sessions(request.into_inner().service)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::BrowserSessionList {
+            sessions: sessions
+                .into_iter()
+                .map(|session| proto::BrowserSession {
+                    id: session.id,
+                    browser: session.browser,
+                    profile: session.profile,
+                    account: session.account,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn import_browser_session(
+        &self,
+        request: Request<proto::ImportBrowserSessionRequest>,
+    ) -> Result<Response<proto::SourceInfo>, Status> {
+        let request = request.into_inner();
+        let info = self
+            .0
+            .api
+            .import_browser_session(request.id, request.session)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(convert::source_info_to_proto(&info)))
+    }
+
     async fn browse_source(
         &self,
         request: Request<proto::BrowseSourceRequest>,
@@ -1408,6 +1569,56 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(proto::SourceStateResponse {
             state: convert::source_state_to_proto(state) as i32,
         }))
+    }
+
+    async fn get_source_accounts(
+        &self,
+        request: Request<proto::SourceId>,
+    ) -> Result<Response<proto::SourceAccountList>, Status> {
+        let accounts = self
+            .0
+            .api
+            .accounts(request.into_inner().id)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::SourceAccountList {
+            accounts: accounts
+                .iter()
+                .map(convert::source_account_to_proto)
+                .collect(),
+        }))
+    }
+
+    async fn test_source_connection(
+        &self,
+        request: Request<proto::SourceId>,
+    ) -> Result<Response<proto::ConnectionReport>, Status> {
+        let checks = self
+            .0
+            .api
+            .test_source_connection(request.into_inner().id)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::ConnectionReport {
+            checks: checks
+                .iter()
+                .map(convert::connection_check_to_proto)
+                .collect(),
+        }))
+    }
+
+    async fn switch_source_account(
+        &self,
+        request: Request<proto::SwitchSourceAccountRequest>,
+    ) -> Result<Response<proto::SourceInfo>, Status> {
+        let request = request.into_inner();
+        let info = self
+            .0
+            .api
+            .switch_account(request.id, request.account)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(convert::source_info_to_proto(&info)))
     }
 
     async fn can_open_browser(
@@ -1470,6 +1681,33 @@ impl Kopuz for KopuzGrpc {
             .0
             .api
             .authenticate_integration(request.into_inner().id)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(convert::integration_info_to_proto(&info)))
+    }
+
+    async fn get_browser_profiles(
+        &self,
+        _: Request<proto::GetBrowserProfilesRequest>,
+    ) -> Result<Response<proto::BrowserProfileList>, Status> {
+        let profiles = self.0.api.browser_profiles().await.map_err(failed)?;
+        Ok(Response::new(proto::BrowserProfileList {
+            profiles: profiles
+                .iter()
+                .map(convert::browser_profile_to_proto)
+                .collect(),
+        }))
+    }
+
+    async fn connect_integration_from_browser(
+        &self,
+        request: Request<proto::ConnectIntegrationFromBrowserRequest>,
+    ) -> Result<Response<proto::IntegrationInfo>, Status> {
+        let request = request.into_inner();
+        let info = self
+            .0
+            .api
+            .connect_integration_from_browser(request.id, request.profile)
             .await
             .map_err(failed)?;
         Ok(Response::new(convert::integration_info_to_proto(&info)))

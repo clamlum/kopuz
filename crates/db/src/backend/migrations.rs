@@ -993,6 +993,8 @@ fn legacy_options(yt_browser: Option<&str>, yt_anonymous: bool) -> Vec<(&'static
     super::cfg_store::server_options(
         yt_browser,
         yt_anonymous,
+        None,
+        None,
         &defaults.apple_music_storefront,
         &defaults.apple_music_language,
     )
@@ -1315,7 +1317,10 @@ fn legacy_to_track(l: &LegacyTrack) -> Option<Track> {
         playlist_item_id: l.playlist_item_id.clone(),
         artists: l.artists.clone(),
         replay_gain: config::ReplayGainInfo::default(),
+        counterpart: None,
         credits: Vec::new(),
+        explicit: false,
+        plays: None,
     })
 }
 
@@ -1821,6 +1826,9 @@ mod row_fill_tests {
             artists: vec!["Ada".into()],
             credits: vec![reader::ArtistCredit::linked("Ada", "UC-ada")],
             replay_gain: config::ReplayGainInfo::default(),
+            explicit: false,
+            plays: None,
+            counterpart: None,
         }
     }
 
@@ -1863,6 +1871,8 @@ mod row_fill_tests {
             "ALTER TABLE tracks DROP COLUMN rg_track_peak",
             "ALTER TABLE tracks DROP COLUMN rg_album_gain",
             "ALTER TABLE tracks DROP COLUMN rg_album_peak",
+            "ALTER TABLE tracks DROP COLUMN explicit",
+            "ALTER TABLE tracks DROP COLUMN plays",
             "DELETE FROM _sqlx_migrations WHERE version >= 20260930000000",
         ] {
             sqlx::query(sql).execute(&pool).await.unwrap();

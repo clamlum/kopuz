@@ -10,6 +10,9 @@ pub fn error_code_to_proto(value: api::ErrorCode) -> ErrorCode {
         api::ErrorCode::DaemonGone => ErrorCode::DaemonGone,
         api::ErrorCode::Unsupported => ErrorCode::Unsupported,
         api::ErrorCode::Internal => ErrorCode::Internal,
+        api::ErrorCode::SourceChallenged => ErrorCode::SourceChallenged,
+        api::ErrorCode::SourceRefused => ErrorCode::SourceRefused,
+        api::ErrorCode::ItemUnavailable => ErrorCode::ItemUnavailable,
     }
 }
 
@@ -22,6 +25,9 @@ pub fn error_code_from_proto(value: i32) -> api::ErrorCode {
         ErrorCode::SourceUnreachable => api::ErrorCode::SourceUnreachable,
         ErrorCode::DaemonGone => api::ErrorCode::DaemonGone,
         ErrorCode::Unsupported => api::ErrorCode::Unsupported,
+        ErrorCode::SourceChallenged => api::ErrorCode::SourceChallenged,
+        ErrorCode::SourceRefused => api::ErrorCode::SourceRefused,
+        ErrorCode::ItemUnavailable => api::ErrorCode::ItemUnavailable,
         ErrorCode::Internal | ErrorCode::Unspecified => api::ErrorCode::Internal,
     }
 }

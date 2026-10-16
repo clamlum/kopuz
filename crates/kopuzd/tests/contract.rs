@@ -40,6 +40,9 @@ impl QueueMaterializer for StubLibrary {
 }
 
 fn track(key: &str) -> Track {
+    if key.starts_with("ytm-song:") {
+        return music_video_pair(key);
+    }
     Track {
         id: reader::models::TrackId::Local(std::path::PathBuf::from(key)),
         cover: None,
@@ -58,8 +61,32 @@ fn track(key: &str) -> Track {
         playlist_item_id: None,
         artists: vec![],
         replay_gain: config::ReplayGainInfo::default(),
+        counterpart: None,
         credits: vec![],
+        explicit: false,
+        plays: None,
     }
+}
+
+/// A song paired with its music video, which opens on a second of intro.
+fn music_video_pair(key: &str) -> Track {
+    let mut song = track("/stand-in.wav");
+    song.id = reader::models::TrackId::Server {
+        service: config::MusicService::YtMusic,
+        item_id: key.to_string(),
+    };
+    song.title = key.to_string();
+    song.counterpart = Some(Box::new(reader::Counterpart {
+        item_id: format!("{key}-video"),
+        video: true,
+        duration_ms: Some(7_000),
+        segments: vec![reader::SharedSegment {
+            start_ms: 0,
+            counterpart_start_ms: 1_000,
+            duration_ms: 6_000,
+        }],
+    }));
+    song
 }
 
 fn wav_bytes(seconds: u64) -> Vec<u8> {
@@ -868,6 +895,40 @@ async fn config_view_and_set_agree_across_transports() {
 }
 
 #[tokio::test]
+async fn playback_settings_and_their_capabilities_agree_across_transports() {
+    let pair = spawn_pair().await;
+
+    let mut next = pair.wire.config().await.expect("wire view").config;
+    assert_eq!(next.stream_quality, config::StreamQuality::High);
+    assert!(!next.autoplay_radio && !next.skip_explicit && !next.pause_watch_history);
+    next.stream_quality = config::StreamQuality::Low;
+    next.autoplay_radio = true;
+    next.skip_explicit = true;
+    next.pause_watch_history = true;
+    let written = pair.wire.set_config(next).await.expect("set over the wire");
+    assert_eq!(written.config.stream_quality, config::StreamQuality::Low);
+    assert!(written.config.autoplay_radio && written.config.skip_explicit);
+    assert!(written.config.pause_watch_history);
+    let local = pair.local.config().await.expect("local view after set");
+    assert_eq!(local.config, written.config);
+
+    let active = |rows: Vec<api::SourceInfo>| {
+        rows.into_iter()
+            .find(|source| source.active)
+            .expect("an active source")
+            .capabilities
+    };
+    let local = active(pair.local.sources().await.expect("local sources"));
+    let wire = active(pair.wire.sources().await.expect("wire sources"));
+    assert_eq!(local, wire);
+    assert!(!wire.stream_quality && !wire.explicit_flags && !wire.watch_history);
+    assert!(
+        !wire.track_radio,
+        "a folder library has no radio to autoplay"
+    );
+}
+
+#[tokio::test]
 async fn favorites_round_trip_across_transports() {
     let pair = spawn_pair().await;
     pair.wire
@@ -924,6 +985,188 @@ async fn dont_recommend_is_refused_by_a_source_without_it() {
         .expect("an active source")
         .capabilities;
     assert!(!caps.dont_recommend);
+}
+
+/// Both calls answer `Unsupported` on both transports, not a transport error.
+#[tokio::test]
+async fn accounts_are_refused_by_a_source_without_them() {
+    let pair = spawn_pair().await;
+    let draft = api::SourceDraft {
+        name: "Home".into(),
+        service: "jellyfin".into(),
+        values: vec![api::FieldValue::new("url", "https://jelly.example")],
+        ..Default::default()
+    };
+    let server = pair.wire.upsert_source(draft).await.expect("add server");
+    let local_id = pair
+        .wire
+        .sources()
+        .await
+        .expect("sources")
+        .into_iter()
+        .find(|source| source.active)
+        .expect("an active source")
+        .id;
+
+    for id in [local_id, server.id.clone()] {
+        let listed = [
+            pair.local.accounts(id.clone()).await.expect_err("local"),
+            pair.wire.accounts(id.clone()).await.expect_err("wire"),
+        ];
+        let switched = [
+            pair.local
+                .switch_account(id.clone(), Some("brand".into()))
+                .await
+                .expect_err("local"),
+            pair.wire
+                .switch_account(id.clone(), None)
+                .await
+                .expect_err("wire"),
+        ];
+        for error in listed.iter().chain(&switched) {
+            assert_eq!(error.code, ErrorCode::Unsupported, "{id}: {error:?}");
+        }
+    }
+
+    let sources = pair.wire.sources().await.expect("sources");
+    assert!(sources.iter().all(|source| !source.capabilities.accounts));
+    assert_eq!(sources, pair.local.sources().await.expect("local sources"));
+
+    let missing = [
+        pair.local.accounts("nope".into()).await.expect_err("local"),
+        pair.wire.accounts("nope".into()).await.expect_err("wire"),
+    ];
+    assert_eq!(missing[0].code, missing[1].code);
+}
+
+/// Switching an inactive source touches no network and no playback.
+#[tokio::test]
+async fn an_account_choice_is_kept_with_its_source() {
+    let pair = spawn_pair().await;
+    let draft = api::SourceDraft {
+        name: "Music".into(),
+        service: "ytmusic".into(),
+        values: vec![api::FieldValue::new("auth_method", "browser")],
+        ..Default::default()
+    };
+    let added = pair.wire.upsert_source(draft).await.expect("add source");
+    assert!(!added.capabilities.accounts, "no sign-in, no accounts");
+    pair.local
+        .provision_credentials(api::CredentialProvision {
+            server_id: added.id.clone(),
+            secret: "SAPISID=not-a-real-cookie".into(),
+            user_id: Some("yt-test".into()),
+            browser: None,
+        })
+        .await
+        .expect("provision");
+
+    let switched = pair
+        .wire
+        .switch_account(added.id.clone(), Some("brand-1".into()))
+        .await
+        .expect("switch over the wire");
+    assert!(switched.capabilities.accounts);
+    assert!(
+        !switched.active,
+        "switching an account does not switch sources"
+    );
+    let stored = |pair: &Pair, id: String| {
+        let database = pair.database.clone();
+        async move { database.load_server(&id).await.unwrap().unwrap().account }
+    };
+    assert_eq!(
+        stored(&pair, added.id.clone()).await.as_deref(),
+        Some("brand-1")
+    );
+
+    let back = pair
+        .local
+        .switch_account(added.id.clone(), None)
+        .await
+        .expect("switch back locally");
+    assert_eq!(back, switched, "the row a client renders does not change");
+    assert_eq!(stored(&pair, added.id.clone()).await, None);
+}
+
+#[tokio::test]
+async fn library_actions_are_refused_by_a_source_without_them() {
+    let pair = spawn_pair().await;
+    for side in [&pair.local as &dyn KopuzApi, &pair.wire] {
+        let refusals = [
+            side.rate("/lib/seed-0.flac".into(), api::Rating::Dislike)
+                .await
+                .expect_err("no rating"),
+            side.follow("artist".into(), true)
+                .await
+                .expect_err("no following"),
+            side.save("/lib/seed-0.flac".into(), true)
+                .await
+                .expect_err("no saving"),
+            side.remove_from_history("token".into())
+                .await
+                .expect_err("no history"),
+        ];
+        for refusal in refusals {
+            assert_eq!(refusal.code, ErrorCode::Unsupported, "{refusal:?}");
+        }
+    }
+
+    let caps = pair
+        .wire
+        .sources()
+        .await
+        .expect("sources")
+        .into_iter()
+        .find(|source| source.active)
+        .expect("an active source")
+        .capabilities;
+    assert!(!caps.rate && !caps.follow && !caps.save);
+    assert!(!caps.remove_from_history && !caps.playlist_details);
+}
+
+/// A description the source cannot keep is refused whole, not half-applied as a rename.
+#[tokio::test]
+async fn a_playlist_edit_needs_details_to_push_them() {
+    let pair = spawn_pair().await;
+    let id = pair
+        .wire
+        .create_playlist("Edited".into(), Vec::new())
+        .await
+        .expect("create");
+
+    pair.wire
+        .edit_playlist(
+            id.clone(),
+            api::PlaylistEdit {
+                name: Some("Edited over the wire".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a name alone is a rename");
+    for side in [&pair.local as &dyn KopuzApi, &pair.wire] {
+        let refused = side
+            .edit_playlist(
+                id.clone(),
+                api::PlaylistEdit {
+                    name: Some("Never applied".into()),
+                    description: Some("notes".into()),
+                    privacy: Some(api::PlaylistPrivacy::Private),
+                },
+            )
+            .await
+            .expect_err("a local playlist has no details");
+        assert_eq!(refused.code, ErrorCode::Unsupported);
+    }
+
+    let catalog = pair.local.playlists().await.expect("catalog");
+    let playlist = catalog
+        .playlists
+        .iter()
+        .find(|playlist| playlist.id == id)
+        .expect("still there");
+    assert_eq!(playlist.name, "Edited over the wire");
 }
 
 /// Scan the library and wait for the job to finish.
@@ -1608,6 +1851,58 @@ async fn queue_snapshot_and_edits_agree_across_transports() {
     );
 }
 
+/// Neither transport may queue nothing and answer success.
+#[tokio::test]
+async fn a_queue_from_an_unresolved_id_is_refused_identically() {
+    let pair = spawn_pair().await;
+
+    for context in [
+        QueueContext::Album {
+            id: "MPREunknown".into(),
+        },
+        QueueContext::Playlist {
+            id: "PLunsaved".into(),
+        },
+    ] {
+        let request = SetQueueRequest {
+            mode: QueueMode::Replace,
+            context: context.clone(),
+            start_index: Some(0),
+            shuffle: Some(false),
+        };
+        let local = pair.local.set_queue(request.clone()).await.err();
+        let wire = pair.wire.set_queue(request).await.err();
+        assert!(local.is_some(), "{context:?}");
+        assert_eq!(local.map(|e| e.code), wire.map(|e| e.code), "{context:?}");
+    }
+    let snapshot = pair.local.queue_snapshot().await.expect("snapshot");
+    assert!(snapshot.items.is_empty(), "nothing was queued");
+}
+
+/// A local library has no account to picture.
+#[tokio::test]
+async fn an_account_picture_is_absent_identically_without_an_account() {
+    let pair = spawn_pair().await;
+
+    let local = pair.local.sources().await.expect("local sources");
+    let wire = pair.wire.sources().await.expect("wire sources");
+    assert!(local.iter().all(|source| source.avatar.is_none()));
+    assert_eq!(
+        local.iter().map(|s| &s.avatar).collect::<Vec<_>>(),
+        wire.iter().map(|s| &s.avatar).collect::<Vec<_>>()
+    );
+
+    let active = local.iter().find(|s| s.active).expect("an active source");
+    let request = api::ArtworkRequest {
+        target: api::ArtworkTarget::Account(active.id.clone()),
+        hq: false,
+    };
+    let local = pair.local.artwork(request.clone()).await.err();
+    let wire = pair.wire.artwork(request).await.err();
+    assert_eq!(local.as_ref().map(|e| e.code), Some(ErrorCode::NotFound));
+    assert_eq!(local.map(|e| e.code), wire.map(|e| e.code));
+}
+
 /// Neither service is configured in this harness, so both transports must
 /// agree on saying so rather than one erroring and the other answering
 /// empty -- the failure mode a second implementation would inherit.
@@ -1666,6 +1961,77 @@ async fn catalog_and_radio_report_absence_identically() {
             .err()
             .map(|e| e.code),
     );
+}
+
+/// Opening a page the source does not have fails the same way on both transports.
+#[tokio::test]
+async fn catalog_pages_agree_across_transports() {
+    let pair = spawn_pair().await;
+
+    let active = |sources: Vec<api::SourceInfo>| {
+        sources
+            .into_iter()
+            .find(|source| source.active)
+            .expect("an active source")
+            .capabilities
+    };
+    let local = active(pair.local.sources().await.expect("local sources"));
+    let wire = active(pair.wire.sources().await.expect("wire sources"));
+    assert_eq!(local, wire);
+    assert!(local.pages.is_empty(), "a local library declares no pages");
+
+    let request = api::CatalogDetailRequest::page("FEmusic_home");
+    let local = pair.local.catalog_detail(request.clone()).await;
+    let wire = pair.wire.catalog_detail(request).await;
+    assert_eq!(
+        local.as_ref().err().map(|e| e.code),
+        Some(ErrorCode::Unsupported)
+    );
+    assert_eq!(local.err().map(|e| e.code), wire.err().map(|e| e.code));
+}
+
+/// An unknown filter fails the same way on both transports, not empty on one.
+#[tokio::test]
+async fn search_filters_agree_across_transports() {
+    let pair = spawn_pair().await;
+
+    let plain = api::SearchRequest::new("seed");
+    let local = pair
+        .local
+        .search(plain.clone())
+        .await
+        .expect("local search");
+    let wire = pair.wire.search(plain).await.expect("wire search");
+    assert_eq!(local, wire);
+    assert!(
+        !local.tracks.is_empty(),
+        "the plain search still finds rows"
+    );
+    assert!(local.shelves.is_empty() && local.continuation.is_none());
+
+    let caps = pair
+        .wire
+        .sources()
+        .await
+        .expect("sources")
+        .into_iter()
+        .find(|source| source.active)
+        .expect("an active source")
+        .capabilities;
+    assert!(caps.search_filters.is_empty());
+
+    let filtered = api::SearchRequest::filtered("seed", "songs");
+    assert_eq!(
+        pair.local
+            .search(filtered.clone())
+            .await
+            .err()
+            .map(|e| e.code),
+        pair.wire.search(filtered).await.err().map(|e| e.code),
+    );
+    let local = pair.local.search_suggestions("se".into()).await;
+    let wire = pair.wire.search_suggestions("se".into()).await;
+    assert_eq!(local.map_err(|e| e.code), wire.map_err(|e| e.code));
 }
 
 /// Deleting from disk is the one API call that destroys something outside
@@ -2296,6 +2662,49 @@ async fn integrations_agree_across_transports_and_carry_no_secret() {
     );
 }
 
+/// The profile list is read from the daemon's machine, and connecting takes
+/// only an id from it, never a path the daemon did not list.
+#[tokio::test]
+async fn browser_connect_agrees_across_transports() {
+    let pair = spawn_pair().await;
+
+    assert_eq!(
+        pair.local.browser_profiles().await.expect("local profiles"),
+        pair.wire.browser_profiles().await.expect("wire profiles"),
+    );
+    let listenbrainz = pair
+        .wire
+        .integrations()
+        .await
+        .expect("integrations")
+        .into_iter()
+        .find(|integration| integration.id == "listenbrainz")
+        .expect("listenbrainz is offered");
+    assert_eq!(listenbrainz.connect, api::ConnectKind::BrowserProfile);
+
+    for (id, code) in [
+        ("listenbrainz", api::ErrorCode::NotFound),
+        ("lastfm", api::ErrorCode::Unsupported),
+    ] {
+        let local = pair
+            .local
+            .connect_integration_from_browser(id.to_string(), "/not/a/profile".to_string())
+            .await
+            .err()
+            .map(|error| error.code);
+        assert_eq!(local, Some(code), "{id}");
+        assert_eq!(
+            local,
+            pair.wire
+                .connect_integration_from_browser(id.to_string(), "/not/a/profile".to_string())
+                .await
+                .err()
+                .map(|error| error.code),
+            "{id} is refused the same way on the wire",
+        );
+    }
+}
+
 /// The download overlay reads per-item state, so a client on the socket has to
 /// see the same list the in-process one does -- including the failures, which
 /// is what a batch against unreachable files produces.
@@ -2361,4 +2770,101 @@ async fn both_transports_shake_hands_on_this_revision() {
             mismatched => panic!("{mismatched:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn version_switches_and_their_errors_map_identically() {
+    let pair = spawn_pair().await;
+    pair.wire
+        .set_queue(replace(&["ytm-song:a", "/b.wav"]))
+        .await
+        .expect("set queue");
+    wait_state(&pair.local, "committed", |state| {
+        matches!(state.intent, Intent::Committed { .. })
+    })
+    .await;
+    let local = pair.local.player_state().await.expect("local state");
+    let wire = pair.wire.player_state().await.expect("wire state");
+    let song = local.track.clone().expect("the song plays");
+    assert_eq!(song.version(), Some(api::TrackVersion::Song));
+    assert_eq!(wire.track, local.track, "the pairing crosses the wire");
+
+    pair.wire
+        .player_command(PlayerCommand::SetVersion {
+            version: api::TrackVersion::Video,
+        })
+        .await
+        .expect("switch over the wire");
+    let state = wait_state(&pair.local, "the video committed", |state| {
+        state
+            .track
+            .as_ref()
+            .is_some_and(|t| t.key == "ytm-song:a-video")
+            && matches!(state.intent, Intent::Committed { .. })
+    })
+    .await;
+    let video = state.track.expect("the video plays");
+    assert_eq!(video.version(), Some(api::TrackVersion::Video));
+    assert_eq!(
+        video.counterpart.as_ref().map(|other| other.key.as_str()),
+        Some("ytm-song:a")
+    );
+    assert_eq!(state.queue.length, 2);
+    let queue = pair
+        .wire
+        .queue_snapshot()
+        .await
+        .expect("queue over the wire");
+    assert_eq!(queue.items[0].key, "ytm-song:a-video");
+    assert_eq!(queue.items[1].key, "/b.wav");
+
+    // This pair serves no pictures, and says so the same way on both sides.
+    let request = api::VideoRequest {
+        key: "ytm-song:a-video".into(),
+        start: 0,
+        length: Some(1024),
+    };
+    let local_err = pair
+        .local
+        .video(request.clone())
+        .await
+        .expect_err("no video locally");
+    let wire_err = pair
+        .wire
+        .video(request)
+        .await
+        .expect_err("no video over the wire");
+    assert_eq!(local_err.code, ErrorCode::Unsupported);
+    assert_eq!(
+        (wire_err.code, wire_err.message),
+        (local_err.code, local_err.message)
+    );
+
+    pair.wire
+        .player_command(PlayerCommand::Next)
+        .await
+        .expect("next");
+    wait_state(&pair.local, "the plain track", |state| {
+        state.track.as_ref().is_some_and(|t| t.key == "/b.wav")
+            && matches!(state.intent, Intent::Committed { .. })
+    })
+    .await;
+    let switch = PlayerCommand::SetVersion {
+        version: api::TrackVersion::Video,
+    };
+    let local_err = pair
+        .local
+        .player_command(switch)
+        .await
+        .expect_err("no pair locally");
+    let wire_err = pair
+        .wire
+        .player_command(switch)
+        .await
+        .expect_err("no pair over the wire");
+    assert_eq!(local_err.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        (wire_err.code, wire_err.message),
+        (local_err.code, local_err.message)
+    );
 }

@@ -80,20 +80,23 @@ async fn upsert_track(
     let rg_track_peak = t.replay_gain.track_peak.map(f64::from);
     let rg_album_gain = t.replay_gain.album_gain_db.map(f64::from);
     let rg_album_peak = t.replay_gain.album_peak.map(f64::from);
+    let explicit = i64::from(t.explicit);
     // A remote row is dated when first seen; a local one takes its file's time from the scan.
+    // A listing that shows no play count (a liked-songs sync) keeps the one an earlier listing gave.
     let pk = sqlx::query_scalar!(
         "INSERT INTO tracks \
                (source, track_key, path, service, source_album_id, title, artist, album, duration, \
                 khz, bitrate, track_number, disc_number, cover_path, added_at, \
-                rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak) \
+                rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, explicit, plays) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
-                     CASE WHEN ?4 IS NULL THEN 0 ELSE unixepoch() END, ?15, ?16, ?17, ?18) \
+                     CASE WHEN ?4 IS NULL THEN 0 ELSE unixepoch() END, ?15, ?16, ?17, ?18, ?19, ?20) \
              ON CONFLICT(source, track_key) DO UPDATE SET \
                path=?3, service=?4, \
                source_album_id=CASE WHEN ?5 != '' THEN ?5 ELSE tracks.source_album_id END, \
                title=?6, artist=?7, album=?8, duration=?9, \
                khz=?10, bitrate=?11, track_number=?12, disc_number=?13, cover_path=?14, \
-               rg_track_gain=?15, rg_track_peak=?16, rg_album_gain=?17, rg_album_peak=?18 \
+               rg_track_gain=?15, rg_track_peak=?16, rg_album_gain=?17, rg_album_peak=?18, \
+               explicit=MAX(tracks.explicit, ?19), plays=COALESCE(?20, tracks.plays) \
              RETURNING rowid_pk AS \"pk!: i64\"",
         src,
         track_key,
@@ -112,7 +115,9 @@ async fn upsert_track(
         rg_track_gain,
         rg_track_peak,
         rg_album_gain,
-        rg_album_peak
+        rg_album_peak,
+        explicit,
+        t.plays
     )
     .fetch_one(&mut **tx)
     .await?;
@@ -465,6 +470,15 @@ pub async fn dirty_unlikes(pool: &SqlitePool, server_id: &str) -> Result<Vec<Str
     )
     .fetch_all(pool)
     .await?)
+}
+
+#[tracing::instrument(skip_all, fields(server_id = %server_id))]
+pub async fn discard_pending_favorites(pool: &SqlitePool, server_id: &str) -> Result<(), DbError> {
+    sqlx::query("DELETE FROM favorites WHERE server_id = ?1 AND dirty != 0")
+        .bind(server_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 #[tracing::instrument(skip_all, fields(server_id = %server_id))]
@@ -1347,13 +1361,14 @@ async fn write_queue_rows(
         let rg_track_peak = t.replay_gain.track_peak.map(f64::from);
         let rg_album_gain = t.replay_gain.album_gain_db.map(f64::from);
         let rg_album_peak = t.replay_gain.album_peak.map(f64::from);
+        let explicit = i64::from(t.explicit);
         sqlx::query!(
             "INSERT INTO queue_tracks (source, position, track_key, service, source_album_id, title, \
                artist, album, duration, khz, bitrate, track_number, disc_number, cover_path, \
                mb_release_id, mb_recording_id, mb_track_id, playlist_item_id, \
-               rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak) \
+               rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, explicit, plays) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-                     ?19, ?20, ?21, ?22)",
+                     ?19, ?20, ?21, ?22, ?23, ?24)",
             source,
             position,
             track_key,
@@ -1375,7 +1390,9 @@ async fn write_queue_rows(
             rg_track_gain,
             rg_track_peak,
             rg_album_gain,
-            rg_album_peak
+            rg_album_peak,
+            explicit,
+            t.plays
         )
         .execute(&mut *conn)
         .await?;
