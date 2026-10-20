@@ -16,11 +16,8 @@ pub struct Cli {
     #[arg(long, global = true, env = "KOPUZ_SOCKET", conflicts_with = "address")]
     pub socket: Option<PathBuf>,
     /// TCP host:port served by kopuzd --listen.
-    #[arg(long, global = true, requires = "token_file")]
+    #[arg(long, global = true)]
     pub address: Option<String>,
-    /// File containing the daemon's TCP bearer token.
-    #[arg(long, global = true, requires = "address")]
-    pub token_file: Option<PathBuf>,
     /// Print machine-readable JSON.
     #[arg(long, global = true)]
     pub json: bool,
@@ -155,6 +152,20 @@ pub enum Job {
     LibrarySync,
     FavoritesSync,
     PlaylistSync,
+}
+
+/// A folder-list answer as the daemon reads it: a JSON list of paths passes through, and anything else is one path.
+fn directories_value(key: &str, raw: &str) -> Result<String, ApiError> {
+    if !raw.trim_start().starts_with('[') {
+        return Ok(api::encode_directories(&[raw.to_string()]));
+    }
+    serde_json::from_str::<Vec<String>>(raw)
+        .map(|paths| api::encode_directories(&paths))
+        .map_err(|_| {
+            ApiError::invalid_input(format!(
+                "--field {key} takes a path or a JSON list of paths, like {key}='[\"/music\",\"/more\"]'"
+            ))
+        })
 }
 
 fn parse_field(value: &str) -> Result<FieldValue, String> {
@@ -441,7 +452,7 @@ async fn execute_source(
                 .find(|entry| entry.id == service)
                 .ok_or_else(|| ApiError::not_found("no such service; use kopuzctl services"))?;
             let mut seen = std::collections::HashSet::new();
-            for field in &fields {
+            for field in &mut fields {
                 let spec = offered
                     .fields
                     .iter()
@@ -456,6 +467,9 @@ async fn execute_source(
                 }
                 if !seen.insert(field.key.clone()) {
                     return Err(ApiError::invalid_input("duplicate setup field"));
+                }
+                if matches!(spec.kind, api::FieldKind::Directories) {
+                    field.value = directories_value(&field.key, &field.value)?;
                 }
             }
             let mut secrets = Vec::new();
@@ -605,18 +619,38 @@ mod tests {
     fn invalid_options_fail_before_connecting() {
         for args in [
             vec!["kopuzctl", "volume", "101"],
-            vec!["kopuzctl", "--address", "localhost:9000", "status"],
             vec!["kopuzctl", "source", "login", "id", "--password-stdin"],
             vec!["kopuzctl", "queue", "--limit", "0"],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
+        assert!(Cli::try_parse_from(["kopuzctl", "--address", "localhost:9000", "status"]).is_ok());
         assert_eq!(
             Cli::try_parse_from(["kopuzctl", "--help"])
                 .err()
                 .unwrap()
                 .kind(),
             clap::error::ErrorKind::DisplayHelp
+        );
+    }
+
+    #[test]
+    fn a_folder_field_takes_a_plain_path_or_a_json_list() {
+        let decoded = |raw: &str| {
+            directories_value("directories", raw).map(|value| api::decode_directories(&value))
+        };
+        assert_eq!(decoded("/music").unwrap(), vec!["/music"]);
+        assert_eq!(decoded("/my music, live").unwrap(), vec!["/my music, live"]);
+        assert_eq!(
+            decoded(r#"["/a", "/b"]"#).unwrap(),
+            vec!["/a".to_string(), "/b".to_string()]
+        );
+        let error = decoded("[/a").unwrap_err();
+        assert_eq!(error.code, api::ErrorCode::InvalidInput);
+        assert!(
+            error.message.contains("JSON list of paths"),
+            "{}",
+            error.message
         );
     }
 

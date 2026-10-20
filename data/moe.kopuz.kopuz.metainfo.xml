@@ -48,6 +48,13 @@
   </screenshots>
 
   <releases>
+    <release version="0.22.0" date="2026-10-20">
+      <description>
+        <p>
+          YouTube Music gains more browsing pages, search filters and suggestions, library and playlist actions, brand account switching, and a Song/Video switch that keeps your place. New playback controls cover streaming quality, autoplay radio, skipping explicit tracks and pausing listening history. Browser sign-in is easier, free-account streams are more reliable, and ListenBrainz can connect through a signed-in browser profile. Settings reload live, separate clients no longer overwrite each other's changes, and album identity, seek progress and context menus are more reliable. Daemon TCP connections now use an address without a token and have no authentication.
+        </p>
+      </description>
+    </release>
     <release version="0.21.0" date="2026-10-14">
       <description>
         <p>

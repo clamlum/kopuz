@@ -11,8 +11,8 @@
 //! kernel decides who may connect. The path is stable across daemon
 //! restarts, so `events()` reattaches to it and reports the gap as
 //! [`api::ApiEvent::Resync`]. A daemon started with `--listen` is also
-//! reachable over plain HTTP/2, where [`GrpcApi::connect_tcp`] presents
-//! the daemon's bearer token on every call.
+//! reachable over plain HTTP/2 through [`GrpcApi::connect_tcp`], again
+//! with no credentials.
 //!
 //! Playback mutations use typed unary RPCs. `events()` owns a reattaching
 //! server-streaming subscription.
@@ -26,14 +26,11 @@ use api::{
 use hyper_util::rt::TokioIo;
 use proto::convert;
 use proto::kopuz_client::KopuzClient;
-use tonic::metadata::{Ascii, MetadataValue};
-use tonic::service::Interceptor;
-use tonic::service::interceptor::InterceptedService;
+use tonic::Request;
 use tonic::transport::{Channel, Endpoint, Uri};
-use tonic::{Request, Status};
 use tower::service_fn;
 
-type Client = KopuzClient<InterceptedService<Channel, Auth>>;
+type Client = KopuzClient<Channel>;
 
 /// The default socket or named pipe served by the desktop app and `kopuzd`.
 #[cfg(windows)]
@@ -66,22 +63,6 @@ pub struct GrpcApi {
     client: Client,
 }
 
-/// Presents the bearer token a TCP daemon requires. Over the socket there
-/// is none, and requests pass through untouched.
-#[derive(Clone)]
-struct Auth(Option<MetadataValue<Ascii>>);
-
-impl Interceptor for Auth {
-    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        if let Some(header) = &self.0 {
-            request
-                .metadata_mut()
-                .insert("authorization", header.clone());
-        }
-        Ok(request)
-    }
-}
-
 fn wire_error(status: tonic::Status) -> ApiError {
     proto::status::from_status(&status)
 }
@@ -111,25 +92,17 @@ impl GrpcApi {
         }
     }
 
-    /// Dial a daemon's `--listen` address, `host:port`, with the token
-    /// from its token file. Lazy like [`GrpcApi::new`]; a token the
-    /// header cannot carry is the one thing reported here.
-    pub fn connect_tcp(address: impl Into<String>, token: &str) -> Result<Self, ApiError> {
+    /// Dial a daemon's `--listen` address, `host:port`. Lazy like
+    /// [`GrpcApi::new`]; an address that is not a valid URI is the one
+    /// thing reported here.
+    pub fn connect_tcp(address: impl Into<String>) -> Result<Self, ApiError> {
         let address = address.into();
-        let header =
-            MetadataValue::try_from(format!("Bearer {}", token.trim())).map_err(|_| ApiError {
-                code: api::ErrorCode::InvalidInput,
-                message: "the daemon token is not printable ASCII".into(),
-            })?;
         let channel = Endpoint::from_shared(format!("http://{address}"))
-            .map_err(|error| ApiError {
-                code: api::ErrorCode::InvalidInput,
-                message: format!("{address}: {error}"),
-            })?
+            .map_err(|error| ApiError::invalid_input(format!("{address}: {error}")))?
             .connect_lazy();
         Ok(Self {
             address: Address::Tcp(address),
-            client: KopuzClient::with_interceptor(channel, Auth(Some(header))),
+            client: KopuzClient::new(channel),
         })
     }
 
@@ -150,7 +123,7 @@ impl GrpcApi {
         );
         Ok(Self {
             address: Address::Socket(path),
-            client: KopuzClient::with_interceptor(channel, Auth(None)),
+            client: KopuzClient::new(channel),
         })
     }
 
@@ -359,10 +332,10 @@ impl api::LibraryApi for GrpcApi {
             .collect())
     }
 
-    async fn albums(&self, page: Page) -> Result<api::AlbumPage, ApiError> {
+    async fn albums(&self, query: api::AlbumQuery, page: Page) -> Result<api::AlbumPage, ApiError> {
         let albums = self
             .client()
-            .get_albums(Request::new(convert::page_to_proto(page)))
+            .get_albums(Request::new(convert::albums_request_to_proto(&query, page)))
             .await
             .map_err(wire_error)?;
         Ok(convert::album_page_from_proto(albums.get_ref()))
@@ -402,10 +375,16 @@ impl api::LibraryApi for GrpcApi {
         Ok(convert::track_page_from_proto(tracks.get_ref()))
     }
 
-    async fn artists(&self, page: Page) -> Result<api::ArtistPage, ApiError> {
+    async fn artists(
+        &self,
+        query: api::ArtistQuery,
+        page: Page,
+    ) -> Result<api::ArtistPage, ApiError> {
         let artists = self
             .client()
-            .get_artists(Request::new(convert::page_to_proto(page)))
+            .get_artists(Request::new(convert::artists_request_to_proto(
+                &query, page,
+            )))
             .await
             .map_err(wire_error)?;
         Ok(convert::artist_page_from_proto(artists.get_ref()))
@@ -809,15 +788,18 @@ impl api::ConfigApi for GrpcApi {
         Ok(convert::config_view_from_proto(view.get_ref()))
     }
 
-    async fn set_config(&self, config: config::AppConfig) -> Result<ConfigView, ApiError> {
-        let view = self
+    async fn edit_config(
+        &self,
+        edits: Vec<config::SettingsEdit>,
+    ) -> Result<api::EditReport, ApiError> {
+        let report = self
             .client()
-            .set_config(Request::new(proto::SetConfigRequest {
-                config: Some(convert::config_to_proto(&config)),
+            .edit_config(Request::new(proto::EditConfigRequest {
+                edits: edits.iter().map(convert::config_edit_to_proto).collect(),
             }))
             .await
             .map_err(wire_error)?;
-        Ok(convert::config_view_from_proto(view.get_ref()))
+        Ok(convert::edit_report_from_proto(report.get_ref()))
     }
 
     async fn preview_equalizer(
@@ -831,6 +813,17 @@ impl api::ConfigApi for GrpcApi {
         Ok(())
     }
 
+    async fn preview_replay_gain(
+        &self,
+        replay_gain: config::ReplayGainSettings,
+    ) -> Result<(), ApiError> {
+        self.client()
+            .preview_replay_gain(Request::new(convert::replay_gain_to_proto(replay_gain)))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+
     async fn daemon_status(&self) -> Result<api::DaemonStatus, ApiError> {
         let status = self
             .client()
@@ -838,6 +831,38 @@ impl api::ConfigApi for GrpcApi {
             .await
             .map_err(wire_error)?;
         Ok(convert::daemon_status_from_proto(status.get_ref()))
+    }
+}
+
+#[async_trait::async_trait]
+impl api::PrefsApi for GrpcApi {
+    async fn frontend_prefs(&self, frontend: String) -> Result<Vec<api::FrontendPref>, ApiError> {
+        let list = self
+            .client()
+            .get_frontend_prefs(Request::new(proto::GetFrontendPrefsRequest { frontend }))
+            .await
+            .map_err(wire_error)?;
+        Ok(list
+            .get_ref()
+            .prefs
+            .iter()
+            .map(convert::frontend_pref_from_proto)
+            .collect())
+    }
+
+    async fn set_frontend_prefs(
+        &self,
+        frontend: String,
+        entries: Vec<api::PrefEntry>,
+    ) -> Result<(), ApiError> {
+        self.client()
+            .set_frontend_prefs(Request::new(proto::SetFrontendPrefsRequest {
+                frontend,
+                entries: entries.iter().map(convert::pref_entry_to_proto).collect(),
+            }))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
     }
 }
 

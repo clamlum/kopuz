@@ -42,6 +42,9 @@ async fn imports_synthetic_fixture() {
         r#"{
             "theme": "dark",
             "volume": 0.8,
+            "discord_presence_paused": false,
+            "hero_height": 410,
+            "album_sort": [{ "field": "Year", "direction": "Desc" }],
             "active_source": "Server",
             "listen_counts": { "ytmusic:VID1:urlhex_deadbeef": 5, "/music/a.flac": 2 },
             "server": {
@@ -180,11 +183,34 @@ async fn imports_synthetic_fixture() {
         .await
         .unwrap();
     assert_eq!(active, "srv-1");
+    assert_eq!(db.playback_state().await.unwrap(), (0.8, false));
+    assert_eq!(db.discord_presence_paused().await.unwrap(), Some(false));
     let settings = std::fs::read_to_string(config::store::settings_path_for(&dir)).unwrap();
     assert!(
         !settings.contains("SECRET_COOKIE"),
         "no token leaked into the settings file"
     );
+
+    // Its UI state seeds both frontends' prefs alike.
+    for frontend in ["kopuz", "gpui"] {
+        let prefs: std::collections::HashMap<String, String> = db
+            .frontend_prefs(frontend)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        let ui = config::UiPrefs::from_entries(prefs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        assert_eq!(ui.hero_height, 410, "{frontend}");
+        assert_eq!(
+            ui.album_sort,
+            [config::SortCriterion::new(
+                config::AlbumSortField::Year,
+                config::SortDirection::Desc
+            )],
+            "{frontend}"
+        );
+        assert_eq!(prefs["hero_height"], "410");
+    }
 
     // The YT sync time becomes the YT server's favorites stamp, or its first open would re-stream the liked library.
     let stamp: Option<String> = sqlx::query_scalar(
@@ -224,14 +250,9 @@ async fn imports_synthetic_fixture() {
     assert!(!dir.join("config.json").exists());
     assert!(dir.join("config.json.bak").exists());
 
-    // A SECOND database (the debug/release split) finds only the .bak files and
-    // still imports — the gate is per-DB emptiness, not a shared sentinel.
-    let db2_path = dir.join("kopuz-second.db");
-    let db2 = db::init(&db2_path).await.unwrap();
-    let second = db2.import_legacy_json(&dir).await.unwrap();
-    assert!(second.ran, "second DB must import from the .bak files");
-    assert_eq!(second.tracks, 2);
-    assert_eq!(second.favorites, 3);
+    // The install imported once; a second database (the debug/release split) does not import the .bak copies again.
+    let db2 = db::init(&dir.join("kopuz-second.db")).await.unwrap();
+    assert!(!db2.import_legacy_json(&dir).await.unwrap().ran);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -314,7 +335,7 @@ async fn finalize_is_inert_when_no_import_ran() {
     let db = db::init(&db_path).await.unwrap();
     // Simulate "import failed, runtime wrote data anyway": no import, but the
     // DB becomes non-empty.
-    db.save_config(&config::AppConfig::default()).await.unwrap();
+    db.ensure_app_state().await.unwrap();
 
     let renamed = db.finalize_migration(&dir).await.unwrap();
     assert_eq!(
@@ -322,6 +343,58 @@ async fn finalize_is_inert_when_no_import_ran() {
         "finalize must not rename files no import consumed"
     );
     assert!(dir.join("config.json").exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A database a reset or a corruption recreated is empty again, and the legacy files are still there; it must not take them in a second time.
+#[tokio::test]
+async fn a_recreated_database_does_not_import_again() {
+    let dir = unique_dir("recreated");
+    std::fs::write(
+        dir.join("library.json"),
+        r#"{ "tracks": [
+            { "path": "/music/a.flac", "album_id": "alb", "title": "A", "artist": "X",
+              "album": "L", "duration": 1, "khz": 1, "bitrate": 1, "artists": ["X"] }
+        ] }"#,
+    )
+    .unwrap();
+    let db_path = dir.join("kopuz.db");
+    let db = db::init(&db_path).await.unwrap();
+    assert!(db.import_legacy_json(&dir).await.unwrap().ran);
+    drop(db);
+    for ext in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(dir.join(format!("kopuz.db{ext}")));
+    }
+
+    let recreated = db::init(&db_path).await.unwrap();
+    assert!(!recreated.import_legacy_json(&dir).await.unwrap().ran);
+    let mut conn = open(&db_path).await;
+    let tracks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(tracks, 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An install that imported before the marker existed is marked the first time it boots with its database in use.
+#[tokio::test]
+async fn a_database_in_use_marks_the_install_imported() {
+    let dir = unique_dir("premarker");
+    std::fs::write(dir.join("config.json"), r#"{ "theme": "dark" }"#).unwrap();
+    let db_path = dir.join("kopuz.db");
+    let db = db::init(&db_path).await.unwrap();
+    db.ensure_app_state().await.unwrap();
+    assert!(!db.import_legacy_json(&dir).await.unwrap().ran);
+    drop(db);
+    for ext in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(dir.join(format!("kopuz.db{ext}")));
+    }
+
+    let recreated = db::init(&db_path).await.unwrap();
+    assert!(!recreated.import_legacy_json(&dir).await.unwrap().ran);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

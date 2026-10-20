@@ -161,7 +161,7 @@ pub fn SourceSettings(
                                         }
                                     }
                                 }
-                                p { class: "text-xs text-white/60", "{i18n::t_with(\"service\", &[(\"name\", service_name.clone())])}" }
+                                p { class: "text-xs text-white/60", "{i18n::t_with(\"service\", &[(\"name\", service_name.clone().into())])}" }
                                 p { class: "text-xs text-white/60 truncate", "{url}" }
                                 if is_active && srv.needs_network {
                                     match srv.state {
@@ -273,9 +273,9 @@ fn CloudStorage(source_id: String, uploads: bool) -> Element {
                 Some(Ok(value)) => {
                     let used = format!("{:.1} MiB", value.used_bytes as f64 / 1_048_576.0);
                     let total = format!("{:.1} MiB", value.quota_bytes as f64 / 1_048_576.0);
-                    rsx! { p { class: "text-xs text-white/60", "{i18n::t_with(\"cloud_storage_usage\", &[(\"used\", used.clone()), (\"total\", total.clone())])}" } }
+                    rsx! { p { class: "text-xs text-white/60", "{i18n::t_with(\"cloud_storage_usage\", &[(\"used\", used.clone().into()), (\"total\", total.clone().into())])}" } }
                 }
-                Some(Err(error)) => rsx! { p { class: "text-xs text-red-400", "{error}" } },
+                Some(Err(error)) => rsx! { p { class: "text-xs text-red-400", "{crate::forms::error_text(&error)}" } },
                 None => rsx! { p { class: "text-xs text-white/60", "{i18n::t(\"cloud_storage_loading\")}" } },
             }
             if uploads {
@@ -313,20 +313,20 @@ fn CloudStorage(source_id: String, uploads: bool) -> Element {
                                     };
                                     let upload = api::TrackUpload { source_id: id.clone(), filename, content };
                                     if let Err(error) = api.upload_track(upload).await {
-                                        hooks::toast::toast_error(&error.to_string());
+                                        hooks::toast::toast_api_error(&error);
                                         break;
                                     }
                                     uploaded += 1;
                                 }
                                 if uploaded > 0 {
-                                    hooks::toast::toast(&i18n::t_with("music_uploaded", &[("count", uploaded.to_string())]));
+                                    hooks::toast::toast(&i18n::t_with("music_uploaded", &[("count", uploaded.into())]));
                                     match api.sources().await {
                                         Ok(sources) if sources.iter().any(|source| source.id == id && source.active) => {
                                             if let Err(error) = api.start_job(api::JobKind::LibrarySync).await {
-                                                hooks::toast::toast_error(&error.to_string());
+                                                hooks::toast::toast_api_error(&error);
                                             }
                                         }
-                                        Err(error) => hooks::toast::toast_error(&error.to_string()),
+                                        Err(error) => hooks::toast::toast_api_error(&error),
                                         _ => {},
                                     }
                                 }
@@ -340,7 +340,7 @@ fn CloudStorage(source_id: String, uploads: bool) -> Element {
                 }
             }
             if uploading() {
-                p { class: "text-xs text-white/60", "{i18n::t_with(\"uploading_music\", &[(\"name\", current_file())])}" }
+                p { class: "text-xs text-white/60", "{i18n::t_with(\"uploading_music\", &[(\"name\", current_file().into())])}" }
             }
         }
     }
@@ -354,13 +354,18 @@ fn AccountPicker(source_id: String) -> Element {
     let accounts = use_resource(move || {
         let api = api.clone();
         let id = listed_id.clone();
-        async move { api.accounts(id).await.map_err(|error| error.to_string()) }
+        async move {
+            api.accounts(id)
+                .await
+                .map_err(|error| crate::forms::error_text(&error))
+        }
     });
 
     let accounts = match &*accounts.read() {
         Some(Ok(accounts)) if accounts.len() > 1 => accounts.clone(),
         Some(Err(error)) => {
-            let message = i18n::t_with("source_accounts_failed", &[("error", error.clone())]);
+            let message =
+                i18n::t_with("source_accounts_failed", &[("error", error.clone().into())]);
             return rsx! {
                 p { class: "text-xs text-red-400 border-t border-white/10 pt-2", "{message}" }
             };
@@ -405,7 +410,7 @@ fn AccountPicker(source_id: String) -> Element {
                                 if let Err(error) = api.switch_account(id, account).await {
                                     tracing::warn!(%error, "switching the source account failed");
                                     chosen.set(None);
-                                    hooks::toast::toast_error(&error.to_string());
+                                    hooks::toast::toast_api_error(&error);
                                 }
                             });
                         },
@@ -431,7 +436,7 @@ fn ConnectionTest(source_id: String) -> Element {
         spawn(async move {
             let result = hooks::sources::test_connection(id)
                 .await
-                .map_err(|error| error.to_string());
+                .map_err(|error| crate::forms::error_text(&error));
             report.set(Some(result));
             running.set(false);
         });
@@ -488,7 +493,7 @@ fn ConnectionTest(source_id: String) -> Element {
                     },
                     Some(Err(error)) => rsx! {
                         p { class: "text-xs text-rose-300 break-words",
-                            "{i18n::t_with(\"connection_test_failed\", &[(\"error\", error.clone())])}"
+                            "{i18n::t_with(\"connection_test_failed\", &[(\"error\", error.clone().into())])}"
                         }
                     },
                     None => rsx! {},

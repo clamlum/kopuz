@@ -167,55 +167,18 @@ impl YouTubeMusicClient {
         self.page_id.as_deref()
     }
 
-    pub async fn search_tracks(&self, query: &str) -> Result<Vec<Track>, String> {
+    pub async fn search_tracks(
+        &self,
+        query: &str,
+    ) -> Result<Vec<Track>, crate::source::SourceError> {
         self.account(async { search::music_search_tracks(query, self.cookies.as_deref()).await })
             .await
-    }
-
-    /// Top YT Music artist-search avatar for `name` — the Artists grid uses this
-    /// so its photos are real YT artist images.
-    pub async fn resolve_artist_image(&self, name: &str) -> Result<Option<String>, String> {
-        self.account(async { search::resolve_artist_image(name, self.cookies.as_deref()).await })
-            .await
-    }
-
-    /// The artist's channel reconciled from one of their songs' watch-queue
-    /// byline — works for user channels the Artists search can't find.
-    pub async fn artist_channel_for_video(
-        &self,
-        video_id: &str,
-        artist_name: &str,
-    ) -> Result<Option<String>, String> {
-        self.account(async {
-            mix::artist_channel_for_video(
-                video_id,
-                artist_name,
-                self.cookies.as_deref().unwrap_or(""),
-            )
-            .await
-        })
-        .await
     }
 
     /// The channel's own name and square avatar.
     pub async fn artist_header(&self, channel_id: &str) -> Result<discover::ChannelHeader, String> {
         self.account(async {
             discover::artist_header(channel_id, self.cookies.as_deref().unwrap_or("")).await
-        })
-        .await
-    }
-
-    /// Resolve a saved album (title + artist) back to its YT album browse id
-    /// (`MPRE…`). Library YT albums carry no browse id, so the album page calls
-    /// this on demand before [`fetch_album_tracks`](Self::fetch_album_tracks)
-    /// to show the album's complete track list.
-    pub async fn resolve_album_browse_id(
-        &self,
-        album: &str,
-        artist: &str,
-    ) -> Result<Option<String>, String> {
-        self.account(async {
-            search::resolve_album_browse_id(album, artist, self.cookies.as_deref()).await
         })
         .await
     }

@@ -1046,6 +1046,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "castaway"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1307,6 +1316,20 @@ checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
  "memchr",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "rustversion",
+ "ryu",
+ "static_assertions",
 ]
 
 [[package]]
@@ -3274,6 +3297,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "garde"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d7f479d28d1daedf23970890723b8774d120aa627abcb33c1d7c93d0965e6c3"
+dependencies = [
+ "compact_str",
+ "garde_derive",
+ "smallvec",
+]
+
+[[package]]
+name = "garde_derive"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b0252cacdca8e6f30a900e6d436fbf294e23f674b9288ca4a5bd35976bef87c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "gdk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3974,6 +4019,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "icu_collator"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bbdf98e5e0aa827770acee171ebb568aaab975a36b56afdb5fd0e2f525750bb"
+dependencies = [
+ "icu_collator_data",
+ "icu_collections",
+ "icu_locale",
+ "icu_locale_core",
+ "icu_normalizer",
+ "icu_properties",
+ "icu_provider",
+ "smallvec",
+ "utf16_iter",
+ "utf8_iter",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_collator_data"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "038ed8e5817f2059c2f3efb0945ba78d060d3d25e8f1a1bea5139f821a21a2f0"
+
+[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3988,6 +4058,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "icu_locale"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5a396343c7208121dc86e35623d3dfe19814a7613cfd14964994cdc9c9a2e26"
+dependencies = [
+ "icu_collections",
+ "icu_locale_core",
+ "icu_locale_data",
+ "icu_provider",
+ "potential_utf",
+ "tinystr",
+ "zerovec",
+]
+
+[[package]]
 name = "icu_locale_core"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3995,10 +4080,17 @@ checksum = "92219b62b3e2b4d88ac5119f8904c10f8f61bf7e95b640d25ba3075e6cac2c29"
 dependencies = [
  "displaydoc",
  "litemap",
+ "serde",
  "tinystr",
  "writeable",
  "zerovec",
 ]
+
+[[package]]
+name = "icu_locale_data"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5fdcc9ac77c6d74ff5cf6e65ef3181d6af32003b16fce3a77fb451d2f695993"
 
 [[package]]
 name = "icu_normalizer"
@@ -4011,6 +4103,9 @@ dependencies = [
  "icu_properties",
  "icu_provider",
  "smallvec",
+ "utf16_iter",
+ "utf8_iter",
+ "write16",
  "zerovec",
 ]
 
@@ -4048,6 +4143,8 @@ checksum = "139c4cf31c8b5f33d7e199446eff9c1e02decfc2f0eec2c8d71f65befa45b421"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
+ "serde",
+ "stable_deref_trait",
  "writeable",
  "yoke",
  "zerofrom",
@@ -4448,7 +4545,7 @@ checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 
 [[package]]
 name = "kopuz"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "ashpd",
  "async-trait",
@@ -4509,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-api"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4521,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-client"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "async-trait",
  "directories",
@@ -4539,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-components"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64 0.22.1",
  "dioxus",
@@ -4561,20 +4658,23 @@ dependencies = [
 
 [[package]]
 name = "kopuz-config"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "directories",
+ "garde",
  "serde",
  "serde_json",
+ "strum",
  "tempfile",
  "toml 0.8.2",
+ "toml_edit 0.20.2",
  "tracing",
  "uuid 1.23.5",
 ]
 
 [[package]]
 name = "kopuz-ctl"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "clap",
  "kopuz-api",
@@ -4588,7 +4688,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-daemon"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4621,7 +4721,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-db"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4639,16 +4739,18 @@ dependencies = [
  "tokio",
  "toml 0.8.2",
  "tracing",
+ "uuid 1.23.5",
 ]
 
 [[package]]
 name = "kopuz-discord-presence"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "discord-rich-presence",
  "kopuz-config",
  "kopuz-db",
  "kopuz-reader",
+ "kopuz-utils",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -4658,7 +4760,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-hooks"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "dioxus",
  "futures-util",
@@ -4674,7 +4776,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-i18n"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "fluent-bundle",
  "unic-langid",
@@ -4682,7 +4784,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-kopuzd"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "async-trait",
  "directories",
@@ -4699,7 +4801,6 @@ dependencies = [
  "kopuz-reader",
  "kopuz-utils",
  "libc",
- "rand 0.10.2",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -4714,7 +4815,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-pages"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "dioxus",
  "directories",
@@ -4736,7 +4837,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-player"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -4744,6 +4845,7 @@ dependencies = [
  "cpal",
  "jni 0.21.1",
  "kopuz-config",
+ "kopuz-utils",
  "mpris-server",
  "ndk-context",
  "objc2",
@@ -4763,7 +4865,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-proto"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "futures-util",
  "kopuz-api",
@@ -4779,9 +4881,10 @@ dependencies = [
 
 [[package]]
 name = "kopuz-radio"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "futures-util",
+ "kopuz-utils",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -4794,9 +4897,10 @@ dependencies = [
 
 [[package]]
 name = "kopuz-reader"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "kopuz-config",
+ "kopuz-utils",
  "lofty",
  "reqwest 0.13.4",
  "serde",
@@ -4808,14 +4912,15 @@ dependencies = [
 
 [[package]]
 name = "kopuz-route"
-version = "0.21.0"
+version = "0.22.0"
 
 [[package]]
 name = "kopuz-scrobble"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "kopuz-config",
  "kopuz-db",
+ "kopuz-utils",
  "md5",
  "reqwest 0.13.4",
  "serde",
@@ -4826,7 +4931,7 @@ dependencies = [
 
 [[package]]
 name = "kopuz-server"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "aes-gcm 0.11.0",
  "async-trait",
@@ -4874,18 +4979,25 @@ dependencies = [
 
 [[package]]
 name = "kopuz-utils"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64 0.22.1",
  "color-thief",
  "directories",
+ "icu_collator",
+ "icu_locale_core",
  "image",
+ "jni 0.21.1",
+ "ndk-context",
+ "objc2-foundation",
  "percent-encoding",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "time",
  "tokio",
  "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -6735,6 +6847,8 @@ version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
 dependencies = [
+ "serde_core",
+ "writeable",
  "zerovec",
 ]
 
@@ -7543,11 +7657,13 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-rustls",
+ "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
  "mime",
  "mime_guess",
+ "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -7559,6 +7675,7 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower 0.5.3",
@@ -10068,6 +10185,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
+name = "utf16_iter"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8232dd3cdaed5356e0f716d285e4b40b932ac434100fe9b7e0e8e935b9e6246"
+
+[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11210,6 +11333,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "write16"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1890f4022759daae28ed4fe62859b1236caebfc61ede2f63ed4e695f3f6d936"
+
+[[package]]
 name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11534,6 +11663,7 @@ dependencies = [
  "displaydoc",
  "yoke",
  "zerofrom",
+ "zerovec",
 ]
 
 [[package]]

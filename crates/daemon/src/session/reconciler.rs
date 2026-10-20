@@ -21,6 +21,19 @@ impl Session {
         state_tx: &watch::Sender<PlayerState>,
     ) {
         match event {
+            EngineEvent::Stalled { token } => {
+                self.stalled = Some(token);
+                if token == self.visible_token() {
+                    self.publish_position_anchor(state_tx, Some(token), None, false);
+                }
+            }
+            EngineEvent::Resumed { token } if self.stalled == Some(token) => {
+                self.stalled = None;
+                if token == self.visible_token() {
+                    let playing = self.phase == ApiPhase::Playing;
+                    self.publish_position_anchor(state_tx, Some(token), None, playing);
+                }
+            }
             EngineEvent::PhaseChanged {
                 token,
                 phase: phase @ (EnginePhase::Playing | EnginePhase::Paused),
@@ -141,7 +154,11 @@ impl Session {
             }
             EngineEvent::Error { token, message } if token == self.intent.token() => {
                 tracing::warn!(%message, "engine reported a playback error");
-                if self.fail_load(token, api::ErrorCode::Internal, message) {
+                if self.fail_load(
+                    token,
+                    super::load::engine_failure_code(message.kind),
+                    message,
+                ) {
                     self.publish(state_tx, false);
                 }
             }
@@ -171,7 +188,7 @@ impl Session {
     pub(super) fn should_arm_transition(&mut self, position: Duration) -> bool {
         let (window, gapless) = if self.should_crossfade() {
             (
-                Duration::from_secs(self.config.crossfade_seconds as u64),
+                Duration::from_secs(self.settings.playback.crossfade_seconds as u64),
                 false,
             )
         } else if self.should_play_gapless() {
@@ -190,7 +207,7 @@ impl Session {
         }
         // Handing a track to an integration stops the engine, so it waits for
         // the end of this one rather than cutting it short.
-        let skip = self.config.skip_explicit;
+        let skip = self.settings.playback.skip_explicit;
         if gapless
             && let NextOutcome::Play(idx) = self
                 .model
@@ -216,7 +233,7 @@ impl Session {
     }
 
     pub(super) fn arm_transition(&mut self) {
-        let skip = self.config.skip_explicit;
+        let skip = self.settings.playback.skip_explicit;
         let NextOutcome::Play(idx) = self
             .model
             .peek_next_where(|track| !(skip && track.explicit))

@@ -36,7 +36,7 @@ pub type BufferProgressCallback = Arc<dyn Fn(u64, u64, Option<u64>) + Send + Syn
 struct SharedState {
     buffer: Vec<u8>,
     done: bool,
-    error: Option<String>,
+    error: Option<(ErrorKind, String)>,
     total_size: Option<u64>,
     response_ready: bool,
     prebuffer_ready: bool,
@@ -47,6 +47,29 @@ pub struct StreamBuffer {
     pos: u64,
 }
 
+fn configured(
+    builder: reqwest::ClientBuilder,
+    user_agent: Option<String>,
+) -> reqwest::Result<reqwest::Client> {
+    let ua = user_agent.unwrap_or_else(|| concat!("Kopuz/", env!("CARGO_PKG_VERSION")).to_string());
+    builder.tcp_nodelay(true).user_agent(ua).build()
+}
+
+/// The client a progressive stream of a track is fetched with.
+pub fn stream_client(user_agent: Option<String>) -> reqwest::Client {
+    configured(utils::http::builder(), user_agent).unwrap_or_else(|_| utils::http::client())
+}
+
+/// The client a radio stream is fetched with: native TLS on desktop, since some broadcaster CDNs reset rustls's handshake.
+pub fn radio_client(user_agent: Option<String>) -> reqwest::Client {
+    #[cfg(not(target_os = "android"))]
+    match configured(utils::http::native_tls_builder(), user_agent.clone()) {
+        Ok(client) => return client,
+        Err(error) => tracing::warn!(%error, "native TLS unavailable; streaming radio over rustls"),
+    }
+    stream_client(user_agent)
+}
+
 impl StreamBuffer {
     /// `runtime` is the handle the background download runs on. It's passed in
     /// (not `Handle::current()`) because construction happens on the engine's
@@ -55,20 +78,20 @@ impl StreamBuffer {
     ///
     /// `icy_tx`: when set, ICY metadata is requested, stripped from the
     /// audio, and published on the channel.
-    pub fn with_user_agent(
+    pub fn new(
         url: String,
         is_radio: bool,
-        user_agent: Option<String>,
+        client: reqwest::Client,
         icy_tx: Option<tokio::sync::watch::Sender<super::icy::IcyMeta>>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
-        Self::with_user_agent_and_progress(url, is_radio, user_agent, icy_tx, runtime, None)
+        Self::with_progress(url, is_radio, client, icy_tx, runtime, None)
     }
 
-    pub fn with_user_agent_and_progress(
+    pub fn with_progress(
         url: String,
         is_radio: bool,
-        user_agent: Option<String>,
+        client: reqwest::Client,
         icy_tx: Option<tokio::sync::watch::Sender<super::icy::IcyMeta>>,
         runtime: tokio::runtime::Handle,
         progress: Option<BufferProgressCallback>,
@@ -97,21 +120,13 @@ impl StreamBuffer {
         // tokio::sync::Mutex::lock().await (never blocks a worker thread).
         runtime.spawn(
             async move {
-                let ua = user_agent
-                    .unwrap_or_else(|| concat!("Kopuz/", env!("CARGO_PKG_VERSION")).to_string());
-                let client = reqwest::Client::builder()
-                    .tcp_nodelay(true)
-                    .user_agent(ua)
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new());
-
                 // Radio directories often hand out a playlist (.pls/.m3u par example)
                 // instead of the stream; follow it to its first entry.
                 let mut url = url;
                 let mut hops = 0u8;
                 let result = loop {
                     if hops > 3 {
-                        break Err("too many playlist redirects".to_string());
+                        break Err((ErrorKind::Other, "too many playlist redirects".to_string()));
                     }
                     hops += 1;
                     let mut request = client.get(&url);
@@ -142,14 +157,32 @@ impl StreamBuffer {
                                     url = next;
                                 }
                                 None => {
-                                    break Err("playlist has no playable stream URL".to_string());
+                                    break Err((
+                                        ErrorKind::Other,
+                                        "playlist has no playable stream URL".to_string(),
+                                    ));
                                 }
                             }
                         }
-                        Ok(response) => break Err(format!("HTTP {}", response.status())),
+                        Ok(response) => {
+                            break Err((
+                                status_kind(response.status()),
+                                format!("HTTP {}", response.status()),
+                            ));
+                        }
                         // `without_url`: the URL a request failed on can carry
                         // credentials, and this string reaches the player UI.
-                        Err(e) => break Err(e.without_url().to_string()),
+                        Err(e) => {
+                            let e = e.without_url();
+                            // reqwest's own text stops at "error sending request"; the cause is in its sources.
+                            let mut chain = e.to_string();
+                            let mut source = std::error::Error::source(&e);
+                            while let Some(cause) = source {
+                                chain = format!("{chain}: {cause}");
+                                source = cause.source();
+                            }
+                            break Err((request_kind(&e), chain));
+                        }
                     }
                 };
 
@@ -211,7 +244,10 @@ impl StreamBuffer {
                             if total_buffered + chunk_len > MAX_BUFFER_SIZE {
                                 let (lock, notify) = &*state_clone;
                                 let mut state = lock.lock().await;
-                                state.error = Some("Buffer limit exceeded (1GB)".to_string());
+                                state.error = Some((
+                                    ErrorKind::Other,
+                                    "Buffer limit exceeded (1GB)".to_string(),
+                                ));
                                 state.done = true;
                                 state.prebuffer_ready = true;
                                 notify.notify_waiters();
@@ -267,7 +303,7 @@ impl StreamBuffer {
                     Err(e) => {
                         let (lock, notify) = &*state_clone;
                         let mut state = lock.lock().await;
-                        state.error = Some(e.to_string());
+                        state.error = Some(e);
                         state.done = true;
                         state.prebuffer_ready = true;
                         notify.notify_waiters();
@@ -314,6 +350,17 @@ impl StreamBuffer {
         }
     }
 
+    /// Why the request got no response, once [`Self::wait_for_response_headers`] returned; a source that failed here has nothing to probe.
+    pub fn response_error(&self) -> Option<IoError> {
+        let (lock, _) = &*self.state;
+        let state = lock.blocking_lock();
+        if state.response_ready {
+            return None;
+        }
+        let (kind, message) = state.error.as_ref()?;
+        Some(IoError::new(*kind, message.clone()))
+    }
+
     pub fn known_total_size(&self) -> Option<u64> {
         let (lock, _) = &*self.state;
         let state = lock.blocking_lock();
@@ -333,6 +380,24 @@ impl StreamBuffer {
             drop(state);
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+/// A request that got no answer, told apart so playback can say the host is unreachable.
+fn request_kind(error: &reqwest::Error) -> ErrorKind {
+    if error.is_connect() {
+        ErrorKind::NotConnected
+    } else if error.is_timeout() {
+        ErrorKind::TimedOut
+    } else {
+        ErrorKind::Other
+    }
+}
+
+fn status_kind(status: reqwest::StatusCode) -> ErrorKind {
+    match status {
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE => ErrorKind::NotFound,
+        _ => ErrorKind::Other,
     }
 }
 
@@ -362,8 +427,8 @@ impl Read for StreamBuffer {
         loop {
             let state = lock.blocking_lock();
 
-            if let Some(err) = &state.error {
-                return Err(IoError::other(err.clone()));
+            if let Some((kind, err)) = &state.error {
+                return Err(IoError::new(*kind, err.clone()));
             }
 
             let current_len = state.buffer.len() as u64;
@@ -379,8 +444,8 @@ impl Read for StreamBuffer {
             }
 
             if state.done {
-                if let Some(err) = &state.error {
-                    return Err(IoError::other(err.clone()));
+                if let Some((kind, err)) = &state.error {
+                    return Err(IoError::new(*kind, err.clone()));
                 }
                 return Ok(0);
             }
@@ -460,5 +525,60 @@ mod tests {
         waiter.join().expect("join header waiter");
 
         assert_eq!(result, None);
+    }
+
+    /// The extension types of the first ClientHello `client` sends to a local listener that never answers.
+    async fn hello_extensions(client: reqwest::Client) -> Vec<u16> {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let request = tokio::spawn(async move {
+            let _ = client
+                .get(format!("https://127.0.0.1:{port}/"))
+                .send()
+                .await;
+        });
+        let record = tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).expect("record header");
+            let mut body = vec![0u8; u16::from_be_bytes([header[3], header[4]]) as usize];
+            stream.read_exact(&mut body).expect("record body");
+            body
+        })
+        .await
+        .expect("listener");
+        request.abort();
+        let u16_at = |at: usize| u16::from_be_bytes([record[at], record[at + 1]]) as usize;
+        // Past the handshake header, client version and random, then the session id, suites and compression.
+        let mut at = 4 + 2 + 32;
+        at += 1 + record[at] as usize;
+        at += 2 + u16_at(at);
+        at += 1 + record[at] as usize;
+        let end = at + 2 + u16_at(at);
+        at += 2;
+        let mut extensions = Vec::new();
+        while at + 4 <= end {
+            extensions.push(u16_at(at) as u16);
+            at += 4 + u16_at(at + 2);
+        }
+        extensions
+    }
+
+    /// OpenSSL offers encrypt-then-MAC and rustls, having no CBC suites, never does, so the handshake names the backend.
+    #[cfg(not(target_os = "android"))]
+    #[tokio::test]
+    async fn radio_streams_handshake_over_native_tls_and_tracks_over_rustls() {
+        const ENCRYPT_THEN_MAC: u16 = 0x0016;
+        let radio = hello_extensions(radio_client(None)).await;
+        let track = hello_extensions(stream_client(None)).await;
+        assert!(
+            radio.contains(&ENCRYPT_THEN_MAC),
+            "radio offered {radio:x?}"
+        );
+        assert!(
+            !track.contains(&ENCRYPT_THEN_MAC),
+            "track offered {track:x?}"
+        );
     }
 }

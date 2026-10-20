@@ -3,7 +3,7 @@ use components::search_bar::SearchBar;
 use components::search_genre_detail::SearchGenreDetail;
 use components::search_genres::SearchGenres;
 use components::search_results::SearchResults;
-use config::{AppConfig, UiStyle};
+use config::{Settings, UiStyle};
 use dioxus::prelude::*;
 use hooks::use_db_queries::{use_active_source, use_genre_tracks};
 use hooks::use_search_data::use_search_data;
@@ -14,7 +14,7 @@ use hooks::use_search_data::use_search_data;
 /// keyed off the active source rather than a hardcoded source-kind split.
 #[component]
 pub fn Search(
-    config: Signal<AppConfig>,
+    settings: Signal<Settings>,
     search_query: Signal<String>,
     is_playing: Signal<bool>,
     current_playing: Signal<u64>,
@@ -28,19 +28,24 @@ pub fn Search(
     on_select_playlist: EventHandler<(api::CatalogItemKind, String, String)>,
 ) -> Element {
     let filters = hooks::sources::use_capabilities()().search_filters;
+    let source = use_active_source();
     if !filters.is_empty() {
+        // Keyed like LocalSearch's bar, so a source switch remounts the field empty.
         return rsx! {
-            crate::server::search::CatalogSearch {
-                search_query,
-                filters,
-                on_select_album,
-                on_select_playlist,
+            for source_key in std::iter::once(source()) {
+                crate::server::search::CatalogSearch {
+                    key: "{source_key}",
+                    search_query,
+                    filters: filters.clone(),
+                    on_select_album,
+                    on_select_playlist,
+                }
             }
         };
     }
     rsx! {
         LocalSearch {
-            config,
+            settings,
             search_query,
             is_playing,
             current_playing,
@@ -60,7 +65,7 @@ pub fn Search(
 /// switches between filtered catalogue search and this one.
 #[component]
 fn LocalSearch(
-    config: Signal<AppConfig>,
+    settings: Signal<Settings>,
     search_query: Signal<String>,
     is_playing: Signal<bool>,
     current_playing: Signal<u64>,
@@ -86,7 +91,7 @@ fn LocalSearch(
 
     let genre_tracks = use_memo(move || genre_tracks_res.read().clone().unwrap_or_default());
 
-    let is_vaxry = config.read().ui_style == UiStyle::Vaxry;
+    let is_vaxry = settings.read().ui.ui_style == UiStyle::Vaxry;
 
     rsx! {
         div {
@@ -136,7 +141,10 @@ fn LocalSearch(
                     selected_track_for_playlist,
                 }
             } else {
-                SearchBar { search_query: data.search_query }
+                // A one-item keyed list remounts the uncontrolled input, empty, when a source switch resets the query.
+                for source_key in std::iter::once(source()) {
+                    SearchBar { key: "{source_key}", search_query: data.search_query }
+                }
 
                 if let Some(Some((tracks, albums))) = data.search_results.cloned() {
                     SearchResults {

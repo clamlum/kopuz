@@ -23,9 +23,12 @@ use crate::playback::network_factory;
 use crate::queue_model::{NextOutcome, QueueModel};
 
 mod load;
+mod origin;
 mod radio_feed;
 mod reconciler;
+mod stations;
 mod versions;
+pub(crate) use stations::has_unrecorded_station;
 
 use load::{LoadFailure, LoadFinished, PreparedLoad};
 use radio_feed::RadioFeed;
@@ -38,13 +41,15 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const REMOTE_PUSH_TIMEOUT: Duration = Duration::from_secs(3);
 const PROGRESS_STEP_SECS: u64 = 5;
 
-/// The embedded frontend's raw view of the queue model.
+/// The queue as `api::QueueSnapshot` reports it: tracks in play order, `position` a play-order index.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QueueMirrorSnapshot {
     pub tracks: Vec<Track>,
+    /// Unshuffled index of each play-order position; empty while shuffle is off.
     pub shuffle_order: Vec<usize>,
     pub position: usize,
     pub shuffle: bool,
+    pub context: Option<QueueContext>,
 }
 
 /// Resolves a wire queue context into concrete tracks daemon-side.
@@ -66,35 +71,44 @@ pub trait QueueMaterializer: Send + Sync {
 }
 
 /// Durable playback bookkeeping: recents on commit, listen counts when a
-/// track completes or crossfades out. Implemented over the active source;
-/// tests inject a stub.
+/// track completes or crossfades out, credited to the source that was active
+/// when it played. Implemented over that source; tests inject a stub.
 #[async_trait::async_trait]
 pub trait PlaybackRecorder: Send + Sync {
-    async fn record_recent(&self, track: &Track);
-    async fn bump_listen_count(&self, track: &Track);
+    async fn record_recent(&self, source: Option<&server::source::ActiveSource>, track: &Track);
+    async fn bump_listen_count(&self, source: Option<&server::source::ActiveSource>, track: &Track);
 }
 
 /// Playback dependencies that will eventually be owned by daemon services.
 /// Keeping them together lets the actor land before ConfigService and source
 /// lifecycle extraction do.
 pub struct PlaybackServices {
-    pub config: config::AppConfig,
+    pub settings: config::Settings,
+    /// The level and mute the engine was left at, as the database stored them.
+    pub volume: f32,
+    pub muted: bool,
+    pub sources: Arc<server::sources::Sources>,
     pub active_source: Option<server::source::ActiveSource>,
     pub station_registry: Arc<radio::registry::StationRegistry>,
     pub queue_store: Option<Arc<dyn crate::persistence::QueueStore>>,
     pub recorder: Option<Arc<dyn PlaybackRecorder>>,
     pub scrobbler: Option<Arc<crate::scrobbler::Scrobbler>>,
+    pub offline: crate::offline::OfflineIndex,
 }
 
 impl Default for PlaybackServices {
     fn default() -> Self {
         Self {
-            config: config::AppConfig::default(),
+            settings: config::Settings::default(),
+            volume: 1.0,
+            muted: false,
+            sources: Arc::default(),
             active_source: None,
             station_registry: Arc::new(radio::registry::StationRegistry::default()),
             queue_store: None,
             recorder: None,
             scrobbler: None,
+            offline: crate::offline::OfflineIndex::default(),
         }
     }
 }
@@ -102,7 +116,8 @@ impl Default for PlaybackServices {
 /// Only a move to another track or a stop is worth a network call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RemoteQueueMark {
-    queue_rev: u64,
+    /// What the server stores of the queue, its track ids in play order, so a cover or counterpart learned is no edit.
+    tracks: u64,
     current_key: Option<String>,
     playing: bool,
 }
@@ -217,9 +232,14 @@ enum SessionCmd {
         queue_rev: u64,
         reply: oneshot::Sender<Result<Option<CommandAck>, ApiError>>,
     },
-    SetConfig {
-        config: Box<config::AppConfig>,
-        changed: Vec<String>,
+    SetSettings {
+        settings: Box<config::Settings>,
+        changed: Vec<config::SettingKey>,
+        revision: u64,
+    },
+    SetSources {
+        sources: Arc<server::sources::Sources>,
+        adopted: Option<oneshot::Sender<()>>,
     },
     QueueUnread,
     /// Fetched off the actor.
@@ -229,6 +249,7 @@ enum SessionCmd {
         result: Result<RadioPage, ApiError>,
     },
     PreviewEqualizer(config::EqualizerSettings),
+    PreviewReplayGain(config::ReplayGainSettings),
     Emit(Box<ApiEvent>),
     AttachExternal(crate::external::SharedExternalPlayer),
     /// The integration that can play what the engine cannot, offered
@@ -264,9 +285,11 @@ enum SessionCmd {
 pub struct SessionHandle {
     cmd_tx: mpsc::UnboundedSender<SessionCmd>,
     state_rx: watch::Receiver<PlayerState>,
-    config_rx: watch::Receiver<config::AppConfig>,
+    settings_rx: watch::Receiver<config::Settings>,
+    sources_rx: watch::Receiver<Arc<server::sources::Sources>>,
     events: broadcast::Sender<ApiEvent>,
     materializer: Arc<dyn QueueMaterializer>,
+    offline: crate::offline::OfflineIndex,
 }
 
 impl SessionHandle {
@@ -294,17 +317,16 @@ impl SessionHandle {
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
-        let (config_tx, config_rx) = watch::channel(services.config.clone());
+        let (settings_tx, settings_rx) = watch::channel(services.settings.clone());
+        let (sources_tx, sources_rx) = watch::channel(services.sources.clone());
         let engine_events = player.subscribe();
-        player.set_volume(match services.config.muted {
-            true => 0.0,
-            false => services.config.volume,
-        });
-        player.set_channel_mode(services.config.channel_mode);
-        player.set_equalizer(services.config.equalizer.clone());
-        player.set_replay_gain(services.config.replay_gain);
-        player.set_device_change_behavior(services.config.device_change_behavior);
-        player.set_sample_rate_mode(services.config.sample_rate_mode);
+        let volume = services.volume.clamp(0.0, 1.0);
+        player.set_volume(if services.muted { 0.0 } else { volume });
+        player.set_channel_mode(services.settings.playback.channel_mode);
+        player.set_equalizer(services.settings.playback.equalizer.clone());
+        player.set_replay_gain(services.settings.playback.replay_gain);
+        player.set_device_change_behavior(services.settings.playback.device_change_behavior);
+        player.set_sample_rate_mode(services.settings.playback.sample_rate_mode);
         let remote_synced = SyncedMark::default();
         let (remote_writer, remote_jobs) = mpsc::unbounded_channel();
         tokio::spawn(write_remote_queue(
@@ -313,7 +335,7 @@ impl SessionHandle {
             services.queue_store.clone(),
         ));
 
-        let session = Session {
+        let mut session = Session {
             model: QueueModel::default(),
             player,
             intent: PlaybackIntent::Stopped,
@@ -330,12 +352,14 @@ impl SessionHandle {
             phase: ApiPhase::Idle,
             position: None,
             position_token: None,
+            stalled: None,
             buffered: Vec::new(),
             error: None,
             rev: 0,
             queue_rev: 0,
-            volume: services.config.volume,
-            muted: services.config.muted,
+            volume,
+            muted: services.muted,
+            origin: None,
             epoch: Instant::now(),
             events: events.clone(),
             materializer: materializer.clone(),
@@ -344,28 +368,37 @@ impl SessionHandle {
             queue_unread: false,
             persisting: None,
             remote_synced,
+            remote_loaded: None,
             remote_writer,
             recorder: services.recorder,
             scrobbler: services.scrobbler,
             last_recent_key: None,
             external: None,
             sink: None,
-            config_tx,
-            config: services.config,
+            settings_tx,
+            settings: services.settings,
+            sources_tx,
+            sources: services.sources,
             active_source: services.active_source,
             station_registry: services.station_registry,
+            queue_stations: Default::default(),
+            offline: services.offline.clone(),
             cmd_tx: cmd_tx.clone(),
             factory_override,
             counterparts: std::collections::HashMap::new(),
         };
+        // A fresh start is not a clear, and must not wipe what another device saved before the boot adopt reads it.
+        session.remote_loaded = Some(session.remote_mark());
         let (state_tx, state_rx) = watch::channel(session.build_state());
         tokio::spawn(session.run(cmd_rx, engine_events, state_tx));
         Self {
             cmd_tx,
             state_rx,
-            config_rx,
+            settings_rx,
+            sources_rx,
             events,
             materializer,
+            offline: services.offline,
         }
     }
 
@@ -400,10 +433,24 @@ impl SessionHandle {
         self.events.subscribe()
     }
 
-    /// The session's live config copy: seeded at spawn, updated by
-    /// `set_config`. Integration tasks watch this instead of polling.
-    pub fn config_watch(&self) -> watch::Receiver<config::AppConfig> {
-        self.config_rx.clone()
+    /// The session's live settings copy, seeded at spawn and updated by `set_settings`, which integration tasks watch instead of polling.
+    pub fn settings_watch(&self) -> watch::Receiver<config::Settings> {
+        self.settings_rx.clone()
+    }
+
+    /// The session's live sources copy: seeded at spawn, updated by `set_sources`.
+    pub fn sources_watch(&self) -> watch::Receiver<Arc<server::sources::Sources>> {
+        self.sources_rx.clone()
+    }
+
+    /// The sources as the session last adopted them.
+    pub fn sources(&self) -> Arc<server::sources::Sources> {
+        self.sources_rx.borrow().clone()
+    }
+
+    /// The downloaded copies every wire row and offline playback reads.
+    pub fn offline(&self) -> &crate::offline::OfflineIndex {
+        &self.offline
     }
 
     async fn request<T>(
@@ -552,8 +599,7 @@ impl SessionHandle {
         let _ = self.cmd_tx.send(SessionCmd::SetActiveSource(source));
     }
 
-    /// The raw queue plus its permutation, for the embedded frontend's
-    /// signal mirror. Wire clients use `queue_window`.
+    /// The whole queue in play order plus its permutation, behind `queue_snapshot`.
     pub(crate) async fn queue_mirror(&self) -> QueueMirrorSnapshot {
         let (tx, rx) = oneshot::channel();
         if self.cmd_tx.send(SessionCmd::QueueMirror(tx)).is_err() {
@@ -573,8 +619,6 @@ impl SessionHandle {
             .find(|track| track.id.key() == key)
     }
 
-    /// Adopt a new config (a ConfigService patch): applies live audio
-    /// settings and emits `config.changed`.
     /// The stored queue could not be read, so nothing may be saved over it until a new queue is built.
     pub fn hold_unread_queue(&self) {
         let _ = self.cmd_tx.send(SessionCmd::QueueUnread);
@@ -585,10 +629,43 @@ impl SessionHandle {
         let _ = self.cmd_tx.send(SessionCmd::PreviewEqualizer(equalizer));
     }
 
-    pub(crate) fn set_config(&self, config: config::AppConfig, changed: Vec<String>) {
-        let _ = self.cmd_tx.send(SessionCmd::SetConfig {
-            config: Box::new(config),
+    /// Let the engine play `replay_gain` without storing it or touching the settings.
+    pub fn preview_replay_gain(&self, replay_gain: config::ReplayGainSettings) {
+        let _ = self.cmd_tx.send(SessionCmd::PreviewReplayGain(replay_gain));
+    }
+
+    /// Adopt new settings (a ConfigService change): applies live audio settings and emits `config.changed`.
+    pub(crate) fn set_settings(
+        &self,
+        settings: config::Settings,
+        changed: Vec<config::SettingKey>,
+        revision: u64,
+    ) {
+        let _ = self.cmd_tx.send(SessionCmd::SetSettings {
+            settings: Box::new(settings),
             changed,
+            revision,
+        });
+    }
+
+    /// Adopt new sources (a SourceService change), parking the queue under the source left when the active one moves; the answer comes once every reader sees them.
+    pub(crate) fn adopt_sources(
+        &self,
+        sources: Arc<server::sources::Sources>,
+    ) -> oneshot::Receiver<()> {
+        let (adopted, done) = oneshot::channel();
+        let _ = self.cmd_tx.send(SessionCmd::SetSources {
+            sources,
+            adopted: Some(adopted),
+        });
+        done
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_sources(&self, sources: Arc<server::sources::Sources>) {
+        let _ = self.cmd_tx.send(SessionCmd::SetSources {
+            sources,
+            adopted: None,
         });
     }
 
@@ -690,12 +767,17 @@ struct Session {
     phase: ApiPhase,
     position: Option<PositionAnchor>,
     position_token: Option<u64>,
+    /// The session the engine reports stalled: its anchor stands still until audio flows again.
+    stalled: Option<u64>,
     buffered: Vec<BufferedRange>,
     error: Option<api::ErrorBody>,
     rev: u64,
     queue_rev: u64,
+    /// The level unmuting returns to; the engine plays at zero while `muted`.
     volume: f32,
     muted: bool,
+    /// The container the queue was built from; None for a raw track list.
+    origin: Option<QueueContext>,
     epoch: Instant,
     events: broadcast::Sender<ApiEvent>,
     materializer: Arc<dyn QueueMaterializer>,
@@ -706,6 +788,8 @@ struct Session {
     /// The last queue save in flight; each waits for the one before, so awaiting this awaits them all.
     persisting: Option<tokio::task::JoinHandle<()>>,
     remote_synced: SyncedMark,
+    /// The queue and place a restore left, owed to no server until they move; cleared by the first push after.
+    remote_loaded: Option<(RemoteQueueMark, u64)>,
     remote_writer: mpsc::UnboundedSender<RemoteQueueJob>,
     recorder: Option<Arc<dyn PlaybackRecorder>>,
     scrobbler: Option<Arc<crate::scrobbler::Scrobbler>>,
@@ -715,10 +799,15 @@ struct Session {
     /// The integration that can play tracks the engine cannot, whether or
     /// not it currently owns playback.
     sink: Option<crate::external::SharedExternalPlayer>,
-    config_tx: watch::Sender<config::AppConfig>,
-    config: config::AppConfig,
+    settings_tx: watch::Sender<config::Settings>,
+    settings: config::Settings,
+    sources_tx: watch::Sender<Arc<server::sources::Sources>>,
+    sources: Arc<server::sources::Sources>,
     active_source: Option<server::source::ActiveSource>,
     station_registry: Arc<radio::registry::StationRegistry>,
+    /// The records of queued stations the registry may no longer list.
+    queue_stations: std::collections::HashMap<String, radio::manifest::StationManifest>,
+    offline: crate::offline::OfflineIndex,
     cmd_tx: mpsc::UnboundedSender<SessionCmd>,
     factory_override: Option<FactoryOverride>,
     /// The source's answer per track, `None` included, so a requeued track is not asked twice.
@@ -803,7 +892,7 @@ impl Session {
                 queue_rev,
                 reply,
             } => {
-                let current = self.queue_rev == queue_rev && self.config.active_source == source;
+                let current = self.queue_rev == queue_rev && self.sources.active == source;
                 let result = match current {
                     true => self.handle_restore(*snapshot, state_tx).map(|ack| {
                         // Unlike a restore from disk, nothing has stored this queue here yet.
@@ -814,11 +903,20 @@ impl Session {
                 };
                 let _ = reply.send(result);
             }
-            SessionCmd::SetConfig { config, changed } => {
-                if config.active_source != self.config.active_source {
-                    self.swap_queue(&config, state_tx).await;
+            SessionCmd::SetSettings {
+                settings,
+                changed,
+                revision,
+            } => self.apply_settings(*settings, changed, revision, state_tx),
+            SessionCmd::SetSources { sources, adopted } => {
+                if sources.active != self.sources.active {
+                    self.swap_queue(&sources, state_tx).await;
                 }
-                self.apply_config(*config, changed, state_tx);
+                self.sources = sources;
+                let _ = self.sources_tx.send(self.sources.clone());
+                if let Some(adopted) = adopted {
+                    let _ = adopted.send(());
+                }
             }
             SessionCmd::QueueUnread => self.queue_unread = true,
             SessionCmd::AutoplayRadio {
@@ -827,6 +925,7 @@ impl Session {
                 result,
             } => self.handle_autoplay_radio(queue_rev, &seed, result, state_tx),
             SessionCmd::PreviewEqualizer(equalizer) => self.player.set_equalizer(equalizer),
+            SessionCmd::PreviewReplayGain(replay_gain) => self.player.set_replay_gain(replay_gain),
             SessionCmd::Emit(event) => self.emit(*event),
             SessionCmd::AttachExternal(player) => {
                 self.attach_external_now(player);
@@ -835,10 +934,8 @@ impl Session {
             SessionCmd::SetExternalSink(player) => self.sink = Some(player),
             SessionCmd::DetachExternal => {
                 if self.external.take().is_some() {
+                    self.stop_playback();
                     self.last_recent_key = None;
-                    self.set_intent(PlaybackIntent::Stopped);
-                    self.phase = ApiPhase::Idle;
-                    self.position = None;
                     self.push_external_now_playing();
                     self.publish(state_tx, false);
                 }
@@ -852,18 +949,23 @@ impl Session {
                     self.push_external_now_playing();
                 }
             }
-            SessionCmd::SetStationRegistry(registry) => self.station_registry = registry,
+            SessionCmd::SetStationRegistry(registry) => {
+                self.keep_queued_stations();
+                self.station_registry = registry;
+            }
             SessionCmd::SetActiveSource(source) => self.active_source = source,
             SessionCmd::ClearError => {
                 self.error = None;
                 self.publish(state_tx, false);
             }
             SessionCmd::QueueMirror(reply) => {
+                let (tracks, shuffle_order) = self.model.play_order();
                 let _ = reply.send(QueueMirrorSnapshot {
-                    tracks: self.model.items().to_vec(),
-                    shuffle_order: self.model.shuffle_order().to_vec(),
+                    tracks,
+                    shuffle_order,
                     position: self.model.current_position(),
                     shuffle: self.model.shuffle(),
+                    context: self.origin.clone(),
                 });
             }
             SessionCmd::Persist(reply) => {
@@ -873,7 +975,7 @@ impl Session {
                 {
                     let snapshot = self.snapshot();
                     self.queue_dirty = false;
-                    store.save(&self.config.active_source, snapshot).await;
+                    store.save(&self.sources.active, snapshot).await;
                 }
                 if self.push_remote_queue(true) {
                     let (done, flushed) = oneshot::channel();
@@ -1009,6 +1111,48 @@ impl Session {
         Ok(self.publish(state_tx, queue_changed))
     }
 
+    /// First play-order position the upcoming edits own: past the playing track, and past the one a crossfade is already fading into.
+    fn upcoming_from(&mut self) -> usize {
+        if self.model.is_empty() {
+            return 0;
+        }
+        let current = self.model.current_position();
+        match self
+            .pending_transition
+            .as_ref()
+            .filter(|pending| !pending.gapless)
+            .map(|pending| (pending.to_position, pending.stage))
+        {
+            Some((to, _)) if to > current => to + 1,
+            // A loop back to the top is not after the playing track, so undo it while it is still inaudible.
+            Some((_, TransitionStage::Loading)) => {
+                let _ = self.revert_transition();
+                current + 1
+            }
+            _ => current + 1,
+        }
+    }
+
+    async fn materialize_keys(&self, keys: Vec<String>) -> Result<Vec<reader::Track>, ApiError> {
+        let tracks = tokio::time::timeout(
+            MATERIALIZE_TIMEOUT,
+            self.materializer
+                .materialize(&QueueContext::Tracks { keys }),
+        )
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                api::ErrorCode::SourceUnreachable,
+                "timed out resolving the tracks to queue",
+            )
+        })??;
+        if tracks.is_empty() {
+            return Err(ApiError::not_found("none of those keys are in the library"));
+        }
+        let (tracks, _) = self.allowed(tracks, None)?;
+        Ok(tracks)
+    }
+
     async fn handle_queue_edit(
         &mut self,
         edit: QueueEdit,
@@ -1030,23 +1174,39 @@ impl Session {
                 if index > len {
                     return Err(ApiError::invalid_input("queue position out of range"));
                 }
-                let tracks = tokio::time::timeout(
-                    MATERIALIZE_TIMEOUT,
-                    self.materializer
-                        .materialize(&QueueContext::Tracks { keys: keys.clone() }),
-                )
-                .await
-                .map_err(|_| {
-                    ApiError::new(
-                        api::ErrorCode::SourceUnreachable,
-                        "timed out resolving the tracks to insert",
-                    )
-                })??;
-                if tracks.is_empty() {
-                    return Err(ApiError::not_found("none of those keys are in the library"));
-                }
-                let (tracks, _) = self.allowed(tracks, None)?;
+                let tracks = self.materialize_keys(keys).await?;
                 self.model.insert_at(index, tracks);
+                self.rearm_gapless();
+                Ok(self.publish(state_tx, true))
+            }
+            QueueEdit::ClearUpcoming => {
+                let from = self.upcoming_from();
+                if !self.model.clear_from(from) {
+                    return Ok(CommandAck { rev: self.rev });
+                }
+                self.rearm_gapless();
+                Ok(self.publish(state_tx, true))
+            }
+            QueueEdit::ReplaceUpcoming { keys } => {
+                let from = self.upcoming_from();
+                if keys.is_empty() {
+                    if !self.model.clear_from(from) {
+                        return Ok(CommandAck { rev: self.rev });
+                    }
+                    self.rearm_gapless();
+                    return Ok(self.publish(state_tx, true));
+                }
+                let tracks = self.materialize_keys(keys).await?;
+                self.model.replace_from(from, tracks);
+                self.rearm_gapless();
+                Ok(self.publish(state_tx, true))
+            }
+            QueueEdit::ShuffleUpcoming => {
+                let from = self.upcoming_from();
+                if len <= from + 1 {
+                    return Ok(CommandAck { rev: self.rev });
+                }
+                self.model.shuffle_from(from);
                 self.rearm_gapless();
                 Ok(self.publish(state_tx, true))
             }
@@ -1162,6 +1322,11 @@ impl Session {
         })??;
         let (tracks, start_index) =
             self.allowed(tracks, request.start_index.map(|index| index as usize))?;
+        let origin = request
+            .context
+            .names_container()
+            .then(|| request.context.clone());
+        let was_empty = self.model.is_empty();
         match request.mode {
             QueueMode::Replace => {
                 let mut candidate = self.model.clone();
@@ -1182,10 +1347,12 @@ impl Session {
                     let idx = candidate.jump_to(start.min(len - 1));
                     self.start_immediate_load(candidate, idx)?;
                     self.set_radio_feed(more);
+                    self.origin = origin.clone();
                 } else {
                     self.model = candidate;
                     self.stop_playback();
                     self.set_radio_feed(None);
+                    self.origin = None;
                 }
             }
             // Appending lands past every existing position, so a pending
@@ -1204,6 +1371,10 @@ impl Session {
         if request.mode != QueueMode::Replace {
             self.rearm_gapless();
         }
+        // Adding to a queue is an edit that keeps its origin; only an empty one becomes what was added.
+        if request.mode != QueueMode::Replace && was_empty && !self.model.is_empty() {
+            self.origin = origin;
+        }
         Ok(self.publish(state_tx, true))
     }
 
@@ -1212,7 +1383,7 @@ impl Session {
         allow_crossfade: bool,
         state_tx: &watch::Sender<PlayerState>,
     ) -> Result<(), ApiError> {
-        let playable = playable(self.config.skip_explicit);
+        let playable = playable(self.settings.playback.skip_explicit);
         if allow_crossfade {
             if let NextOutcome::Play(idx) = self.model.peek_next_where(playable)
                 && !self.start_load(idx, true)
@@ -1262,7 +1433,7 @@ impl Session {
         tracks: Vec<Track>,
         start: Option<usize>,
     ) -> Result<(Vec<Track>, Option<usize>), ApiError> {
-        if !self.config.skip_explicit || tracks.is_empty() {
+        if !self.settings.playback.skip_explicit || tracks.is_empty() {
             return Ok((tracks, start));
         }
         let (kept, start) = crate::queue_model::without_explicit(tracks, start);
@@ -1281,7 +1452,7 @@ impl Session {
             .active_source
             .as_ref()
             .is_some_and(|source| source.capabilities().radio.track);
-        if !self.config.autoplay_radio
+        if !self.settings.playback.autoplay_radio
             || !radio
             || self.current_track_is_radio()
             || self
@@ -1350,7 +1521,7 @@ impl Session {
                 return;
             }
         };
-        let skip = self.config.skip_explicit;
+        let skip = self.settings.playback.skip_explicit;
         let tracks: Vec<Track> = page
             .tracks
             .into_iter()
@@ -1383,7 +1554,7 @@ impl Session {
             return Ok(());
         }
 
-        if self.config.back_behavior == config::BackBehavior::RewindThenPrev
+        if self.settings.playback.back_behavior == config::BackBehavior::RewindThenPrev
             && self.displayed_position().as_secs() > 3
         {
             let _ = self.seek(0, state_tx);
@@ -1470,6 +1641,10 @@ impl Session {
             artwork: None,
             completed_key: None,
         });
+        // An integration starts at its own level, so it learns ours (and a mute) as it takes over.
+        self.dispatch_external(PlayerCommand::SetVolume {
+            volume: self.output_volume(),
+        });
     }
 
     /// Hand playback back to the engine: the integration is told to stop, and
@@ -1535,40 +1710,44 @@ impl Session {
         Ok(())
     }
 
-    fn apply_config(
+    fn apply_settings(
         &mut self,
-        config: config::AppConfig,
-        changed: Vec<String>,
+        settings: config::Settings,
+        changed: Vec<config::SettingKey>,
+        revision: u64,
         state_tx: &watch::Sender<PlayerState>,
     ) {
-        for key in &changed {
-            match key.as_str() {
-                "volume" => {
-                    self.volume = config.volume.clamp(0.0, 1.0);
-                    self.player.set_volume(self.output_volume());
+        use config::{PlaybackKey, SettingKey};
+        let mut skip_explicit_changed = false;
+        for key in changed {
+            match key {
+                SettingKey::Playback(PlaybackKey::Equalizer) => self
+                    .player
+                    .set_equalizer(settings.playback.equalizer.clone()),
+                SettingKey::Playback(PlaybackKey::ReplayGain) => {
+                    self.player.set_replay_gain(settings.playback.replay_gain)
                 }
-                "muted" => {
-                    self.muted = config.muted;
-                    self.player.set_volume(self.output_volume());
+                SettingKey::Playback(PlaybackKey::ChannelMode) => {
+                    self.player.set_channel_mode(settings.playback.channel_mode)
                 }
-                "equalizer" => self.player.set_equalizer(config.equalizer.clone()),
-                "replay_gain" => self.player.set_replay_gain(config.replay_gain),
-                "channel_mode" => self.player.set_channel_mode(config.channel_mode),
-                "sample_rate_mode" => self.player.set_sample_rate_mode(config.sample_rate_mode),
-                "device_change_behavior" => {
+                SettingKey::Playback(PlaybackKey::SampleRateMode) => self
+                    .player
+                    .set_sample_rate_mode(settings.playback.sample_rate_mode),
+                SettingKey::Playback(PlaybackKey::DeviceChangeBehavior) => {
                     self.player
-                        .set_device_change_behavior(config.device_change_behavior);
+                        .set_device_change_behavior(settings.playback.device_change_behavior);
                 }
+                SettingKey::Playback(PlaybackKey::SkipExplicit) => skip_explicit_changed = true,
                 _ => {}
             }
         }
-        self.config = config;
-        if changed.iter().any(|key| key == "skip_explicit") {
+        self.settings = settings;
+        if skip_explicit_changed {
             // A gapless switch armed before the change may target a track it now skips.
             self.rearm_gapless();
         }
-        let _ = self.config_tx.send(self.config.clone());
-        self.emit(ApiEvent::ConfigChanged { keys: changed });
+        let _ = self.settings_tx.send(self.settings.clone());
+        self.emit(ApiEvent::ConfigChanged { revision });
         self.publish(state_tx, false);
     }
 
@@ -1649,7 +1828,7 @@ impl Session {
         };
         let tx = self.cmd_tx.clone();
         tokio::spawn(async move {
-            if let Some(path) = load::fetch_cover_to_temp(&url).await {
+            if let Some(path) = load::fetch_cover_to_temp(&url, &url).await {
                 let _ = tx.send(SessionCmd::ExternalArtworkFetched(path));
             }
         });
@@ -1727,8 +1906,9 @@ impl Session {
         self.last_recent_key = Some(uid);
         if let Some(recorder) = self.recorder.clone() {
             let events = self.events.clone();
+            let source = self.active_source.clone();
             tokio::spawn(async move {
-                recorder.record_recent(&track).await;
+                recorder.record_recent(source.as_ref(), &track).await;
                 announce_history(&events);
             });
         }
@@ -1749,8 +1929,9 @@ impl Session {
         self.last_recent_key = Some(uid);
         let track = track.clone();
         let events = self.events.clone();
+        let source = self.active_source.clone();
         tokio::spawn(async move {
-            recorder.record_recent(&track).await;
+            recorder.record_recent(source.as_ref(), &track).await;
             announce_history(&events);
         });
     }
@@ -1772,8 +1953,9 @@ impl Session {
             return;
         }
         let events = self.events.clone();
+        let source = self.active_source.clone();
         tokio::spawn(async move {
-            recorder.bump_listen_count(&track).await;
+            recorder.bump_listen_count(source.as_ref(), &track).await;
             announce_history(&events);
         });
     }
@@ -1782,22 +1964,17 @@ impl Session {
     /// seed a paused resume point at the saved progress.
     fn handle_restore(
         &mut self,
-        snapshot: db::QueueSnapshot,
+        mut snapshot: db::QueueSnapshot,
         state_tx: &watch::Sender<PlayerState>,
     ) -> Result<CommandAck, ApiError> {
         // A restore replaces whatever is playing, an integration's device included.
         self.release_external();
-        self.cancel_load_task();
-        self.cancel_radio_task();
-        self.pending_transition = None;
-        self.armed_transition = None;
-        self.player.stop();
-        self.phase = ApiPhase::Idle;
-        self.set_intent(PlaybackIntent::Stopped);
-        self.pending_resume = None;
-        self.buffered.clear();
+        self.stop_playback();
+        self.position = None;
+        self.position_token = None;
         self.last_recent_key = None;
 
+        self.adopt_station_records(&mut snapshot);
         self.set_radio_feed(snapshot.radio_cursor);
         let restored = self.model.restore(
             snapshot.queue,
@@ -1805,6 +1982,11 @@ impl Session {
             snapshot.shuffle_order,
             snapshot.shuffle_enabled,
         );
+        self.origin = snapshot
+            .origin
+            .as_deref()
+            .filter(|_| !self.model.is_empty())
+            .and_then(origin::decode);
         if let Some(position) = restored
             && let Some(track) = self.model.track_at(position).cloned()
         {
@@ -1824,6 +2006,7 @@ impl Session {
         }
         let ack = self.publish(state_tx, true);
         self.queue_dirty = false;
+        self.remote_loaded = Some(self.remote_mark());
         Ok(ack)
     }
 
@@ -1844,6 +2027,8 @@ impl Session {
             shuffle_order: self.model.shuffle_order().to_vec(),
             shuffle_enabled: self.model.shuffle(),
             radio_cursor: self.radio_cursor(),
+            origin: self.origin.as_ref().and_then(origin::encode),
+            stations: self.station_records(),
         }
     }
 
@@ -1858,7 +2043,7 @@ impl Session {
             return;
         }
         let snapshot = self.snapshot();
-        let source = self.config.active_source.clone();
+        let source = self.sources.active.clone();
         let before = self.persisting.take();
         self.persisting = Some(tokio::spawn(async move {
             if let Some(before) = before {
@@ -1878,19 +2063,19 @@ impl Session {
     /// Park the queue under the source being left, or drop it when that source is gone, and resume the one being entered.
     async fn swap_queue(
         &mut self,
-        next: &config::AppConfig,
+        next: &server::sources::Sources,
         state_tx: &watch::Sender<PlayerState>,
     ) {
         let (resumed, unread) = match self.queue_store.clone() {
             Some(store) => {
                 self.settle_persists().await;
-                let leaving = self.config.active_source.clone();
-                if !next.has_source(&leaving) {
+                let leaving = self.sources.active.clone();
+                if !next.has_source(&self.settings.library.local_sources, &leaving) {
                     store.forget(&leaving).await;
                 } else if !self.queue_unread {
                     store.save(&leaving, self.snapshot()).await;
                 }
-                match store.load(&next.active_source).await {
+                match store.load(&next.active).await {
                     Ok(resumed) => (resumed, false),
                     Err(error) => {
                         tracing::warn!(%error, "the queue of the source switched to could not be read");
@@ -1905,29 +2090,49 @@ impl Session {
         self.queue_unread = unread;
     }
 
+    /// The queue as the server would store it, and the place in it.
+    fn remote_mark(&self) -> (RemoteQueueMark, u64) {
+        use std::hash::{Hash, Hasher};
+        let mut tracks = std::hash::DefaultHasher::new();
+        for position in 0..self.model.len() {
+            if let Some(track) = self.model.track_at(position) {
+                track.id.key().hash(&mut tracks);
+            }
+        }
+        let mark = RemoteQueueMark {
+            tracks: tracks.finish(),
+            current_key: self.model.current_track().map(|track| track.id.uid()),
+            playing: self.phase == ApiPhase::Playing,
+        };
+        let position_ms =
+            crate::persistence::whole_seconds(self.displayed_position().as_millis() as u64) * 1000;
+        (mark, position_ms)
+    }
+
     /// Hand the queue to the remote writer, unless the server already took this
-    /// mark; `force` skips that check, for the flush on quit. Whether it was sent.
+    /// mark or nothing moved since a restore; `force` skips the first check, for
+    /// the flush on quit. Whether it was sent.
     fn push_remote_queue(&mut self, force: bool) -> bool {
         let Some(source) = self.active_source.clone() else {
             return false;
         };
-        // An empty queue nobody touched yet is a fresh start, not a clear, and
-        // must not wipe what another device saved before the boot adopt reads it.
-        if !source.capabilities().play_queue || (self.model.is_empty() && self.queue_rev == 0) {
+        if !source.capabilities().play_queue {
             return false;
         }
-        let mark = RemoteQueueMark {
-            queue_rev: self.queue_rev,
-            current_key: self.model.current_track().map(|track| track.id.uid()),
-            playing: self.phase == ApiPhase::Playing,
-        };
+        let (mark, position_ms) = self.remote_mark();
+        // Between ticks only the mark counts, as for a synced push; the flush on quit also owes a moved place.
+        let untouched = self
+            .remote_loaded
+            .as_ref()
+            .is_some_and(|(loaded, at)| *loaded == mark && (!force || *at == position_ms));
         let synced = self
             .remote_synced
             .lock()
             .is_ok_and(|synced| synced.as_ref() == Some(&mark));
-        if !force && synced {
+        if untouched || (!force && synced) {
             return false;
         }
+        self.remote_loaded = None;
         // Play order, not storage order: another client reading this queue
         // plays it top to bottom and has no shuffle permutation to apply.
         let queue: Vec<Track> = (0..self.model.len())
@@ -1935,12 +2140,10 @@ impl Session {
             .collect();
         let push = RemoteQueuePush {
             source,
-            store_key: self.config.active_source.clone(),
+            store_key: self.sources.active.clone(),
             queue,
             current_index: self.model.current_position(),
-            position_ms: crate::persistence::whole_seconds(
-                self.displayed_position().as_millis() as u64
-            ) * 1000,
+            position_ms,
             mark,
         };
         self.remote_writer.send(RemoteQueueJob::Push(push)).is_ok()
@@ -2006,7 +2209,7 @@ impl Session {
         let (position, key) = (pending.to_position, pending.to_key.clone());
         let next = self
             .model
-            .peek_next_where(playable(self.config.skip_explicit));
+            .peek_next_where(playable(self.settings.playback.skip_explicit));
         let still_next = matches!(next, NextOutcome::Play(next) if next == position)
             && self
                 .model
@@ -2089,6 +2292,7 @@ impl Session {
         self.error = Some(api::ErrorBody {
             code,
             message: format!("couldn't load this track: {error}"),
+            reason: None,
         });
         self.buffered.clear();
         match intent {
@@ -2208,7 +2412,7 @@ impl Session {
             .into_iter()
             .map(|(position, track)| QueueItem {
                 index: position as u32,
-                track: crate::wire::track_info(&track, &self.config),
+                track: crate::wire::track_info(&track, &self.offline),
             })
             .collect();
         QueueWindow {

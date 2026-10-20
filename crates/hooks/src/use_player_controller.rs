@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use api::KopuzApi;
 use api::TrackInfo as Track;
-use config::AppConfig;
+use config::Settings;
 use dioxus::prelude::*;
 
 pub use api::LoopMode;
@@ -22,8 +22,10 @@ pub struct PlayerController {
     pub is_loading: Memo<bool>,
     pub(crate) loading: Signal<bool>,
     pub history: Signal<Vec<usize>>,
+    /// The queue in play order, as the daemon reports it; never reorder it client-side.
     pub queue: Signal<Vec<Track>>,
     pub shuffle: Signal<bool>,
+    /// Unshuffled index of each `queue` row; empty while shuffle is off.
     pub shuffle_order: Signal<Vec<usize>>,
     pub loop_mode: Signal<LoopMode>,
     pub current_queue_index: Signal<usize>,
@@ -38,14 +40,13 @@ pub struct PlayerController {
     pub current_track_snapshot: Signal<Option<Track>>,
     pub volume: Signal<f32>,
     pub muted: Signal<bool>,
-    pub config: Signal<AppConfig>,
+    pub settings: Signal<Settings>,
     pub playback_error: Signal<Option<PlaybackError>>,
     /// Set by a "sign in again" anywhere in the app, and answered by
     /// Settings, which owns the sign-in dialogs.
     pub reauth_requested: Signal<bool>,
     pub browse_loading: Signal<bool>,
     pub(crate) engine_anchor: Signal<Option<(u64, std::time::Instant, bool)>>,
-    pub(crate) fading_progress: Signal<Option<f64>>,
     /// The picture for what is playing, as a reference the daemon resolves.
     /// Every surface that paints the cover reads it through hooks::artwork.
     pub current_artwork: Signal<Option<api::ArtworkRef>>,
@@ -104,17 +105,8 @@ impl PlayerController {
         });
     }
 
-    /// Retrieves the queue index for a given index, taking into account the shuffle state.
-    pub fn get_queue_index(&self, idx: usize) -> Option<usize> {
-        if *self.shuffle.peek() {
-            self.shuffle_order.peek().get(idx).cloned()
-        } else {
-            Some(idx)
-        }
-    }
-
+    /// The track at a play-order position; `queue` already holds play order.
     pub fn get_track_at(&self, idx: usize) -> Option<Track> {
-        let idx = self.get_queue_index(idx)?;
         self.queue.peek().get(idx).cloned()
     }
 
@@ -197,6 +189,30 @@ impl PlayerController {
         self.play_replacement(tracks, Some(start), None);
     }
 
+    /// Play a whole album by its id, so the daemon fills the queue and records where playback came from; `shuffled` starts at a random one of its `track_count` tracks, as [`Self::play_queue_shuffled`] does.
+    pub fn play_album(&mut self, id: String, track_count: usize, shuffled: bool) {
+        use rand::RngExt;
+        if id.is_empty() || track_count == 0 {
+            return;
+        }
+        let start = match shuffled {
+            true => rand::rng().random_range(0..track_count),
+            false => 0,
+        };
+        let handle = self.handle();
+        spawn(async move {
+            let request = api::SetQueueRequest {
+                mode: api::QueueMode::Replace,
+                context: api::QueueContext::Album { id },
+                start_index: Some(start as u32),
+                shuffle: None,
+            };
+            if let Err(error) = handle.set_queue(request).await {
+                tracing::warn!(%error, "playing an album failed");
+            }
+        });
+    }
+
     fn play_replacement(
         &mut self,
         tracks: Vec<Track>,
@@ -236,7 +252,7 @@ impl PlayerController {
             };
             if let Err(error) = handle.set_queue(request).await {
                 tracing::warn!(%error, "playing by id failed");
-                crate::toast::toast_error(&error.message);
+                crate::toast::toast_api_error(&error);
             }
             loading.set(false);
         });
@@ -326,10 +342,11 @@ impl PlayerController {
     /// Seek the current track. All progress-bar and lyric scrubbers route here.
     pub fn seek(&mut self, time: Duration) {
         self.current_song_progress.set(time.as_secs());
+        // Held until the daemon's anchor says the audio moves again; a stream rebuffers after a seek.
         self.engine_anchor.set(Some((
             time.as_millis() as u64,
             std::time::Instant::now(),
-            *self.is_playing.peek(),
+            false,
         )));
         self.command(api::PlayerCommand::Seek {
             position_ms: time.as_millis() as u64,
@@ -357,6 +374,16 @@ impl PlayerController {
         spawn(async move {
             if let Err(error) = handle.preview_equalizer(equalizer).await {
                 tracing::warn!(%error, "equalizer preview failed");
+            }
+        });
+    }
+
+    /// Apply a ReplayGain preview to the engine, as [`Self::preview_equalizer`] does.
+    pub fn preview_replay_gain(&self, replay_gain: config::ReplayGainSettings) {
+        let handle = self.handle();
+        spawn(async move {
+            if let Err(error) = handle.preview_replay_gain(replay_gain).await {
+                tracing::warn!(%error, "replay gain preview failed");
             }
         });
     }
@@ -485,9 +512,6 @@ impl PlayerController {
     }
 
     pub fn displayed_progress_secs_f64(&self) -> f64 {
-        if let Some(fading) = *self.fading_progress.peek() {
-            return fading;
-        }
         if let Some((ms, at, playing)) = *self.engine_anchor.peek() {
             let mut pos = ms as f64 / 1000.0;
             if playing {
@@ -538,7 +562,7 @@ pub fn use_player_controller(
     current_song_progress: Signal<u64>,
     current_track_snapshot: Signal<Option<Track>>,
     volume: Signal<f32>,
-    config: Signal<AppConfig>,
+    settings: Signal<Settings>,
     _config_loaded_ok: Signal<bool>,
 ) -> PlayerController {
     let api = use_signal(move || api_handle);
@@ -553,7 +577,6 @@ pub fn use_player_controller(
     let playback_error = use_signal(|| None::<PlaybackError>);
     let reauth_requested = use_signal(|| false);
     let engine_anchor = use_signal(|| None::<(u64, std::time::Instant, bool)>);
-    let fading_progress = use_signal(|| None::<f64>);
     let output_latency_ms = use_signal(|| 0u64);
     let current_artwork = use_signal(|| None::<api::ArtworkRef>);
     let external_device = use_signal(|| None::<String>);
@@ -581,12 +604,11 @@ pub fn use_player_controller(
         current_track_snapshot,
         volume,
         muted,
-        config,
+        settings,
         playback_error,
         reauth_requested,
         browse_loading,
         engine_anchor,
-        fading_progress,
         current_artwork,
         external_device,
         output_latency_ms,

@@ -274,10 +274,16 @@ impl Kopuz for KopuzGrpc {
 
     async fn get_albums(
         &self,
-        request: Request<proto::Page>,
+        request: Request<proto::AlbumsRequest>,
     ) -> Result<Response<proto::AlbumPage>, Status> {
-        let page = convert::page_from_proto(Some(request.get_ref()));
-        let albums = self.0.api.albums(page).await.map_err(failed)?;
+        let request = request.get_ref();
+        let query = request
+            .query
+            .as_ref()
+            .map(convert::album_query_from_proto)
+            .unwrap_or_default();
+        let page = convert::page_from_proto(request.page.as_ref());
+        let albums = self.0.api.albums(query, page).await.map_err(failed)?;
         Ok(Response::new(convert::album_page_to_proto(&albums)))
     }
 
@@ -327,10 +333,16 @@ impl Kopuz for KopuzGrpc {
 
     async fn get_artists(
         &self,
-        request: Request<proto::Page>,
+        request: Request<proto::ArtistsRequest>,
     ) -> Result<Response<proto::ArtistPage>, Status> {
-        let page = convert::page_from_proto(Some(request.get_ref()));
-        let artists = self.0.api.artists(page).await.map_err(failed)?;
+        let request = request.get_ref();
+        let query = request
+            .query
+            .as_ref()
+            .map(convert::artist_query_from_proto)
+            .unwrap_or_default();
+        let page = convert::page_from_proto(request.page.as_ref());
+        let artists = self.0.api.artists(query, page).await.map_err(failed)?;
         Ok(Response::new(convert::artist_page_to_proto(&artists)))
     }
 
@@ -1177,22 +1189,74 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(proto::RemoveDownloadResponse {}))
     }
 
-    async fn set_config(
+    /// An edit this build cannot read is answered invalid in its place; the readable ones still apply.
+    async fn edit_config(
         &self,
-        request: Request<proto::SetConfigRequest>,
-    ) -> Result<Response<proto::ConfigView>, Status> {
-        let config = request
+        request: Request<proto::EditConfigRequest>,
+    ) -> Result<Response<proto::EditReport>, Status> {
+        let decoded: Vec<Option<config::SettingsEdit>> = request
             .get_ref()
-            .config
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("SetConfig needs a config"))?;
-        let view = self
+            .edits
+            .iter()
+            .map(convert::config_edit_from_proto)
+            .collect();
+        let report = self
             .0
             .api
-            .set_config(convert::config_from_proto(config))
+            .edit_config(decoded.iter().flatten().cloned().collect())
             .await
             .map_err(failed)?;
-        Ok(Response::new(convert::config_view_to_proto(&view)))
+        let mut applied = report.outcomes.into_iter();
+        let outcomes = decoded
+            .iter()
+            .map(|edit| match edit {
+                Some(_) => applied.next().unwrap_or(api::EditOutcome::Invalid {
+                    reason: "the daemon answered fewer edits than it was sent".into(),
+                }),
+                None => api::EditOutcome::Invalid {
+                    reason: "an edit this daemon cannot read".into(),
+                },
+            })
+            .collect();
+        Ok(Response::new(convert::edit_report_to_proto(
+            &api::EditReport {
+                outcomes,
+                view: report.view,
+            },
+        )))
+    }
+
+    async fn get_frontend_prefs(
+        &self,
+        request: Request<proto::GetFrontendPrefsRequest>,
+    ) -> Result<Response<proto::FrontendPrefsList>, Status> {
+        let prefs = self
+            .0
+            .api
+            .frontend_prefs(request.into_inner().frontend)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::FrontendPrefsList {
+            prefs: prefs.iter().map(convert::frontend_pref_to_proto).collect(),
+        }))
+    }
+
+    async fn set_frontend_prefs(
+        &self,
+        request: Request<proto::SetFrontendPrefsRequest>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        let request = request.into_inner();
+        let entries = request
+            .entries
+            .iter()
+            .map(convert::pref_entry_from_proto)
+            .collect();
+        self.0
+            .api
+            .set_frontend_prefs(request.frontend, entries)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
     }
 
     async fn preview_equalizer(
@@ -1203,6 +1267,19 @@ impl Kopuz for KopuzGrpc {
         self.0
             .api
             .preview_equalizer(equalizer)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
+    }
+
+    async fn preview_replay_gain(
+        &self,
+        request: Request<proto::ReplayGainSettings>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        let replay_gain = convert::replay_gain_from_proto(Some(request.get_ref()));
+        self.0
+            .api
+            .preview_replay_gain(replay_gain)
             .await
             .map_err(failed)?;
         Ok(Response::new(proto::Unit {}))
@@ -1817,93 +1894,9 @@ pub fn bind_socket(path: &std::path::Path) -> std::io::Result<Listener> {
     Listener::bind(path)
 }
 
-/// The bearer token a TCP client has to present. The socket and the pipe
-/// let the OS decide who may connect; a port has no owner, so on that
-/// transport the token is the boundary.
-#[derive(Clone)]
-pub struct Token(Arc<str>);
-
-impl Token {
-    pub fn new(secret: impl Into<Arc<str>>) -> Self {
-        Self(secret.into())
-    }
-
-    pub fn secret(&self) -> &str {
-        &self.0
-    }
-
-    /// 256 bits from the OS, hex-encoded so it survives a shell.
-    pub fn generate() -> Self {
-        let bytes: [u8; 32] = rand::random();
-        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        Self(hex.into())
-    }
-
-    /// The token at `path`, minted there if the file does not exist yet.
-    /// The file is created private to this user, since it is the secret.
-    pub fn load_or_create(path: &std::path::Path) -> std::io::Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(text) if !text.trim().is_empty() => return Ok(Self::new(text.trim())),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let token = Self::generate();
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        use std::io::Write;
-        options.open(path)?.write_all(token.secret().as_bytes())?;
-        Ok(token)
-    }
-
-    /// `result_large_err` is tonic's own Status type; nothing to shrink here.
-    #[allow(clippy::result_large_err)]
-    fn check(&self, request: Request<()>) -> Result<Request<()>, Status> {
-        let presented = request
-            .metadata()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        match presented {
-            Some(presented) if same_secret(presented, &self.0) => Ok(request),
-            _ => Err(Status::unauthenticated(
-                "this transport requires the daemon token as `authorization: Bearer <token>`",
-            )),
-        }
-    }
-}
-
-impl std::fmt::Debug for Token {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Token(..)")
-    }
-}
-
-/// Compare without a length-dependent early exit, so timing does not leak
-/// how much of a guess was right.
-fn same_secret(presented: &str, expected: &str) -> bool {
-    let (a, b) = (presented.as_bytes(), expected.as_bytes());
-    let mut diff = a.len() ^ b.len();
-    for (x, y) in a.iter().zip(b.iter().chain(std::iter::repeat(&0))) {
-        diff |= usize::from(x ^ y);
-    }
-    diff == 0
-}
-
 /// Reflection (v1 and v1alpha) is registered so `grpcurl` works out of
 /// the box, on every transport.
-fn routes<L: Clone>(
-    mut builder: tonic::transport::Server<L>,
-    state: Arc<GrpcState>,
-) -> std::io::Result<tonic::transport::server::Router<L>> {
+fn routes(state: Arc<GrpcState>) -> std::io::Result<tonic::transport::server::Router> {
     let reflection_v1 = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
         .build_v1()
@@ -1912,7 +1905,7 @@ fn routes<L: Clone>(
         .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
         .build_v1alpha()
         .map_err(std::io::Error::other)?;
-    Ok(builder
+    Ok(tonic::transport::Server::builder()
         .add_service(reflection_v1)
         .add_service(reflection_v1alpha)
         .add_service(KopuzServer::new(KopuzGrpc(state))))
@@ -1924,71 +1917,22 @@ pub async fn serve(listener: Listener, state: Arc<GrpcState>) -> std::io::Result
     let incoming = listener;
     #[cfg(windows)]
     let incoming = listener.incoming();
-    routes(tonic::transport::Server::builder(), state)?
+    routes(state)?
         .serve_with_incoming(incoming)
         .await
         .map_err(std::io::Error::other)
 }
 
-/// Serve the daemon over plain HTTP/2 on `listener`, every call gated on
-/// `token`, until the future is dropped.
-#[allow(clippy::result_large_err)]
+/// Serve the daemon over plain HTTP/2 on `listener` until the future is
+/// dropped.
 pub async fn serve_tcp(
     listener: tokio::net::TcpListener,
-    token: Token,
     state: Arc<GrpcState>,
 ) -> std::io::Result<()> {
-    let gate = tonic::service::interceptor(move |request| token.check(request));
-    routes(tonic::transport::Server::builder().layer(gate), state)?
+    routes(state)?
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
         .await
         .map_err(std::io::Error::other)
-}
-
-#[cfg(test)]
-mod token_tests {
-    use super::Token;
-
-    #[test]
-    fn a_token_is_minted_once_and_read_back_thereafter() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("kopuzd.token");
-        let first = Token::load_or_create(&path).expect("mint");
-        assert_eq!(first.secret().len(), 64, "256 bits of hex");
-        let again = Token::load_or_create(&path).expect("read");
-        assert_eq!(first.secret(), again.secret());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "the token file is the secret");
-        }
-    }
-
-    #[test]
-    #[allow(clippy::result_large_err)]
-    fn only_the_exact_bearer_token_passes() {
-        let token = Token::new("s3cret");
-        let with = |value: Option<&str>| {
-            let mut request = tonic::Request::new(());
-            if let Some(value) = value {
-                request
-                    .metadata_mut()
-                    .insert("authorization", value.parse().expect("ascii"));
-            }
-            token.check(request).map(|_| ())
-        };
-        assert!(with(Some("Bearer s3cret")).is_ok());
-        for wrong in [
-            None,
-            Some("Bearer s3cre"),
-            Some("Bearer s3cret1"),
-            Some("s3cret"),
-        ] {
-            let status = with(wrong).expect_err("refused");
-            assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        }
-    }
 }
 
 #[cfg(all(test, unix))]

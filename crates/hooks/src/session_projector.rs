@@ -83,10 +83,10 @@ fn apply_state(ctrl: &mut PlayerController, state: PlayerState) -> DaemonClock {
         &mut ctrl.playback_error,
         state
             .error
-            .as_ref()
+            .clone()
             .map(|error| crate::use_player_controller::PlaybackError {
                 code: Some(error.code),
-                message: error.message.clone(),
+                message: crate::toast::describe(&error.into()),
             }),
     );
     // Which device an integration is playing on, so a picker can mark it and
@@ -105,16 +105,11 @@ fn apply_state(ctrl: &mut PlayerController, state: PlayerState) -> DaemonClock {
         set_if_changed(&mut ctrl.current_queue_index, index as usize);
     }
 
-    // During a crossfade the outgoing track stays on screen and drives the
-    // seek bar; otherwise the committed track does.
-    let (shown, fading_secs) = match &state.fading {
-        Some(fading) => (
-            Some(&fading.track),
-            Some(fading.position_ms as f64 / 1000.0),
-        ),
-        None => (state.track.as_ref(), None),
+    // During a crossfade the outgoing track stays on screen; the daemon's anchor follows it.
+    let shown = match &state.fading {
+        Some(fading) => Some(&fading.track),
+        None => state.track.as_ref(),
     };
-    set_if_changed(&mut ctrl.fading_progress, fading_secs);
 
     match shown {
         Some(now) => {
@@ -139,14 +134,12 @@ fn apply_state(ctrl: &mut PlayerController, state: PlayerState) -> DaemonClock {
         }
     }
 
-    if state.fading.is_none() {
-        match local_anchor(&state, clock) {
-            Some((ms, instant, anchor_playing, progress_secs)) => {
-                set_if_changed(&mut ctrl.engine_anchor, Some((ms, instant, anchor_playing)));
-                set_if_changed(&mut ctrl.current_song_progress, progress_secs);
-            }
-            None => set_if_changed(&mut ctrl.engine_anchor, None),
+    match local_anchor(&state, clock) {
+        Some((ms, instant, anchor_playing, progress_secs)) => {
+            set_if_changed(&mut ctrl.engine_anchor, Some((ms, instant, anchor_playing)));
+            set_if_changed(&mut ctrl.current_song_progress, progress_secs);
         }
+        None => set_if_changed(&mut ctrl.engine_anchor, None),
     }
 
     let buffered: Vec<BufferedRange> = state
@@ -187,6 +180,9 @@ pub(crate) fn use_session_projector(ctrl: PlayerController) {
         let api = ctrl.api.peek().clone();
         let mut events = api.events();
         let mut daemon_clock = resync(&mut ctrl, &api).await;
+        // Made once: a sleep made per pass restarts on every event, and a stream's buffer events come faster than a second.
+        let mut tick = tokio::time::interval(Duration::from_millis(1000));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let ticking = *ctrl.is_playing.peek() && ctrl.engine_anchor.peek().is_some();
             tokio::select! {
@@ -235,7 +231,7 @@ pub(crate) fn use_session_projector(ctrl: PlayerController) {
                     // app reports that elsewhere.
                     None => break,
                 },
-                _ = tokio::time::sleep(Duration::from_millis(1000)), if ticking => {
+                _ = tick.tick(), if ticking => {
                     let progress = ctrl.displayed_progress_secs_f64() as u64;
                     set_if_changed(&mut ctrl.current_song_progress, progress);
                 }

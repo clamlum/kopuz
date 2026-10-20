@@ -126,14 +126,18 @@ async fn upsert_track(
     Ok(())
 }
 
-/// The credit a track's byline names, else its first: `(name, artist_pk)` in credit order.
-pub(crate) fn billed_credit(byline: &str, credits: &[(String, i64)]) -> Option<i64> {
-    let billed = utils::artist::normalize_artist_key(byline);
-    credits
-        .iter()
-        .find(|(name, _)| utils::artist::normalize_artist_key(name) == billed)
-        .or(credits.first())
-        .map(|(_, artist)| *artist)
+/// The row a track bills first, which is the one its byline stands for: chosen by credit order, never by comparing names.
+pub(crate) async fn first_credit(
+    conn: &mut sqlx::SqliteConnection,
+    track_pk: i64,
+) -> Result<Option<i64>, DbError> {
+    let artist = sqlx::query_scalar::<_, i64>(
+        "SELECT artist_pk FROM track_credits WHERE track_pk = ?1 ORDER BY position LIMIT 1",
+    )
+    .bind(track_pk)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(artist)
 }
 
 /// The album a track names gets a row, never overwriting one a library sync or scan wrote.
@@ -150,13 +154,28 @@ async fn ensure_album(
         true => "Singles",
         false => t.album.as_str(),
     };
-    let credits: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT name, artist_pk FROM track_credits WHERE track_pk = ?1 ORDER BY position",
+    let derived: Option<bool> =
+        sqlx::query_scalar("SELECT derived FROM albums WHERE source = ?1 AND source_album_id = ?2")
+            .bind(src)
+            .bind(&t.album_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    if derived == Some(false) {
+        return Ok(());
+    }
+    // The album's first track wrote its byline, so that track's own billing is the byline's row.
+    let founder = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MIN(rowid_pk) FROM tracks WHERE source = ?1 AND source_album_id = ?2",
     )
-    .bind(pk)
-    .fetch_all(&mut **tx)
-    .await?;
-    let artist_pk = billed_credit(&t.artist, &credits);
+    .bind(src)
+    .bind(&t.album_id)
+    .fetch_one(&mut **tx)
+    .await?
+    .unwrap_or(pk);
+    let artist_pk = match credited_album_artist(tx, src, &t.album_id).await? {
+        Some(shared) => Some(shared),
+        None => first_credit(tx, founder).await?,
+    };
     // A derived row follows its tracks' credits as they gain ids; a synced or scanned row stays as written.
     sqlx::query!(
         "INSERT INTO albums (source, source_album_id, title, artist, cover_path, artist_pk, derived) \
@@ -371,6 +390,45 @@ pub async fn upsert_albums(
     Ok(())
 }
 
+/// The artist an unlinked album is billed to when every track credits several of the same artist rows, matched by row, never by name.
+async fn credited_album_artist(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    src: &str,
+    album_id: &str,
+) -> Result<Option<i64>, DbError> {
+    let credits: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT c.track_pk, c.artist_pk FROM track_credits c \
+         JOIN tracks t ON t.rowid_pk = c.track_pk \
+         WHERE t.source = ?1 AND t.source_album_id = ?2 ORDER BY c.track_pk, c.position",
+    )
+    .bind(src)
+    .bind(album_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(album_artist_among(&credits))
+}
+
+/// `credits` are `(track_pk, artist_pk)` rows in track then credit order.
+fn album_artist_among(credits: &[(i64, i64)]) -> Option<i64> {
+    let first_track = credits.first()?.0;
+    let mut tracks: Vec<i64> = credits.iter().map(|(track, _)| *track).collect();
+    tracks.dedup();
+    let shared: Vec<i64> = credits
+        .iter()
+        .filter(|(track, _)| *track == first_track)
+        .map(|(_, artist)| *artist)
+        .filter(|artist| {
+            tracks.iter().all(|track| {
+                credits
+                    .iter()
+                    .any(|(other, credited)| other == track && credited == artist)
+            })
+        })
+        .collect();
+    // A single shared artist may sit under someone else's byline (Various Artists over one track); several are the byline itself.
+    (shared.len() > 1).then(|| shared[0])
+}
+
 async fn upsert_album(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     src: &str,
@@ -383,9 +441,18 @@ async fn upsert_album(
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned());
     let billed = a.artist.trim();
-    let artist_pk = match billed.is_empty() {
-        true => None,
-        false => Some(file_artist(tx, src, billed, a.artist_id.as_deref()).await?),
+    let artist_id = a
+        .artist_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let artist_pk = match (billed.is_empty(), artist_id) {
+        (true, _) => None,
+        (false, Some(id)) => Some(file_artist(tx, src, billed, Some(id)).await?),
+        (false, None) => match credited_album_artist(tx, src, &a.id).await? {
+            Some(pk) => Some(pk),
+            None => Some(file_artist(tx, src, billed, None).await?),
+        },
     };
     // The artist is replaced with its name, so an album rebilled to nobody drops the old row.
     sqlx::query!(
@@ -687,11 +754,37 @@ pub async fn name_artist(
     id: &str,
     name: &str,
 ) -> Result<bool, DbError> {
+    let mut conn = pool.acquire().await?;
+    rename_artist(&mut conn, source.as_str(), id, name).await
+}
+
+/// [`name_artist`] for each `(id, name)` a listing reports, in one transaction; answers how many rows changed.
+#[tracing::instrument(skip_all, fields(source = %source.as_str(), count = named.len()))]
+pub async fn name_artists(
+    pool: &SqlitePool,
+    source: &Source,
+    named: &[(String, String)],
+) -> Result<usize, DbError> {
+    let src = source.as_str();
+    let mut tx = pool.begin().await?;
+    let mut changed = 0;
+    for (id, name) in named {
+        changed += usize::from(rename_artist(&mut tx, src, id, name).await?);
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
+async fn rename_artist(
+    conn: &mut sqlx::SqliteConnection,
+    src: &str,
+    id: &str,
+    name: &str,
+) -> Result<bool, DbError> {
     let name = name.trim();
     if name.is_empty() {
         return Ok(false);
     }
-    let src = source.as_str();
     let name_key = utils::artist::normalize_artist_key(name);
     let changed = sqlx::query!(
         "UPDATE artists SET name = ?3, name_key = ?4, named_by_source = 1 \
@@ -702,7 +795,7 @@ pub async fn name_artist(
         name,
         name_key
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
     Ok(changed > 0)
@@ -1282,7 +1375,14 @@ pub(crate) async fn write_queue(
     source: &str,
     snap: &QueueSnapshot,
 ) -> Result<(), DbError> {
-    write_queue_rows(conn, source, &snap.queue, &snap.shuffle_order).await?;
+    write_queue_rows(
+        conn,
+        source,
+        &snap.queue,
+        &snap.shuffle_order,
+        &snap.stations,
+    )
+    .await?;
     write_queue_position(conn, source, snap).await
 }
 
@@ -1307,16 +1407,17 @@ async fn write_queue_position(
     let shuffle_on = snap.shuffle_enabled as i64;
     let radio_cursor = snap.radio_cursor.as_deref();
     sqlx::query!(
-        "INSERT INTO queue_state (source, version, current_queue_index, progress_secs, shuffle_enabled, radio_cursor) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+        "INSERT INTO queue_state (source, version, current_queue_index, progress_secs, shuffle_enabled, radio_cursor, origin) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(source) DO UPDATE SET version = ?2, current_queue_index = ?3, \
-           progress_secs = ?4, shuffle_enabled = ?5, radio_cursor = ?6",
+           progress_secs = ?4, shuffle_enabled = ?5, radio_cursor = ?6, origin = ?7",
         source,
         version,
         current,
         progress,
         shuffle_on,
-        radio_cursor
+        radio_cursor,
+        snap.origin
     )
     .execute(&mut *conn)
     .await?;
@@ -1343,6 +1444,7 @@ async fn write_queue_rows(
     source: &str,
     queue: &[Track],
     shuffle_order: &[usize],
+    stations: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), DbError> {
     // Credits and the shuffle cascade from the rows they point at.
     sqlx::query!("DELETE FROM queue_tracks WHERE source = ?1", source)
@@ -1351,6 +1453,7 @@ async fn write_queue_rows(
     for (position, t) in queue.iter().enumerate() {
         let position = position as i64;
         let track_key = t.id.key().into_owned();
+        let station = stations.get(&track_key).map(String::as_str);
         let service = t.id.service().map(service_str);
         let duration = (t.duration != u64::MAX).then_some(t.duration as i64);
         let khz = t.khz as i64;
@@ -1366,9 +1469,9 @@ async fn write_queue_rows(
             "INSERT INTO queue_tracks (source, position, track_key, service, source_album_id, title, \
                artist, album, duration, khz, bitrate, track_number, disc_number, cover_path, \
                mb_release_id, mb_recording_id, mb_track_id, playlist_item_id, \
-               rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, explicit, plays) \
+               rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak, explicit, plays, station) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-                     ?19, ?20, ?21, ?22, ?23, ?24)",
+                     ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             source,
             position,
             track_key,
@@ -1392,7 +1495,8 @@ async fn write_queue_rows(
             rg_album_gain,
             rg_album_peak,
             explicit,
-            t.plays
+            t.plays,
+            station
         )
         .execute(&mut *conn)
         .await?;
