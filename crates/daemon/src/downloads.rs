@@ -54,12 +54,13 @@ fn safe_extension(extension: &str) -> Result<&str, ApiError> {
     Ok(extension)
 }
 
-fn content_type_to_ext(content_type: &str) -> Option<&'static str> {
+pub(crate) fn content_type_to_ext(content_type: &str) -> Option<&'static str> {
     let content_type = content_type.split(';').next().unwrap_or("").trim();
     match content_type {
         "audio/mpeg" => Some("mp3"),
         "audio/mp4" | "audio/m4a" | "audio/x-m4a" => Some("m4a"),
         "audio/ogg" | "application/ogg" => Some("ogg"),
+        "audio/opus" => Some("opus"),
         "audio/webm" | "video/webm" => Some("webm"),
         "audio/flac" | "audio/x-flac" => Some("flac"),
         "audio/wav" | "audio/x-wav" => Some("wav"),
@@ -245,6 +246,19 @@ impl DownloadsService {
         if self.session.offline().present(&item_id).is_some() {
             return Ok(());
         }
+        if let Some(copy) = self.session.offline().cache().take(&item_id).await {
+            match self.adopt_cached(&item_id, &copy.path).await {
+                Ok(path) => {
+                    return self
+                        .register(&item_id, Some(path.to_string_lossy().into_owned()))
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "moving a cached song into the downloads failed; fetching it");
+                    let _ = tokio::fs::remove_file(&copy.path).await;
+                }
+            }
+        }
 
         let path = match source.download_track(&item_id, None).await {
             Ok(bytes) => {
@@ -276,6 +290,31 @@ impl DownloadsService {
         };
         self.register(&item_id, Some(path.to_string_lossy().into_owned()))
             .await
+    }
+
+    /// Move a cached song's file into the downloads, copying it where the two sit on different filesystems.
+    async fn adopt_cached(&self, item_id: &str, cached: &Path) -> Result<PathBuf, ApiError> {
+        let io = |error: std::io::Error| ApiError::internal(format!("offline cache io: {error}"));
+        let extension = cached
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(|extension| safe_extension(extension).ok())
+            .unwrap_or("m4a");
+        let target = self.cache_file_path(item_id, extension)?;
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(io)?;
+        }
+        if tokio::fs::rename(cached, &target).await.is_ok() {
+            return Ok(target);
+        }
+        let partial = target.with_extension(format!("{extension}.part-{}", uuid::Uuid::new_v4()));
+        if let Err(error) = tokio::fs::copy(cached, &partial).await {
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(io(error));
+        }
+        tokio::fs::rename(&partial, &target).await.map_err(io)?;
+        let _ = tokio::fs::remove_file(cached).await;
+        Ok(target)
     }
 
     async fn publish_bytes(&self, path: &Path, bytes: &[u8]) -> Result<PathBuf, ApiError> {
@@ -396,5 +435,77 @@ mod tests {
             Some("m4a")
         );
         assert_eq!(content_type_to_ext("text/html"), None);
+    }
+
+    /// Downloading a cached song moves its file into the downloads, where it is never evicted, and the cache forgets it.
+    #[tokio::test]
+    async fn a_download_of_a_cached_song_promotes_its_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let database = db::init(&dir.path().join("downloads.db"))
+            .await
+            .expect("db");
+        let cache = crate::OfflineCache::load(
+            &database,
+            dir.path().join("cache"),
+            &config::Settings::default(),
+        )
+        .await
+        .expect("cache");
+        cache
+            .store(
+                "abc",
+                "yt",
+                server::stream::stream_buffer::Captured {
+                    bytes: b"the song".to_vec(),
+                    content_type: Some("audio/webm".into()),
+                },
+            )
+            .await
+            .expect("cached");
+        let cached = cache.path("abc").expect("a cached file");
+        let offline = crate::OfflineIndex::load(&database)
+            .await
+            .expect("index")
+            .with_cache(cache.clone());
+        let player =
+            player::player::Player::try_with_sink(Box::new(player::engine::NullSink::new()))
+                .expect("headless player");
+        struct Nothing;
+        #[async_trait::async_trait]
+        impl crate::QueueMaterializer for Nothing {
+            async fn materialize(
+                &self,
+                _: &api::QueueContext,
+            ) -> Result<Vec<reader::Track>, ApiError> {
+                Ok(Vec::new())
+            }
+        }
+        let session = SessionHandle::spawn_with_player(
+            Arc::new(Nothing),
+            player,
+            crate::PlaybackServices {
+                offline: offline.clone(),
+                ..Default::default()
+            },
+        );
+        let runner = JobRunner::new(session.clone());
+        let downloads =
+            DownloadsService::new(database.clone(), session, dir.path().join("downloads"));
+
+        downloads
+            .spawn_download(&runner, vec!["ytmusic:abc".into()])
+            .expect("started");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while offline.present("abc").is_none() {
+            assert!(std::time::Instant::now() < deadline, "{:?}", runner.list());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let downloaded = PathBuf::from(offline.present("abc").expect("a download"));
+        assert_eq!(std::fs::read(&downloaded).expect("read"), b"the song");
+        assert!(downloaded.starts_with(dir.path().join("downloads")));
+        assert!(!cached.exists(), "moved, not copied");
+        assert!(!cache.contains("abc"));
+        assert!(database.offline_cache().await.expect("rows").is_empty());
     }
 }

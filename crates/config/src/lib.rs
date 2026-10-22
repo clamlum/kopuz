@@ -784,6 +784,7 @@ pub struct HomeSection {
 }
 
 pub const HOME_SECTION_KEYS: &[&str] = &[
+    "catalog",
     "hero",
     "continue_listening",
     "listen_now",
@@ -802,6 +803,29 @@ pub fn default_home_sections() -> Vec<HomeSection> {
             enabled: true,
         })
         .collect()
+}
+
+/// Home for a source with a catalog: its own feed already covers what the library shelves would repeat.
+pub const CATALOG_HOME_SECTION_KEYS: &[&str] = &["catalog", "playlists"];
+
+pub fn default_catalog_home_sections() -> Vec<HomeSection> {
+    let mut sections: Vec<HomeSection> = CATALOG_HOME_SECTION_KEYS
+        .iter()
+        .map(|k| HomeSection {
+            key: (*k).to_string(),
+            enabled: true,
+        })
+        .collect();
+    sections.extend(
+        HOME_SECTION_KEYS
+            .iter()
+            .filter(|k| !CATALOG_HOME_SECTION_KEYS.contains(k))
+            .map(|k| HomeSection {
+                key: (*k).to_string(),
+                enabled: false,
+            }),
+    );
+    sections
 }
 
 /// Every setting, grouped by topic; each section is flattened, so the stored keys stay top-level.
@@ -1043,6 +1067,14 @@ pub struct Library {
     #[serde(default)]
     #[garde(skip)]
     pub offline_quality: OfflineQuality,
+    /// Keep songs streamed from across the internet for offline listening; off stops adding to the cache and keeps what it holds.
+    #[serde(default = "default_true")]
+    #[garde(skip)]
+    pub offline_cache_enabled: bool,
+    /// The cache's size cap; past it the least recently played songs go first, and downloads never count.
+    #[serde(default = "default_offline_cache_max_bytes")]
+    #[garde(range(min = MIN_OFFLINE_CACHE_BYTES, max = MAX_OFFLINE_CACHE_BYTES))]
+    pub offline_cache_max_bytes: u64,
     /// Minutes between the daemon's own library syncs and folder rescans; 0 turns them off.
     #[serde(default = "default_sync_interval_minutes")]
     #[garde(range(max = MAX_SYNC_INTERVAL_MINUTES))]
@@ -1058,9 +1090,22 @@ impl Default for Library {
             auto_fetch_covers: false,
             cover_fetch_strategy: FetchStrategy::default(),
             offline_quality: OfflineQuality::default(),
+            offline_cache_enabled: true,
+            offline_cache_max_bytes: default_offline_cache_max_bytes(),
             sync_interval_minutes: default_sync_interval_minutes(),
         }
     }
+}
+
+pub const DEFAULT_OFFLINE_CACHE_MAX_BYTES: u64 = 5_000_000_000;
+
+/// The smallest cap the settings UI offers: a few albums.
+pub const MIN_OFFLINE_CACHE_BYTES: u64 = 500_000_000;
+
+pub const MAX_OFFLINE_CACHE_BYTES: u64 = 1_000_000_000_000;
+
+fn default_offline_cache_max_bytes() -> u64 {
+    DEFAULT_OFFLINE_CACHE_MAX_BYTES
 }
 
 impl Library {
@@ -1157,6 +1202,10 @@ pub struct System {
     #[serde(default)]
     #[garde(skip)]
     pub minimize_to_tray: bool,
+    /// Asked after a networked source stops answering, to tell a dead connection from a dead server; empty skips the check.
+    #[serde(default = "default_connectivity_check_urls")]
+    #[garde(inner(custom(http_url)))]
+    pub connectivity_check_urls: Vec<String>,
 }
 
 impl Default for System {
@@ -1165,7 +1214,31 @@ impl Default for System {
             tracing_enabled: false,
             auto_check_updates: default_auto_check_updates(),
             minimize_to_tray: false,
+            connectivity_check_urls: default_connectivity_check_urls(),
         }
+    }
+}
+
+/// Cloudflare's captive-portal check answers 204, Mozilla's answers `success`; plain HTTP on purpose, so a portal can show itself.
+pub const DEFAULT_CONNECTIVITY_CHECK_URLS: [&str; 2] = [
+    "http://cp.cloudflare.com/generate_204",
+    "http://detectportal.firefox.com/success.txt",
+];
+
+fn default_connectivity_check_urls() -> Vec<String> {
+    DEFAULT_CONNECTIVITY_CHECK_URLS
+        .iter()
+        .map(|url| url.to_string())
+        .collect()
+}
+
+fn http_url(value: &str, _: &()) -> garde::Result {
+    let rest = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"));
+    match rest {
+        Some(host) if !host.is_empty() && !host.starts_with('/') => Ok(()),
+        _ => Err(garde::Error::new("not an http(s) address")),
     }
 }
 

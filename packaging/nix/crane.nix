@@ -23,6 +23,7 @@
   wayland,
   dbus,
   libayatana-appindicator,
+  gst_all_1,
   # Darwin deps
   libopus,
 }:
@@ -73,6 +74,12 @@ let
     dbus
     libayatana-appindicator
     libopus
+    # WebKit plays the music video through GStreamer and aborts when it finds no
+    # audio sink. wrapGAppsHook3 puts these on GST_PLUGIN_SYSTEM_PATH_1_0.
+    gst_all_1.gst-plugins-base
+    gst_all_1.gst-plugins-good
+    gst_all_1.gst-plugins-bad
+    gst_all_1.gst-libav
   ];
 
   commonArgs = {

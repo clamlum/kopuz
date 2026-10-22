@@ -53,6 +53,7 @@ fn featured_album_billing(track: &Track, album: Option<&Album>) -> (String, Stri
 
 fn section_label(key: &str) -> String {
     let i18n_key = match key {
+        "catalog" => "home_section_catalog",
         "hero" => "home_section_hero",
         "continue_listening" => "home_section_continue_listening",
         "listen_now" => "home_section_listen_now",
@@ -113,6 +114,7 @@ pub fn HomeBody(
     on_select_album: EventHandler<String>,
     on_play_album: EventHandler<String>,
     on_select_playlist: EventHandler<String>,
+    on_select_catalog: EventHandler<(api::CatalogItemKind, String, String)>,
     on_open_artist: EventHandler<String>,
 ) -> Element {
     let is_offline = use_context::<Signal<bool>>();
@@ -120,12 +122,13 @@ pub fn HomeBody(
     let mut prefs = hooks::ui_prefs::use_ui_prefs();
     let source = use_active_source();
     let caps = hooks::sources::use_capabilities();
+    let catalog = use_memo(move || has_catalog(&caps()));
     // Which card has its overflow menu open, keyed by track uid / playlist id.
     // Owned here because the section renderers are plain functions, so they
     // cannot hold hook state of their own.
     let active_card_menu = use_signal(|| None::<String>);
 
-    // Offline every shelf holds only what has a downloaded copy.
+    // Offline every shelf holds only what has a downloaded or cached copy.
     let offline = use_memo(move || caps().downloads && *is_offline.read());
     let downloaded = move || offline().then_some(true);
     let albums_query = use_memo(move || {
@@ -134,7 +137,7 @@ pub fn HomeBody(
                 config::AlbumSortField::Title,
                 config::SortDirection::Asc,
             )],
-            downloaded: downloaded(),
+            offline: downloaded(),
             ..Default::default()
         })
     });
@@ -145,7 +148,7 @@ pub fn HomeBody(
                 config::AlbumSortField::Year,
                 config::SortDirection::Desc,
             )],
-            downloaded: downloaded(),
+            offline: downloaded(),
             ..Default::default()
         })
     });
@@ -156,7 +159,7 @@ pub fn HomeBody(
                 config::AlbumSortField::RecentlyAdded,
                 config::SortDirection::Desc,
             )],
-            downloaded: downloaded(),
+            offline: downloaded(),
             ..Default::default()
         })
     });
@@ -218,7 +221,7 @@ pub fn HomeBody(
         let genre = top_genre_res.read().clone().flatten()?;
         Some(hooks::AlbumQuery {
             genre: Some(genre),
-            downloaded: downloaded(),
+            offline: downloaded(),
             ..Default::default()
         })
     });
@@ -429,9 +432,11 @@ pub fn HomeBody(
     let is_vaxry = settings.read().ui.ui_style == UiStyle::Vaxry;
     let prefs_snapshot = prefs.read();
     let listen_now_style = prefs_snapshot.listen_now_style;
+    let catalog = catalog();
     let sections: Vec<(String, bool)> = prefs_snapshot
-        .home_sections
+        .home_layout(catalog)
         .iter()
+        .filter(|s| catalog || s.key != "catalog")
         .map(|s| (s.key.clone(), s.enabled))
         .collect();
     drop(prefs_snapshot);
@@ -494,8 +499,9 @@ pub fn HomeBody(
                                                 disabled: idx == 0,
                                                 onclick: move |_| {
                                                     let mut conf = prefs.write();
-                                                    if let Some(i) = conf.home_sections.iter().position(|s| s.key == key_up)
-                                                        && i > 0 { conf.home_sections.swap(i, i - 1); }
+                                                    let sections = conf.home_layout_mut(catalog);
+                                                    if let Some(i) = sections.iter().position(|s| s.key == key_up)
+                                                        && i > 0 { sections.swap(i, i - 1); }
                                                 },
                                                 i { class: "fa-solid fa-chevron-up text-xs" }
                                             }
@@ -505,8 +511,9 @@ pub fn HomeBody(
                                                 disabled: idx + 1 >= total,
                                                 onclick: move |_| {
                                                     let mut conf = prefs.write();
-                                                    if let Some(i) = conf.home_sections.iter().position(|s| s.key == key_down)
-                                                        && i + 1 < conf.home_sections.len() { conf.home_sections.swap(i, i + 1); }
+                                                    let sections = conf.home_layout_mut(catalog);
+                                                    if let Some(i) = sections.iter().position(|s| s.key == key_down)
+                                                        && i + 1 < sections.len() { sections.swap(i, i + 1); }
                                                 },
                                                 i { class: "fa-solid fa-chevron-down text-xs" }
                                             }
@@ -518,7 +525,7 @@ pub fn HomeBody(
                                                 },
                                                 onclick: move |_| {
                                                     let mut conf = prefs.write();
-                                                    if let Some(s) = conf.home_sections.iter_mut().find(|s| s.key == key_toggle) {
+                                                    if let Some(s) = conf.home_layout_mut(catalog).iter_mut().find(|s| s.key == key_toggle) {
                                                         s.enabled = !s.enabled;
                                                     }
                                                 },
@@ -528,28 +535,36 @@ pub fn HomeBody(
                                         }
                                     }
                                 }
-                                {render_server_section(
-                                    &key_for_render,
-                                    settings,
-                                    edit,
-                                    is_vaxry,
-                                    listen_now_style,
-                                    shuffled_albums(),
-                                    hero_cover(),
-                                    continue_listening(),
-                                    hero_entry(),
-                                    source_artists(),
-                                    new_releases(),
-                                    made_for_you(),
-                                    recently_added(),
-                                    recent_playlists(),
-                                    on_select_album,
-                                    on_play_album,
-                                    on_select_playlist,
-                                    on_open_artist,
-                                    active_card_menu,
-                                    scroll_container,
-                                )}
+                                if key_for_render == "catalog" {
+                                    crate::server::browse::CatalogHome {
+                                        on_select_album,
+                                        on_select_playlist: on_select_catalog,
+                                        on_open_artist,
+                                    }
+                                } else {
+                                    {render_server_section(
+                                        &key_for_render,
+                                        settings,
+                                        edit,
+                                        is_vaxry,
+                                        listen_now_style,
+                                        shuffled_albums(),
+                                        hero_cover(),
+                                        continue_listening(),
+                                        hero_entry(),
+                                        source_artists(),
+                                        new_releases(),
+                                        made_for_you(),
+                                        recently_added(),
+                                        recent_playlists(),
+                                        on_select_album,
+                                        on_play_album,
+                                        on_select_playlist,
+                                        on_open_artist,
+                                        active_card_menu,
+                                        scroll_container,
+                                    )}
+                                }
                             }
                         }
                     }
@@ -557,6 +572,11 @@ pub fn HomeBody(
             }
         }
     }
+}
+
+/// Whether the source has a catalog of its own, which Home then leads with.
+pub fn has_catalog(caps: &api::SourceCapabilities) -> bool {
+    caps.discover || !caps.pages.is_empty()
 }
 
 #[path = "home_body_sections.rs"]

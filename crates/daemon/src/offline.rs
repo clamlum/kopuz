@@ -1,11 +1,15 @@
-//! An in-memory mirror of the `offline_tracks` table, so wire rows and playback never wait on the database.
+//! What plays without the internet: an in-memory mirror of the `offline_tracks` downloads, the offline playback cache beside it, and whether offline mode is on.
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::ApiError;
+use server::playback_ref::PlaybackItemRef;
 use tokio::sync::{Mutex, Notify};
+
+use crate::offline_cache::OfflineCache;
 
 #[derive(Clone, Default)]
 pub struct OfflineIndex {
@@ -15,6 +19,10 @@ pub struct OfflineIndex {
     /// Where a copy found missing is unregistered; an index built without one only forgets it in memory.
     db: Option<db::Db>,
     pruned: Arc<Notify>,
+    /// A separate store: its songs are evicted and counted against its cap, downloads never.
+    cache: OfflineCache,
+    /// Listings and playback keep to what plays without the internet; the source service sets it.
+    offline_mode: Arc<AtomicBool>,
 }
 
 impl OfflineIndex {
@@ -41,6 +49,40 @@ impl OfflineIndex {
             db: Some(db.clone()),
             ..Self::default()
         })
+    }
+
+    pub fn with_cache(mut self, cache: OfflineCache) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    pub fn cache(&self) -> &OfflineCache {
+        &self.cache
+    }
+
+    pub fn offline_mode(&self) -> bool {
+        self.offline_mode.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_offline_mode(&self, on: bool) {
+        self.offline_mode.store(on, Ordering::SeqCst);
+    }
+
+    /// Whether `item_id` has a downloaded or a cached copy.
+    pub fn has_copy(&self, item_id: &str) -> bool {
+        self.read().contains_key(item_id) || self.cache.contains(item_id)
+    }
+
+    /// Whether `track` plays without the internet: a file, or a server track with a copy here, or any server track when `source_needs_internet` is false; a radio stream never does.
+    pub fn plays_offline(&self, track: &reader::Track, source_needs_internet: bool) -> bool {
+        let uid = track.id.uid();
+        match PlaybackItemRef::parse(&uid) {
+            PlaybackItemRef::Local(_) => true,
+            PlaybackItemRef::Radio { .. } => false,
+            PlaybackItemRef::Server { item_id, .. } => {
+                !source_needs_internet || self.has_copy(item_id)
+            }
+        }
     }
 
     /// The registered copy of `item_id`, whether or not the file is still there.

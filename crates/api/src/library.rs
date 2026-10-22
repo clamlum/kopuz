@@ -36,7 +36,10 @@ pub struct TrackInfo {
     pub disc_number: Option<u32>,
     pub kind: TrackKind,
     pub seekable: bool,
+    /// A downloaded copy is on this machine.
     pub offline: bool,
+    /// Kept from its own stream for offline listening, and evicted when the cache needs the room; a download is `offline` instead.
+    pub cached: bool,
     /// The file's container, upper-cased ("FLAC"), for a track that has
     /// one. A row from a service names no file, so it has none.
     pub format: Option<String>,
@@ -133,6 +136,8 @@ pub struct TrackFilter {
     pub sort: TrackSort,
     /// Only tracks with a downloaded copy (`Some(true)`), or only those without.
     pub downloaded: Option<bool>,
+    /// Only tracks that play offline, from a downloaded or a cached copy (`Some(true)`), or only those that do not.
+    pub offline: Option<bool>,
     /// Inclusive bounds on the year of the track's album; an album with no year is in neither.
     pub year_from: Option<u16>,
     pub year_to: Option<u16>,
@@ -155,6 +160,8 @@ pub struct AlbumQuery {
     pub ids: Option<Vec<String>>,
     /// Only those with a downloaded track (`Some(true)`), or only those with none.
     pub downloaded: Option<bool>,
+    /// Only those with a track that plays offline, downloaded or cached (`Some(true)`), or only those with none.
+    pub offline: Option<bool>,
     /// The first criterion decides and the rest break ties; artist then title settle what is left.
     pub sort: Vec<config::SortCriterion<config::AlbumSortField>>,
 }
@@ -166,6 +173,8 @@ pub struct ArtistQuery {
     pub search: Option<String>,
     /// Only those with a downloaded track (`Some(true)`), or only those with none.
     pub downloaded: Option<bool>,
+    /// Only those with a track that plays offline, downloaded or cached (`Some(true)`), or only those with none.
+    pub offline: Option<bool>,
     /// The first criterion decides and the rest break ties; name then key settle what is left.
     pub sort: Vec<config::SortCriterion<config::ArtistSortField>>,
 }

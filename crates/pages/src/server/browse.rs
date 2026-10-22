@@ -6,7 +6,7 @@ use components::{CatalogPageRef, NavigationController};
 use dioxus::prelude::*;
 use tracing::Instrument;
 
-use super::discover::{DiscoverNowPlaying, DiscoverPage, ShelfRow, failure_text, play_catalog};
+use super::discover::{CatalogFeed, DiscoverNowPlaying, ShelfRow, failure_text, play_catalog};
 
 fn entry_page(entry: &PageEntry) -> CatalogPageRef {
     CatalogPageRef {
@@ -16,9 +16,9 @@ fn entry_page(entry: &PageEntry) -> CatalogPageRef {
     }
 }
 
-/// The first page the source declares, or the plain feed when it declares none.
+/// The first page the source declares, or the plain feed when it declares none, as Home's catalog section.
 #[component]
-pub fn Discover(
+pub fn CatalogHome(
     on_select_album: EventHandler<String>,
     on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
     on_open_artist: EventHandler<String>,
@@ -27,7 +27,7 @@ pub fn Discover(
     let first = caps().pages.first().map(entry_page);
     match first {
         None => rsx! {
-            DiscoverPage { on_select_album, on_select_playlist, on_open_artist }
+            CatalogFeed { on_select_album, on_select_playlist, on_open_artist }
         },
         // A keyed list of one, so a different page remounts instead of keeping the old state.
         Some(page) => rsx! {
@@ -39,9 +39,45 @@ pub fn Discover(
                     on_select_playlist,
                     on_open_artist,
                     on_back: None,
+                    embedded: true,
                 }
             }
         },
+    }
+}
+
+/// The catalog pages after the one Home leads with.
+fn discover_pages(caps: &api::SourceCapabilities) -> Vec<PageEntry> {
+    caps.pages.iter().skip(1).cloned().collect()
+}
+
+/// The first of the source's pages Home does not show.
+#[component]
+pub fn Discover(
+    on_select_album: EventHandler<String>,
+    on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
+    on_open_artist: EventHandler<String>,
+) -> Element {
+    let caps = hooks::sources::use_capabilities();
+    let Some(page) = discover_pages(&caps()).first().map(entry_page) else {
+        return rsx! {
+            div { class: "flex items-center justify-center h-full text-white/60 p-12",
+                p { "{i18n::t(\"catalog_page_empty\")}" }
+            }
+        };
+    };
+    rsx! {
+        // A keyed list of one, so a different page remounts instead of keeping the old state.
+        for page in std::iter::once(page) {
+            CatalogPageView {
+                key: "{page.id}",
+                page,
+                on_select_album,
+                on_select_playlist,
+                on_open_artist,
+                on_back: None,
+            }
+        }
     }
 }
 
@@ -88,9 +124,15 @@ fn CatalogPageView(
     on_open_artist: EventHandler<String>,
     /// Absent on a page the source lists, which sits under the page row instead.
     on_back: Option<EventHandler<()>>,
+    /// Rendered inside Home, which owns the padding and the page row.
+    #[props(default)]
+    embedded: bool,
 ) -> Element {
+    let ui_style = crate::layout::use_ui_style();
+    let inset = crate::layout::page_inset_class(&ui_style);
     let api = hooks::use_api();
     let caps = hooks::sources::use_capabilities();
+    let cache = hooks::catalog_cache::use_catalog_cache();
     let mut detail = use_signal(|| None::<CatalogDetail>);
     let mut error = use_signal(|| None::<String>);
     let mut loading_more = use_signal(|| None::<Loading>);
@@ -106,21 +148,33 @@ fn CatalogPageView(
             *generation += 1;
             *generation
         });
-        detail.set(None);
+        let cached = cache.get(kind, &id);
+        let fresh = cached.as_ref().is_some_and(|cached| cached.fresh);
+        detail.set(cached.map(|cached| cached.detail));
         error.set(None);
         loading_more.set(None);
+        if fresh {
+            return;
+        }
         let span = tracing::info_span!("catalog.page", id = %id);
         let api = api.clone();
         spawn(
             async move {
                 let result = api
-                    .catalog_detail(CatalogDetailRequest::new(kind, id))
+                    .catalog_detail(CatalogDetailRequest::new(kind, id.clone()))
                     .await;
                 if *fetch_gen.peek() != my_gen {
                     return;
                 }
                 match result {
-                    Ok(answer) => detail.set(Some(answer)),
+                    Ok(answer) => {
+                        cache.put(kind, &id, answer.clone());
+                        detail.set(Some(answer));
+                    }
+                    // A stale copy on screen beats an error over it.
+                    Err(failure) if detail.peek().is_some() => {
+                        tracing::warn!(error = %failure, "catalog page refresh failed");
+                    }
                     Err(failure) => error.set(Some(failure_text(&failure))),
                 }
             }
@@ -153,7 +207,7 @@ fn CatalogPageView(
             async move {
                 let request = CatalogDetailRequest {
                     kind,
-                    id,
+                    id: id.clone(),
                     continuation: Some(token),
                 };
                 let result = api.catalog_detail(request).await;
@@ -164,6 +218,7 @@ fn CatalogPageView(
                     Ok(answer) => {
                         if let Some(current) = detail.write().as_mut() {
                             extend(current, target, answer);
+                            cache.update(kind, &id, current.clone());
                         }
                     }
                     Err(failure) => {
@@ -207,7 +262,7 @@ fn CatalogPageView(
         },
     );
 
-    let pages = caps().pages.clone();
+    let pages = discover_pages(&caps());
     let listed = pages.iter().any(|entry| entry.id == page.id);
     let loaded = detail.read().clone();
     let auto_shelf = match scroll_target() {
@@ -217,94 +272,96 @@ fn CatalogPageView(
     let in_flight = *loading_more.read();
 
     rsx! {
-        div { class: "p-6 md:p-10 max-w-[1600px] mx-auto",
-            if listed {
-                h1 { class: "text-3xl md:text-4xl font-black text-white mb-4", "{i18n::t(\"discover\")}" }
-                PageTabs { pages: pages.clone(), active: page.id.clone() }
-                div { class: "h-px bg-white/10 mt-4 mb-8" }
-            } else if let Some(back) = on_back {
-                components::back_button::BackButton { on_click: move |_| back.call(()) }
-            }
+        div { class: if embedded { "" } else { "{inset} pb-10" },
+            div { class: crate::layout::PAGE_CONTENT,
+                if listed && !embedded {
+                    h1 { class: "text-3xl md:text-4xl font-black text-white mb-4", "{i18n::t(\"discover\")}" }
+                    PageTabs { pages: pages.clone(), active: page.id.clone() }
+                    div { class: "h-px bg-white/10 mt-4 mb-8" }
+                } else if let Some(back) = on_back {
+                    components::back_button::BackButton { on_click: move |_| back.call(()) }
+                }
 
-            if let Some(err) = error.read().clone() {
-                div { class: "py-12 text-rose-400 text-sm", "{err}" }
-            } else if let Some(loaded) = loaded {
-                if !listed {
-                    PageHeader { detail: loaded.clone(), fallback: page.title.clone() }
-                }
-                if !loaded.chips.is_empty() {
-                    Chips {
-                        chips: match picked.read().clone() {
-                            Some(on) => loaded
-                                .chips
-                                .iter()
-                                .cloned()
-                                .map(|chip| CatalogChip {
-                                    selected: on.as_deref() == Some(chip.id.as_str()),
-                                    ..chip
-                                })
-                                .collect(),
-                            None => loaded.chips.clone(),
-                        },
-                        on_pick: move |chip: CatalogChip| {
-                            if chip.selected {
-                                picked.set(Some(None));
-                                showing.set(page.id.clone());
-                            } else {
-                                picked.set(Some(Some(chip.id.clone())));
-                                showing.set(chip.id);
-                            }
-                        },
+                if let Some(err) = error.read().clone() {
+                    div { class: "py-12 text-rose-400 text-sm", "{err}" }
+                } else if let Some(loaded) = loaded {
+                    if !listed && !embedded {
+                        PageHeader { detail: loaded.clone(), fallback: page.title.clone() }
                     }
-                }
-                if !loaded.tracks.is_empty() {
-                    ShelfRow {
-                        shelf: tracks_shelf(&loaded),
-                        scroll_id: "catalog-page-tracks".to_string(),
-                        on_select_album,
-                        on_select_playlist,
-                        on_open_artist,
-                    }
-                }
-                for (idx, shelf) in loaded.shelves.iter().enumerate() {
-                    ShelfRow {
-                        key: "{idx}",
-                        shelf: shelf.clone(),
-                        scroll_id: format!("catalog-page-shelf-{idx}"),
-                        on_select_album,
-                        on_select_playlist,
-                        on_open_artist,
-                        on_more: match (&shelf.continuation, auto_shelf) {
-                            (Some(token), auto) if auto != Some(idx) => {
-                                let token = token.clone();
-                                {
-                                    let mut load_more = load_more;
-                                    Some(EventHandler::new(move |_| load_more(Loading::Shelf(idx), token.clone())))
+                    if !loaded.chips.is_empty() {
+                        Chips {
+                            chips: match picked.read().clone() {
+                                Some(on) => loaded
+                                    .chips
+                                    .iter()
+                                    .cloned()
+                                    .map(|chip| CatalogChip {
+                                        selected: on.as_deref() == Some(chip.id.as_str()),
+                                        ..chip
+                                    })
+                                    .collect(),
+                                None => loaded.chips.clone(),
+                            },
+                            on_pick: move |chip: CatalogChip| {
+                                if chip.selected {
+                                    picked.set(Some(None));
+                                    showing.set(page.id.clone());
+                                } else {
+                                    picked.set(Some(Some(chip.id.clone())));
+                                    showing.set(chip.id);
                                 }
-                            }
-                            _ => None,
-                        },
-                        more_loading: in_flight == Some(Loading::Shelf(idx)),
+                            },
+                        }
+                    }
+                    if !loaded.tracks.is_empty() {
+                        ShelfRow {
+                            shelf: tracks_shelf(&loaded),
+                            scroll_id: "catalog-page-tracks".to_string(),
+                            on_select_album,
+                            on_select_playlist,
+                            on_open_artist,
+                        }
+                    }
+                    for (idx, shelf) in loaded.shelves.iter().enumerate() {
+                        ShelfRow {
+                            key: "{idx}",
+                            shelf: shelf.clone(),
+                            scroll_id: format!("catalog-page-shelf-{idx}"),
+                            on_select_album,
+                            on_select_playlist,
+                            on_open_artist,
+                            on_more: match (&shelf.continuation, auto_shelf) {
+                                (Some(token), auto) if auto != Some(idx) => {
+                                    let token = token.clone();
+                                    {
+                                        let mut load_more = load_more;
+                                        Some(EventHandler::new(move |_| load_more(Loading::Shelf(idx), token.clone())))
+                                    }
+                                }
+                                _ => None,
+                            },
+                            more_loading: in_flight == Some(Loading::Shelf(idx)),
+                        }
+                    }
+                    if loaded.tracks.is_empty() && loaded.shelves.is_empty() {
+                        div { class: "py-24 flex flex-col items-center justify-center text-slate-600",
+                            i { class: "fa-regular fa-folder-open text-4xl mb-4" }
+                            p { class: "text-lg", "{i18n::t(\"catalog_page_empty\")}" }
+                        }
+                    }
+                } else {
+                    div { class: "flex justify-center py-24",
+                        i { class: "fa-solid fa-arrows-rotate fa-spin text-2xl text-white/60" }
                     }
                 }
-                if loaded.tracks.is_empty() && loaded.shelves.is_empty() {
-                    div { class: "py-24 flex flex-col items-center justify-center text-slate-600",
-                        i { class: "fa-regular fa-folder-open text-4xl mb-4" }
-                        p { class: "text-lg", "{i18n::t(\"catalog_page_empty\")}" }
+
+                div { id: "catalog-page-sentinel", class: "h-8" }
+
+                if in_flight.is_some() && in_flight == scroll_target().map(|(target, _)| target) {
+                    div { class: "flex items-center justify-center gap-3 py-6 text-white/50 text-xs",
+                        i { class: "fa-solid fa-arrows-rotate fa-spin" }
+                        span { "{i18n::t(\"discover_more_loading\")}" }
                     }
-                }
-            } else {
-                div { class: "flex justify-center py-24",
-                    i { class: "fa-solid fa-arrows-rotate fa-spin text-2xl text-white/60" }
-                }
-            }
-
-            div { id: "catalog-page-sentinel", class: "h-8" }
-
-            if in_flight.is_some() && in_flight == scroll_target().map(|(target, _)| target) {
-                div { class: "flex items-center justify-center gap-3 py-6 text-white/50 text-xs",
-                    i { class: "fa-solid fa-arrows-rotate fa-spin" }
-                    span { "{i18n::t(\"discover_more_loading\")}" }
                 }
             }
         }
@@ -420,6 +477,8 @@ fn Chips(chips: Vec<CatalogChip>, on_pick: EventHandler<CatalogChip>) -> Element
 
 #[component]
 fn PageHeader(detail: CatalogDetail, fallback: String) -> Element {
+    let ui_style = crate::layout::use_ui_style();
+    let inline = crate::layout::page_inline_class(&ui_style);
     let mut actions = use_signal(|| detail.actions.clone());
     let ctrl = use_context::<hooks::use_player_controller::PlayerController>();
     let now_playing = use_context::<DiscoverNowPlaying>().0;
@@ -474,7 +533,7 @@ fn PageHeader(detail: CatalogDetail, fallback: String) -> Element {
                 div {
                     class: "relative overflow-hidden rounded-xl flex flex-col justify-end mb-12",
                     style: "{banner_style}",
-                    div { class: "px-6 md:px-10 pt-16 pb-10 flex flex-col gap-4",
+                    div { class: "{inline} pt-16 pb-10 flex flex-col gap-4",
                         h1 { class: "text-4xl md:text-6xl font-black text-white break-words drop-shadow-lg text-balance", "{title}" }
                         if let Some(subtitle) = detail.subtitle.clone() {
                             p { class: "text-sm text-white/70", "{subtitle}" }

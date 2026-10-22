@@ -77,6 +77,7 @@ hex = { workspace = true }
 
 
 [target.'cfg(target_os = "linux")'.dependencies]
+axum = { version = "0.7.9", default-features = false, features = ["http1", "tokio"] }
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "settings"] }
 webkit2gtk = { workspace = true, features = ["v2_16"] }
 libloading = { workspace = true }

@@ -187,9 +187,25 @@ pub fn format_entity_artwork_url(kind: &str, id: &str, version: u64, hq: bool) -
     entity_artwork_url(origin, kind, id, version, hq)
 }
 
-/// The desktop artwork transport's URL for a queued music video's picture.
+static VIDEO_ENDPOINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Install the app's loopback video endpoint before rendering the Linux UI.
+pub fn set_video_endpoint(endpoint: String) -> Result<(), String> {
+    VIDEO_ENDPOINT
+        .set(endpoint)
+        .map_err(|_| "video endpoint is already initialized".to_string())
+}
+
+/// The URL a queued music video's picture loads from: loopback HTTP on Linux,
+/// whose media stack takes no custom scheme, the artwork protocol elsewhere.
 pub fn format_video_url(key: &str) -> String {
-    let origin = if cfg!(target_os = "windows") {
+    let origin = if cfg!(target_os = "linux") {
+        let Some(endpoint) = VIDEO_ENDPOINT.get() else {
+            tracing::error!("video requested before the loopback server was started");
+            return String::new();
+        };
+        endpoint.as_str()
+    } else if cfg!(target_os = "windows") {
         "http://artwork.dioxus.localhost/video"
     } else {
         "artwork://video"

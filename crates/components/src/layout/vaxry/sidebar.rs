@@ -139,9 +139,10 @@ pub fn SidebarVaxry(props: SidebarProps) -> Element {
     };
     let onmouseup = move |_| is_resizing.set(false);
 
-    // Discover is a capability of the active source, not a config flag.
+    // Home shows the source's first catalog page, so Discover holds the rest
+    // and only appears when the source lists more than one.
     let caps = hooks::sources::use_capabilities();
-    let has_discover = use_memo(move || caps().discover || !caps().pages.is_empty());
+    let has_discover = use_memo(move || caps().pages.len() > 1);
     let collapsed = if is_android {
         false
     } else {

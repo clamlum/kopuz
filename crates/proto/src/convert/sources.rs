@@ -30,6 +30,7 @@ pub fn capabilities_to_proto(value: &api::SourceCapabilities) -> SourceCapabilit
         stream_quality: value.stream_quality,
         explicit_flags: value.explicit_flags,
         watch_history: value.watch_history,
+        complete_play_history: value.complete_play_history,
         playlists: match value.playlists {
             PlaylistCapability::None => crate::PlaylistCapability::None,
             PlaylistCapability::AddRemove => crate::PlaylistCapability::AddRemove,
@@ -128,6 +129,7 @@ pub fn capabilities_from_proto(value: Option<&SourceCapabilities>) -> api::Sourc
         stream_quality: value.stream_quality,
         explicit_flags: value.explicit_flags,
         watch_history: value.watch_history,
+        complete_play_history: value.complete_play_history,
         playlists: match crate::PlaylistCapability::try_from(value.playlists) {
             Ok(crate::PlaylistCapability::AddRemove) => api::PlaylistCapability::AddRemove,
             Ok(crate::PlaylistCapability::Reorder) => api::PlaylistCapability::Reorder,
@@ -183,6 +185,7 @@ pub fn service_info_to_proto(value: &api::ServiceInfo) -> ServiceInfo {
     ServiceInfo {
         id: value.id.clone(),
         name: Some(text_to_proto(&value.name)),
+        summary: Some(text_to_proto(&value.summary)),
         icon: Some(icon_to_proto(&value.icon)),
         accent: value.accent.clone(),
         experimental: value.experimental,
@@ -194,6 +197,11 @@ pub fn service_info_from_proto(value: &ServiceInfo) -> api::ServiceInfo {
     api::ServiceInfo {
         id: value.id.clone(),
         name: value.name.as_ref().map(text_from_proto).unwrap_or_default(),
+        summary: value
+            .summary
+            .as_ref()
+            .map(text_from_proto)
+            .unwrap_or_default(),
         icon: value.icon.as_ref().map(icon_from_proto).unwrap_or_default(),
         accent: value.accent.clone(),
         experimental: value.experimental,
@@ -230,6 +238,62 @@ pub fn draft_check_from_proto(value: &DraftCheck) -> api::DraftCheck {
     api::DraftCheck {
         sign_in: sign_in_kind_from_proto(value.sign_in),
         problems: value.problems.iter().map(problem_from_proto).collect(),
+    }
+}
+
+pub fn draft_probe_to_proto(value: &api::DraftProbe) -> DraftProbe {
+    let outcome = match value {
+        api::DraftProbe::Folders(folders) => draft_probe::Outcome::Folders(FolderProbeList {
+            folders: folders
+                .iter()
+                .map(|folder| FolderProbe {
+                    path: folder.path.clone(),
+                    exists: folder.exists,
+                    readable: folder.readable,
+                    audio_files: folder.audio_files,
+                    at_least: folder.at_least,
+                })
+                .collect(),
+        }),
+        api::DraftProbe::Server(probe) => draft_probe::Outcome::Server(ServerProbe {
+            outcome: Some(match probe {
+                api::ServerProbe::Reachable => server_probe::Outcome::Reachable(Unit {}),
+                api::ServerProbe::Unreachable => server_probe::Outcome::Unreachable(Unit {}),
+                api::ServerProbe::Status(status) => {
+                    server_probe::Outcome::Status(u32::from(*status))
+                }
+            }),
+        }),
+        api::DraftProbe::NotProbeable => draft_probe::Outcome::NotProbeable(Unit {}),
+    };
+    DraftProbe {
+        outcome: Some(outcome),
+    }
+}
+
+/// An outcome this build cannot read proves nothing was reached.
+pub fn draft_probe_from_proto(value: &DraftProbe) -> api::DraftProbe {
+    match &value.outcome {
+        Some(draft_probe::Outcome::Folders(list)) => api::DraftProbe::Folders(
+            list.folders
+                .iter()
+                .map(|folder| api::FolderProbe {
+                    path: folder.path.clone(),
+                    exists: folder.exists,
+                    readable: folder.readable,
+                    audio_files: folder.audio_files,
+                    at_least: folder.at_least,
+                })
+                .collect(),
+        ),
+        Some(draft_probe::Outcome::Server(probe)) => api::DraftProbe::Server(match probe.outcome {
+            Some(server_probe::Outcome::Reachable(_)) => api::ServerProbe::Reachable,
+            Some(server_probe::Outcome::Status(status)) => {
+                api::ServerProbe::Status(u16::try_from(status).unwrap_or(u16::MAX))
+            }
+            Some(server_probe::Outcome::Unreachable(_)) | None => api::ServerProbe::Unreachable,
+        }),
+        Some(draft_probe::Outcome::NotProbeable(_)) | None => api::DraftProbe::NotProbeable,
     }
 }
 
@@ -446,6 +510,7 @@ mod tests {
                 stream_quality: true,
                 explicit_flags: true,
                 watch_history: true,
+                complete_play_history: true,
                 playlists: api::PlaylistCapability::Reorder,
                 artists: api::ArtistPresentation::Library,
                 albums: api::AlbumPresentation::Standard,
@@ -490,6 +555,7 @@ mod tests {
         let service = api::ServiceInfo {
             id: "jellyfin".into(),
             name: api::Text::literal("Jellyfin"),
+            summary: api::Text::key("service_summary_jellyfin"),
             icon: api::Icon::Svg("M0 0h24v24H0z".into()),
             accent: "#aa5cc3".into(),
             experimental: false,
@@ -525,6 +591,37 @@ mod tests {
             problems: vec![api::Problem::on("url", api::Text::key("error-url-empty"))],
         };
         assert_eq!(check, draft_check_from_proto(&draft_check_to_proto(&check)));
+    }
+
+    #[test]
+    fn every_draft_probe_round_trips() {
+        let folders = vec![
+            api::FolderProbe {
+                path: "/music".into(),
+                exists: true,
+                readable: true,
+                audio_files: 10_000,
+                at_least: true,
+            },
+            api::FolderProbe {
+                path: "/gone".into(),
+                ..Default::default()
+            },
+        ];
+        for probe in [
+            api::DraftProbe::Folders(folders),
+            api::DraftProbe::Folders(Vec::new()),
+            api::DraftProbe::Server(api::ServerProbe::Reachable),
+            api::DraftProbe::Server(api::ServerProbe::Unreachable),
+            api::DraftProbe::Server(api::ServerProbe::Status(401)),
+            api::DraftProbe::NotProbeable,
+        ] {
+            assert_eq!(probe, draft_probe_from_proto(&draft_probe_to_proto(&probe)));
+        }
+        assert_eq!(
+            draft_probe_from_proto(&DraftProbe::default()),
+            api::DraftProbe::NotProbeable
+        );
     }
 
     /// A sign-in kind this build cannot name is one it cannot drive: treat it

@@ -62,6 +62,8 @@ pub fn setting_key_to_proto(value: config::SettingKey) -> SettingKey {
             LibraryKey::AutoFetchCovers => SettingKey::AutoFetchCovers,
             LibraryKey::CoverFetchStrategy => SettingKey::CoverFetchStrategy,
             LibraryKey::OfflineQuality => SettingKey::OfflineQuality,
+            LibraryKey::OfflineCacheEnabled => SettingKey::OfflineCacheEnabled,
+            LibraryKey::OfflineCacheMaxBytes => SettingKey::OfflineCacheMaxBytes,
             LibraryKey::SyncIntervalMinutes => SettingKey::SyncIntervalMinutes,
         },
         K::Integrations(key) => match key {
@@ -81,6 +83,7 @@ pub fn setting_key_to_proto(value: config::SettingKey) -> SettingKey {
             SystemKey::TracingEnabled => SettingKey::TracingEnabled,
             SystemKey::AutoCheckUpdates => SettingKey::AutoCheckUpdates,
             SystemKey::MinimizeToTray => SettingKey::MinimizeToTray,
+            SystemKey::ConnectivityCheckUrls => SettingKey::ConnectivityCheckUrls,
         },
     }
 }
@@ -129,6 +132,8 @@ pub fn setting_key_from_proto(value: i32) -> Option<config::SettingKey> {
         SettingKey::AutoFetchCovers => K::Library(LibraryKey::AutoFetchCovers),
         SettingKey::CoverFetchStrategy => K::Library(LibraryKey::CoverFetchStrategy),
         SettingKey::OfflineQuality => K::Library(LibraryKey::OfflineQuality),
+        SettingKey::OfflineCacheEnabled => K::Library(LibraryKey::OfflineCacheEnabled),
+        SettingKey::OfflineCacheMaxBytes => K::Library(LibraryKey::OfflineCacheMaxBytes),
         SettingKey::SyncIntervalMinutes => K::Library(LibraryKey::SyncIntervalMinutes),
         SettingKey::DiscordPresence => K::Integrations(IntegrationsKey::DiscordPresence),
         SettingKey::DiscordPresenceSource => {
@@ -142,6 +147,7 @@ pub fn setting_key_from_proto(value: i32) -> Option<config::SettingKey> {
         SettingKey::TracingEnabled => K::System(SystemKey::TracingEnabled),
         SettingKey::AutoCheckUpdates => K::System(SystemKey::AutoCheckUpdates),
         SettingKey::MinimizeToTray => K::System(SystemKey::MinimizeToTray),
+        SettingKey::ConnectivityCheckUrls => K::System(SystemKey::ConnectivityCheckUrls),
     })
 }
 
@@ -219,6 +225,8 @@ pub fn config_edit_to_proto(value: &config::SettingsEdit) -> ConfigEdit {
             Li::OfflineQuality(value) => {
                 Edit::OfflineQuality(offline_quality_to_proto(value) as i32)
             }
+            Li::OfflineCacheEnabled(value) => Edit::OfflineCacheEnabled(value),
+            Li::OfflineCacheMaxBytes(value) => Edit::OfflineCacheMaxBytes(value),
             Li::SyncIntervalMinutes(value) => Edit::SyncIntervalMinutes(value),
         },
         Se::Integrations(edit) => match edit {
@@ -249,6 +257,7 @@ pub fn config_edit_to_proto(value: &config::SettingsEdit) -> ConfigEdit {
             Sy::TracingEnabled(value) => Edit::TracingEnabled(value),
             Sy::AutoCheckUpdates(value) => Edit::AutoCheckUpdates(value),
             Sy::MinimizeToTray(value) => Edit::MinimizeToTray(value),
+            Sy::ConnectivityCheckUrls(values) => Edit::ConnectivityCheckUrls(StringList { values }),
         },
     };
     ConfigEdit { edit: Some(edit) }
@@ -334,6 +343,8 @@ pub fn config_edit_from_proto(value: &ConfigEdit) -> Option<config::SettingsEdit
         Edit::OfflineQuality(value) => {
             Se::Library(Li::OfflineQuality(offline_quality_from_proto(value)))
         }
+        Edit::OfflineCacheEnabled(value) => Se::Library(Li::OfflineCacheEnabled(value)),
+        Edit::OfflineCacheMaxBytes(value) => Se::Library(Li::OfflineCacheMaxBytes(value)),
         Edit::SyncIntervalMinutes(value) => Se::Library(Li::SyncIntervalMinutes(value)),
         Edit::DiscordPresence(value) => Se::Integrations(In::DiscordPresence(value.value)),
         Edit::DiscordPresenceSource(value) => {
@@ -352,6 +363,7 @@ pub fn config_edit_from_proto(value: &ConfigEdit) -> Option<config::SettingsEdit
         Edit::TracingEnabled(value) => Se::System(Sy::TracingEnabled(value)),
         Edit::AutoCheckUpdates(value) => Se::System(Sy::AutoCheckUpdates(value)),
         Edit::MinimizeToTray(value) => Se::System(Sy::MinimizeToTray(value)),
+        Edit::ConnectivityCheckUrls(list) => Se::System(Sy::ConnectivityCheckUrls(list.values)),
     })
 }
 

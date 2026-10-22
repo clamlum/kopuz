@@ -187,6 +187,154 @@ pub(super) fn DownloadsSection(settings: Signal<Settings>) -> Element {
     }
 }
 
+const OFFLINE_CACHE_PRESETS_GB: [u64; 6] = [1, 2, 5, 10, 20, 50];
+
+fn format_bytes(bytes: u64) -> String {
+    const GB: u64 = 1_000_000_000;
+    const MB: u64 = 1_000_000;
+    if bytes >= GB {
+        let tenths = (bytes + GB / 20) / (GB / 10);
+        if tenths.is_multiple_of(10) {
+            format!("{} GB", tenths / 10)
+        } else {
+            format!("{}.{} GB", tenths / 10, tenths % 10)
+        }
+    } else {
+        format!("{} MB", (bytes + MB / 2) / MB)
+    }
+}
+
+/// The presets, plus the current size when a settings file set one between them.
+fn offline_cache_size_options(current: u64) -> Vec<(String, String)> {
+    let mut sizes: Vec<u64> = OFFLINE_CACHE_PRESETS_GB
+        .iter()
+        .map(|gb| gb * 1_000_000_000)
+        .collect();
+    if !sizes.contains(&current) {
+        sizes.push(current);
+        sizes.sort_unstable();
+    }
+    sizes
+        .into_iter()
+        .map(|bytes| (bytes.to_string(), format_bytes(bytes)))
+        .collect()
+}
+
+#[component]
+pub(super) fn OfflineCacheSection(settings: Signal<Settings>) -> Element {
+    let edits = hooks::settings::use_settings();
+    let mut confirming = use_signal(|| false);
+    let gens = hooks::db_reactivity::use_generations();
+    let mut status = use_resource(move || {
+        // The daemon marks the track table changed whenever the cache gains or loses a song.
+        let _ = gens.generation(hooks::db_reactivity::Table::Tracks);
+        async move {
+            hooks::consume_api()
+                .offline_cache_status()
+                .await
+                .inspect_err(
+                    |error| tracing::warn!(%error, "reading the offline cache status failed"),
+                )
+                .ok()
+        }
+    });
+    let enabled = settings.read().library.offline_cache_enabled;
+    let max_bytes = settings.read().library.offline_cache_max_bytes;
+    let used_bytes = status().flatten().map(|status| status.used_bytes);
+    let used_label = used_bytes.map(|used| {
+        i18n::t_with(
+            "offline_cache_used",
+            &[
+                ("used", format_bytes(used).into()),
+                ("max", format_bytes(max_bytes).into()),
+            ],
+        )
+    });
+    let clear = move |_| {
+        confirming.set(false);
+        spawn(async move {
+            if let Err(error) = hooks::consume_api().clear_offline_cache().await {
+                tracing::warn!(%error, "clearing the offline cache failed");
+                hooks::toast::toast_api_error(&error);
+            }
+            status.restart();
+        });
+    };
+
+    rsx! {
+        SettingsSection { title: i18n::t("offline_cache").to_string(),
+            p { class: "px-5 py-2.5 text-sm text-white/60 text-pretty",
+                "{i18n::t(\"offline_cache_description\")}"
+            }
+            SettingItem {
+                title: i18n::t("offline_cache_enabled").to_string(),
+                config_key: "offline_cache_enabled",
+                control: rsx! {
+                    ToggleSetting {
+                        enabled,
+                        on_change: move |val| edits.edit(SettingsEdit::Library(LibraryEdit::OfflineCacheEnabled(val))),
+                    }
+                }
+            }
+            SettingItem {
+                title: i18n::t("offline_cache_max_size").to_string(),
+                config_key: "offline_cache_max_bytes",
+                control: rsx! {
+                    AppSelect {
+                        class: "settings-select",
+                        value: max_bytes.to_string(),
+                        options: offline_cache_size_options(max_bytes),
+                        on_change: move |value: String| {
+                            if let Ok(bytes) = value.parse::<u64>() {
+                                edits.edit(SettingsEdit::Library(LibraryEdit::OfflineCacheMaxBytes(bytes)));
+                            }
+                        },
+                    }
+                }
+            }
+            SettingItem {
+                title: used_label.clone().unwrap_or_default(),
+                control: rsx! {
+                    button {
+                        class: "app-button-tonal bg-white/10 hover:bg-white/20 text-white px-3 py-2 rounded-xl text-sm transition-colors disabled:opacity-50",
+                        disabled: used_bytes.is_none_or(|used| used == 0),
+                        onclick: move |_| confirming.set(true),
+                        "{i18n::t(\"offline_cache_clear\")}"
+                    }
+                }
+            }
+        }
+        if confirming() {
+            div {
+                class: "overlay",
+                onclick: move |_| confirming.set(false),
+                div {
+                    class: "popup",
+                    role: "alertdialog",
+                    aria_modal: "true",
+                    onclick: |evt| evt.stop_propagation(),
+                    h2 { "{i18n::t(\"offline_cache_clear\")}" }
+                    if let Some(label) = used_label {
+                        p { class: "text-sm text-white/60 text-pretty", "{label}" }
+                    }
+                    div { class: "flex justify-end gap-3 mt-2",
+                        button {
+                            class: "app-button-outlined px-4 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-white border border-white/10 hover:bg-white/5 transition-colors active:scale-95 cursor-pointer",
+                            onclick: move |_| confirming.set(false),
+                            "{i18n::t(\"cancel\")}"
+                        }
+                        button {
+                            class: "app-button-tonal app-button-danger px-4 py-2 rounded-lg text-sm font-medium bg-red-500/20 hover:bg-red-500/30 text-red-300 transition-colors active:scale-95 cursor-pointer",
+                            onclick: clear,
+                            "{i18n::t(\"offline_cache_clear\")}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub(super) fn MetadataSection(settings: Signal<Settings>) -> Element {
     let edits = hooks::settings::use_settings();
@@ -583,5 +731,38 @@ fn EqualizerItem(settings: Signal<Settings>) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_in_decimal_units() {
+        assert_eq!(format_bytes(0), "0 MB");
+        assert_eq!(format_bytes(500_000_000), "500 MB");
+        assert_eq!(format_bytes(5_000_000_000), "5 GB");
+        assert_eq!(format_bytes(1_234_000_000), "1.2 GB");
+        assert_eq!(format_bytes(1_000_000_000_000), "1000 GB");
+    }
+
+    #[test]
+    fn a_size_between_the_presets_is_offered_in_order() {
+        let options = offline_cache_size_options(3_000_000_000);
+        let values: Vec<&str> = options.iter().map(|(value, _)| value.as_str()).collect();
+        assert_eq!(
+            values,
+            [
+                "1000000000",
+                "2000000000",
+                "3000000000",
+                "5000000000",
+                "10000000000",
+                "20000000000",
+                "50000000000"
+            ]
+        );
+        assert_eq!(offline_cache_size_options(5_000_000_000).len(), 6);
     }
 }

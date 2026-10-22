@@ -57,6 +57,8 @@ pub fn error_reason_to_proto(value: Option<api::ErrorReason>) -> ErrorReason {
         Some(R::AppleMusicTokenRequired) => ErrorReason::AppleMusicTokenRequired,
         Some(R::InvalidSmbUrl) => ErrorReason::InvalidSmbUrl,
         Some(R::InvalidServerUrl) => ErrorReason::InvalidServerUrl,
+        Some(R::NetworkDown) => ErrorReason::NetworkDown,
+        Some(R::OfflineMode) => ErrorReason::OfflineMode,
     }
 }
 
@@ -86,6 +88,8 @@ pub fn error_reason_from_proto(value: i32) -> Option<api::ErrorReason> {
         ErrorReason::AppleMusicTokenRequired => Some(R::AppleMusicTokenRequired),
         ErrorReason::InvalidSmbUrl => Some(R::InvalidSmbUrl),
         ErrorReason::InvalidServerUrl => Some(R::InvalidServerUrl),
+        ErrorReason::NetworkDown => Some(R::NetworkDown),
+        ErrorReason::OfflineMode => Some(R::OfflineMode),
     }
 }
 

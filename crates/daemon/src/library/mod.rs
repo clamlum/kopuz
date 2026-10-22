@@ -98,7 +98,20 @@ fn db_page(page: Page) -> db::Page {
     }
 }
 
-fn album_query(source: config::Source, query: api::AlbumQuery) -> db::AlbumQuery {
+/// The `offline` a listing runs with: what was asked, narrowed to what plays offline while offline mode keeps to it; `None` when both cannot hold.
+fn offline_filter(asked: Option<bool>, offline_reads: bool) -> Option<Option<bool>> {
+    match (offline_reads, asked) {
+        (true, Some(false)) => None,
+        (true, _) => Some(Some(true)),
+        (false, asked) => Some(asked),
+    }
+}
+
+fn album_query(
+    source: config::Source,
+    query: api::AlbumQuery,
+    offline: Option<bool>,
+) -> db::AlbumQuery {
     db::AlbumQuery {
         source,
         search: query.search.unwrap_or_default(),
@@ -107,16 +120,22 @@ fn album_query(source: config::Source, query: api::AlbumQuery) -> db::AlbumQuery
         year_to: query.year_to,
         artist_key: query.artist_key,
         downloaded: query.downloaded,
+        offline,
         ids: query.ids,
         sort: query.sort,
     }
 }
 
-fn artist_query(source: config::Source, query: api::ArtistQuery) -> db::ArtistQuery {
+fn artist_query(
+    source: config::Source,
+    query: api::ArtistQuery,
+    offline: Option<bool>,
+) -> db::ArtistQuery {
     db::ArtistQuery {
         source,
         search: query.search.unwrap_or_default(),
         downloaded: query.downloaded,
+        offline,
         sort: query.sort,
     }
 }
@@ -258,6 +277,19 @@ impl LibraryService {
             .unwrap_or_default()
     }
 
+    /// Offline mode on a source across the internet: listings keep to the songs with a copy here.
+    pub(crate) fn offline_reads(&self) -> bool {
+        self.offline().offline_mode() && crate::network::needs_internet(&self.current_sources())
+    }
+
+    /// Drop the rows offline mode keeps out of a listing read whole.
+    fn keep_offline(&self, rows: &mut Vec<Track>) {
+        if self.offline_reads() {
+            let offline = self.offline();
+            rows.retain(|track| offline.plays_offline(track, true));
+        }
+    }
+
     fn invalidate(&self, table: Table) {
         if let Some(session) = self.session.get() {
             session.invalidate(table);
@@ -305,6 +337,9 @@ impl LibraryService {
         filter: TrackFilter,
         page: Page,
     ) -> Result<(u32, Vec<Track>), ApiError> {
+        let Some(offline) = offline_filter(filter.offline, self.offline_reads()) else {
+            return Ok((0, Vec::new()));
+        };
         let sort = match filter.sort {
             api::TrackSort::Default if filter.album.is_some() => db::TrackSort::TrackNumber,
             sort => map_sort(sort),
@@ -317,6 +352,7 @@ impl LibraryService {
             genre: filter.genre,
             favorite: filter.favorite,
             downloaded: filter.downloaded,
+            offline,
             year_from: filter.year_from,
             year_to: filter.year_to,
             reverse: filter.reverse,
@@ -336,11 +372,12 @@ impl LibraryService {
         page: Page,
     ) -> Result<api::TrackPage, ApiError> {
         let offline = self.offline();
-        let rows = self
+        let mut rows = self
             .db
             .folder_tracks(&self.query_source(), prefix)
             .await
             .map_err(db_error)?;
+        self.keep_offline(&mut rows);
         let total = rows.len() as u32;
         let items = rows
             .iter()
@@ -551,6 +588,8 @@ mod artist_art;
 mod jobs;
 mod lyrics_cache;
 mod reads;
+
+pub(crate) use reads::album_info;
 
 #[async_trait::async_trait]
 impl QueueMaterializer for LibraryService {
@@ -1091,5 +1130,129 @@ mod tests {
             .expect_err("a key no one can name");
         assert_eq!(refused.code, api::ErrorCode::NotFound);
         assert!(refused.message.contains("nobody"), "{}", refused.message);
+    }
+
+    /// Offline mode on a source across the internet lists only songs with a copy here, and its search never leaves the library.
+    #[tokio::test]
+    async fn offline_mode_lists_only_songs_with_a_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let database = db::init(&dir.path().join("test.db")).await.expect("db");
+        let yt = config::Source::Server("yt".into());
+        let songs: Vec<Track> = ["kept", "downloaded", "gone"]
+            .iter()
+            .enumerate()
+            .map(|(n, id)| Track {
+                album_id: format!("album-{n}"),
+                ..remote(id)
+            })
+            .collect();
+        database.upsert_tracks(&yt, &songs).await.expect("seed");
+        let download = dir.path().join("downloaded.webm");
+        std::fs::write(&download, b"audio").expect("a download");
+        database
+            .set_offline_track("downloaded", Some(&download.to_string_lossy()))
+            .await
+            .expect("registered");
+        let cache = crate::OfflineCache::load(
+            &database,
+            dir.path().join("cache"),
+            &config::Settings::default(),
+        )
+        .await
+        .expect("cache");
+        cache
+            .store(
+                "kept",
+                "yt",
+                server::stream::stream_buffer::Captured {
+                    bytes: b"audio".to_vec(),
+                    content_type: Some("audio/webm".into()),
+                },
+            )
+            .await
+            .expect("cached");
+        let offline = crate::OfflineIndex::load(&database)
+            .await
+            .expect("index")
+            .with_cache(cache);
+        let credentials = crate::CredentialStore::load(&database)
+            .await
+            .expect("credentials");
+        let library = Arc::new(LibraryService::new(
+            database,
+            yt.clone(),
+            Arc::new(radio::registry::StationRegistry::default()),
+            dir.path().join("covers"),
+            credentials,
+        ));
+        let player =
+            player::player::Player::try_with_sink(Box::new(player::engine::NullSink::new()))
+                .expect("headless player");
+        let session = SessionHandle::spawn_with_player(
+            library.clone(),
+            player,
+            crate::PlaybackServices {
+                sources: Arc::new(server::sources::Sources {
+                    active: yt,
+                    ..Default::default()
+                }),
+                offline: offline.clone(),
+                ..Default::default()
+            },
+        );
+        library.attach_session(session);
+        let titles = async |filter: TrackFilter| -> Vec<String> {
+            let page = library.tracks(filter, Page::default()).await.expect("page");
+            assert_eq!(page.total as usize, page.items.len());
+            let mut titles: Vec<String> = page.items.into_iter().map(|row| row.title).collect();
+            titles.sort();
+            titles
+        };
+        assert_eq!(titles(TrackFilter::default()).await.len(), 3);
+        let filtered = TrackFilter {
+            offline: Some(true),
+            ..TrackFilter::default()
+        };
+        assert_eq!(
+            titles(filtered).await,
+            ["remote downloaded", "remote kept"],
+            "the filter works with offline mode off too"
+        );
+
+        offline.set_offline_mode(true);
+
+        assert_eq!(
+            titles(TrackFilter::default()).await,
+            ["remote downloaded", "remote kept"]
+        );
+        let without = TrackFilter {
+            offline: Some(false),
+            ..TrackFilter::default()
+        };
+        assert!(titles(without).await.is_empty());
+        let rows = library
+            .tracks(TrackFilter::default(), Page::default())
+            .await
+            .expect("page")
+            .items;
+        let kept = rows.iter().find(|row| row.key == "kept").expect("kept");
+        assert!(kept.cached && !kept.offline);
+        let downloaded = rows
+            .iter()
+            .find(|row| row.key == "downloaded")
+            .expect("downloaded");
+        assert!(downloaded.offline && !downloaded.cached);
+        let album = library
+            .album_tracks("album-2", Page::default())
+            .await
+            .expect("album");
+        assert_eq!(album.total, 0, "gone has no copy");
+        let found = library.search("remote").await.expect("search");
+        assert_eq!(found.tracks.len(), 2);
+        let keyed = library
+            .tracks_by_keys(&["gone".to_string(), "kept".to_string()])
+            .await
+            .expect("by key");
+        assert_eq!(keyed.len(), 1);
     }
 }

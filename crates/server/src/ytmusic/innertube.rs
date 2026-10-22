@@ -373,6 +373,21 @@ pub async fn browse_maybe_auth(browse_id: &str, cookies: Option<&str>) -> Result
 /// Pull `responseContext.visitorData` out of any InnerTube response. The
 /// server hands one back on every call; we just need to hold onto it across
 /// `/player` calls so the content PO token's binding stays consistent.
+/// What a signed-in request fails with when YouTube answers it as signed out.
+pub const SIGNED_OUT: &str = "YouTube answered this session as signed out";
+
+/// A dead session still gets a 200 from most endpoints, with the content a
+/// signed-out visitor sees; only the `logged_in` tracking param tells.
+pub fn answered_signed_out(resp: &Value) -> bool {
+    resp.pointer("/responseContext/serviceTrackingParams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|service| service["params"].as_array())
+        .flatten()
+        .any(|param| param["key"] == "logged_in" && param["value"] == "0")
+}
+
 pub fn extract_visitor_data(resp: &Value) -> Option<String> {
     resp.pointer("/responseContext/visitorData")
         .and_then(|v| v.as_str())
@@ -539,5 +554,18 @@ mod tests {
         assert!(!is_google_block(
             "WEB_REMIX playability LOGIN_REQUIRED: Sign in"
         ));
+    }
+
+    #[test]
+    fn only_a_logged_in_zero_is_a_signed_out_answer() {
+        let answer = |value: &str| {
+            json!({"responseContext": {"serviceTrackingParams": [
+                {"service": "CSI", "params": [{"key": "c", "value": "WEB_REMIX"}]},
+                {"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": value}]}
+            ]}})
+        };
+        assert!(answered_signed_out(&answer("0")));
+        assert!(!answered_signed_out(&answer("1")));
+        assert!(!answered_signed_out(&json!({"responseContext": {}})));
     }
 }

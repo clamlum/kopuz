@@ -102,6 +102,8 @@ pub struct SourceCapabilities {
     pub explicit_flags: bool,
     /// It keeps a watch history, which `pause_watch_history` stops feeding.
     pub watch_history: bool,
+    /// Every play of its tracks goes through kopuz, so kopuz's play counts are its whole listening history.
+    pub complete_play_history: bool,
     pub playlists: PlaylistCapability,
     pub artists: ArtistPresentation,
     pub albums: AlbumPresentation,
@@ -129,6 +131,8 @@ pub enum SignInKind {
 pub struct ServiceInfo {
     pub id: String,
     pub name: Text,
+    /// One plain line on what it plays from, for a picker.
+    pub summary: Text,
     pub icon: Icon,
     /// A colour to tint its rows with.
     pub accent: String,
@@ -218,6 +222,39 @@ impl std::fmt::Debug for SourceDraft {
 pub struct DraftCheck {
     pub sign_in: SignInKind,
     pub problems: Vec<Problem>,
+}
+
+/// What trying an unsaved draft found; nothing is stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftProbe {
+    /// One per folder, in the order the draft lists them.
+    Folders(Vec<FolderProbe>),
+    Server(ServerProbe),
+    /// There is nothing to reach before it is signed in, as with a streaming service.
+    NotProbeable,
+}
+
+/// One folder of a folder-source draft.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderProbe {
+    pub path: String,
+    pub exists: bool,
+    pub readable: bool,
+    /// Audio files under it by the scanner's file-type rule; no tags are read.
+    pub audio_files: u32,
+    /// The count stopped early, at its cap or its time limit, so there are at least `audio_files`.
+    pub at_least: bool,
+}
+
+/// What one request to a server draft's address answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerProbe {
+    /// A success status.
+    Reachable,
+    /// No answer: the name did not resolve, the connection failed or it timed out.
+    Unreachable,
+    /// An answer that is not a success, such as 401 or 502.
+    Status(u16),
 }
 
 /// Write-only: a secret a client obtained out of band. No response ever

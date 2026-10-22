@@ -16,6 +16,7 @@ mod collation;
 mod dump;
 mod frontend_prefs;
 mod migrations;
+mod offline_cache;
 mod queries;
 mod rows;
 mod scrobble;
@@ -416,8 +417,27 @@ impl ReadStore for Native {
         cfg_store::listen_counts(&self.pool()).await
     }
 
+    async fn play_history(
+        &self,
+        source: &crate::Source,
+    ) -> Result<Vec<crate::PlayRecord>, DbError> {
+        cfg_store::play_history(&self.pool(), source).await
+    }
+
+    async fn favorites_liked_at(&self, server_id: &str) -> Result<Vec<(String, i64)>, DbError> {
+        queries::favorites_liked_at(&self.pool(), server_id).await
+    }
+
+    async fn unplayed_albums(&self, source: &crate::Source) -> Result<Vec<reader::Album>, DbError> {
+        queries::unplayed_albums(&self.pool(), source).await
+    }
+
     async fn offline_tracks(&self) -> Result<std::collections::HashMap<String, String>, DbError> {
         cfg_store::offline_tracks(&self.pool()).await
+    }
+
+    async fn offline_cache(&self) -> Result<Vec<crate::CachedTrackRow>, DbError> {
+        offline_cache::all(&self.pool()).await
     }
 
     async fn pinned_stations(&self) -> Result<Vec<String>, DbError> {
@@ -663,6 +683,18 @@ impl Storage for Native {
 
     async fn set_offline_track(&self, id: &str, path: Option<&str>) -> Result<(), DbError> {
         writes::set_offline_track(&self.pool(), id, path).await
+    }
+
+    async fn put_offline_cache(&self, row: &crate::CachedTrackRow) -> Result<(), DbError> {
+        offline_cache::put(&self.pool(), row).await
+    }
+
+    async fn touch_offline_cache(&self, track_key: &str, at: i64) -> Result<(), DbError> {
+        offline_cache::touch(&self.pool(), track_key, at).await
+    }
+
+    async fn remove_offline_cache(&self, track_keys: &[String]) -> Result<(), DbError> {
+        offline_cache::remove(&self.pool(), track_keys).await
     }
 
     async fn save_queue(

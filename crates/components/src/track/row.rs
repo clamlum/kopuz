@@ -24,6 +24,9 @@ pub fn ExplicitBadge() -> Element {
     }
 }
 
+const CACHED_MARK_STYLE: &str =
+    "background: color-mix(in oklab, var(--color-white) 30%, transparent);";
+
 /// The artist the row's artist cell opens; a row crediting nobody opens nothing.
 fn billed_artist(track: &Track) -> Option<String> {
     track.primary_credit().and_then(|credit| credit.key.clone())
@@ -106,6 +109,9 @@ pub fn TrackRow(
     };
 
     let duration_str = duration_label(&track);
+    let is_cached = track.cached && !is_downloaded;
+    let offline_mark = i18n::t("offline_mark");
+    let cached_mark = i18n::t("cached_mark");
 
     // The container a file is in, which the daemon works out: a row
     // that came from a service names no file, so it has none.
@@ -388,7 +394,15 @@ pub fn TrackRow(
                         if is_downloaded {
                             i {
                                 class: "fa-solid fa-arrow-down-to-line text-[9px] shrink-0",
-                                style: "color: var(--color-indigo-500); opacity: 0.7;"
+                                style: "color: var(--color-indigo-500); opacity: 0.7;",
+                                title: "{offline_mark}",
+                            }
+                        } else if is_cached {
+                            i {
+                                class: "fa-solid fa-hard-drive text-[9px] shrink-0",
+                                style: "color: var(--color-white); opacity: 0.45;",
+                                title: "{cached_mark}",
+                                aria_label: "{cached_mark}",
                             }
                         }
                         if let Some(ref ft) = file_type {
@@ -623,7 +637,14 @@ pub fn TrackRow(
                         }
                         if is_downloaded && !is_currently_playing {
                             div { class: "absolute bottom-0 right-0 w-3 h-3 bg-indigo-500 rounded-tl flex items-center justify-center",
+                                    title: "{offline_mark}",
                                     i { class: "fa-solid fa-check text-white", style: "font-size: 6px;" }
+                            }
+                        } else if is_cached && !is_currently_playing {
+                            div { class: "absolute bottom-0 right-0 w-3 h-3 rounded-tl flex items-center justify-center",
+                                    style: "{CACHED_MARK_STYLE}",
+                                    title: "{cached_mark}",
+                                    i { class: "fa-solid fa-hard-drive text-white", style: "font-size: 6px;" }
                             }
                         }
                     }
@@ -658,7 +679,14 @@ pub fn TrackRow(
                 }
                 if is_downloaded && (is_album || !show_row_images) {
                     div { class: "shrink-0 ml-2 w-3 h-3 bg-indigo-500 rounded flex items-center justify-center",
+                        title: "{offline_mark}",
                         i { class: "fa-solid fa-check text-white", style: "font-size: 6px;" }
+                    }
+                } else if is_cached && (is_album || !show_row_images) {
+                    div { class: "shrink-0 ml-2 w-3 h-3 rounded flex items-center justify-center",
+                        style: "{CACHED_MARK_STYLE}",
+                        title: "{cached_mark}",
+                        i { class: "fa-solid fa-hard-drive text-white", style: "font-size: 6px;" }
                     }
                 }
                 if let Some(ref ft) = file_type {

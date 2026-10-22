@@ -80,6 +80,8 @@ pub enum LibraryEdit {
     AutoFetchCovers(bool),
     CoverFetchStrategy(FetchStrategy),
     OfflineQuality(OfflineQuality),
+    OfflineCacheEnabled(bool),
+    OfflineCacheMaxBytes(u64),
     SyncIntervalMinutes(u32),
 }
 
@@ -139,6 +141,7 @@ pub enum SystemEdit {
     TracingEnabled(bool),
     AutoCheckUpdates(bool),
     MinimizeToTray(bool),
+    ConnectivityCheckUrls(Vec<String>),
 }
 
 /// One change to one setting.
@@ -225,7 +228,10 @@ impl SettingKey {
                 LibraryKey::AutoFetchCovers | LibraryKey::CoverFetchStrategy => {
                     Some("ArtworkApi::set_artwork_settings")
                 }
-                LibraryKey::OfflineQuality | LibraryKey::SyncIntervalMinutes => None,
+                LibraryKey::OfflineQuality
+                | LibraryKey::OfflineCacheEnabled
+                | LibraryKey::OfflineCacheMaxBytes
+                | LibraryKey::SyncIntervalMinutes => None,
             },
             Self::Integrations(key) => match key {
                 IntegrationsKey::DiscordPresence | IntegrationsKey::DiscordPresenceSource => {
@@ -414,6 +420,8 @@ impl Library {
             LibraryEdit::AutoFetchCovers(value) => self.auto_fetch_covers = value,
             LibraryEdit::CoverFetchStrategy(value) => self.cover_fetch_strategy = value,
             LibraryEdit::OfflineQuality(value) => self.offline_quality = value,
+            LibraryEdit::OfflineCacheEnabled(value) => self.offline_cache_enabled = value,
+            LibraryEdit::OfflineCacheMaxBytes(value) => self.offline_cache_max_bytes = value,
             LibraryEdit::SyncIntervalMinutes(value) => self.sync_interval_minutes = value,
         }
     }
@@ -465,6 +473,7 @@ impl System {
             SystemEdit::TracingEnabled(value) => self.tracing_enabled = value,
             SystemEdit::AutoCheckUpdates(value) => self.auto_check_updates = value,
             SystemEdit::MinimizeToTray(value) => self.minimize_to_tray = value,
+            SystemEdit::ConnectivityCheckUrls(value) => self.connectivity_check_urls = value,
         }
     }
 }
@@ -546,6 +555,8 @@ pub fn edit_samples() -> Vec<SettingsEdit> {
         SettingsEdit::Library(LibraryEdit::AutoFetchCovers(true)),
         SettingsEdit::Library(LibraryEdit::CoverFetchStrategy(FetchStrategy::LastFmOnly)),
         SettingsEdit::Library(LibraryEdit::OfflineQuality(OfflineQuality::Kbps160)),
+        SettingsEdit::Library(LibraryEdit::OfflineCacheEnabled(false)),
+        SettingsEdit::Library(LibraryEdit::OfflineCacheMaxBytes(2_000_000_000)),
         SettingsEdit::Library(LibraryEdit::SyncIntervalMinutes(60)),
         SettingsEdit::Integrations(IntegrationsEdit::DiscordPresence(Some(false))),
         SettingsEdit::Integrations(IntegrationsEdit::DiscordPresenceSource(None)),
@@ -568,6 +579,9 @@ pub fn edit_samples() -> Vec<SettingsEdit> {
         SettingsEdit::System(SystemEdit::TracingEnabled(true)),
         SettingsEdit::System(SystemEdit::AutoCheckUpdates(false)),
         SettingsEdit::System(SystemEdit::MinimizeToTray(true)),
+        SettingsEdit::System(SystemEdit::ConnectivityCheckUrls(vec![
+            "https://check.example/up".into(),
+        ])),
     ]
 }
 
@@ -702,6 +716,16 @@ mod tests {
             SettingsEdit::Library(LibraryEdit::SyncIntervalMinutes(
                 crate::MAX_SYNC_INTERVAL_MINUTES + 1,
             )),
+            SettingsEdit::Library(LibraryEdit::OfflineCacheMaxBytes(
+                crate::MIN_OFFLINE_CACHE_BYTES - 1,
+            )),
+            SettingsEdit::Library(LibraryEdit::OfflineCacheMaxBytes(
+                crate::MAX_OFFLINE_CACHE_BYTES + 1,
+            )),
+            SettingsEdit::System(SystemEdit::ConnectivityCheckUrls(vec![
+                "cp.cloudflare.com".into(),
+            ])),
+            SettingsEdit::System(SystemEdit::ConnectivityCheckUrls(vec!["https://".into()])),
         ] {
             let mut settings = Settings::default();
             assert!(settings.try_apply(edit.clone()).is_err(), "{edit:?}");

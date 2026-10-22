@@ -372,6 +372,13 @@ pub trait MediaSource: Send + Sync {
         Vec::new()
     }
 
+    /// The mixes the source made for this account, as playlist tiles; a source that makes none has none.
+    async fn personal_mixes(
+        &self,
+    ) -> Result<Vec<crate::ytmusic::discover::DiscoverItem>, SourceError> {
+        Ok(Vec::new())
+    }
+
     /// A page by an id that `catalog_pages`, a chip or a link handed out.
     async fn browse_page(
         &self,

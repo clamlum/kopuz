@@ -6,12 +6,16 @@ use server::playback_ref::PlaybackItemRef;
 
 use crate::offline::OfflineIndex;
 
-/// The wire row for a track: sentinel durations become a kind, and the offline flag stands in for the copy's path.
+/// The wire row for a track: sentinel durations become a kind, and the offline and cached flags stand in for the copies' paths.
 pub(crate) fn track_info(track: &Track, offline: &OfflineIndex) -> TrackInfo {
     let key = track.id.key().to_string();
     let uid = track.id.uid();
     let item_ref = PlaybackItemRef::parse(&uid);
     let radio = track.duration == u64::MAX;
+    let cached = item_ref.is_server()
+        && item_ref
+            .primary_id()
+            .is_some_and(|id| offline.cache().contains(id));
     let offline = item_ref
         .primary_id()
         .and_then(|id| offline.present(id))
@@ -35,6 +39,7 @@ pub(crate) fn track_info(track: &Track, offline: &OfflineIndex) -> TrackInfo {
         },
         seekable: !radio,
         offline,
+        cached,
         format: track_format(track),
         musicbrainz_release_id: track.musicbrainz_release_id.clone(),
         musicbrainz_recording_id: track.musicbrainz_recording_id.clone(),

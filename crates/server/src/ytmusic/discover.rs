@@ -294,7 +294,9 @@ pub struct YtArtist {
     pub monthly_listeners: Option<String>,
     pub description: Option<String>,
     pub banner_thumbnail: Option<String>,
-    pub shuffle_playlist_id: Option<String>,
+    /// Playlist refs of the header's Shuffle and Mix, for a playlist radio.
+    pub shuffle_ref: Option<String>,
+    pub mix_ref: Option<String>,
     pub sections: Vec<DiscoverShelf>,
     pub actions: ItemActions,
 }
@@ -334,16 +336,15 @@ pub(super) fn parse_artist(channel_id: &str, resp: &Value) -> YtArtist {
     let monthly_listeners = header.and_then(|h| runs_text(h, "/monthlyListenerCount/runs"));
     let description = header.and_then(|h| runs_text(h, "/description/runs"));
     let banner_thumbnail = header.and_then(best_artist_banner);
-    let shuffle_playlist_id = header
-        .and_then(|h| h.get("buttons").and_then(|v| v.as_array()))
-        .and_then(|btns| {
-            btns.iter().find_map(|b| {
-                b.get("musicPlayButtonRenderer")
-                    .and_then(|p| p.pointer("/playNavigationEndpoint/watchEndpoint/playlistId"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-        });
+    let mix = |button: &str| {
+        header?
+            .get(button)?
+            .pointer("/buttonRenderer/navigationEndpoint/watchEndpoint/playlistId")?
+            .as_str()
+            .map(super::mix::issued_mix_ref)
+    };
+    let shuffle_ref = mix("playButton");
+    let mix_ref = mix("startRadioButton");
 
     let mut sections = Vec::new();
     for section in album_section_contents(resp) {
@@ -361,7 +362,8 @@ pub(super) fn parse_artist(channel_id: &str, resp: &Value) -> YtArtist {
         monthly_listeners,
         description,
         banner_thumbnail,
-        shuffle_playlist_id,
+        shuffle_ref,
+        mix_ref,
         sections,
         actions: header.map(actions::subscription).unwrap_or_default(),
     }

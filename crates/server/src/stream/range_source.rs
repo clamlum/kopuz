@@ -1,95 +1,180 @@
-//! HTTP Range-backed seekable byte source.
-//!
-//! Used for remote media servers and YouTube Music when the URL returns
-//! `Accept-Ranges: bytes`). Unlike [`super::stream_buffer::StreamBuffer`],
-//! this never downloads the file linearly — every miss in the rolling
-//! window cache becomes a `Range: bytes=N-M` request. Symphonia can seek
-//! freely: to the end (Matroska Cues), to scrub targets, anywhere.
-//!
-//! Architecture:
-//! - One rolling 512 KiB window, anchored at `chunk_start`.
-//! - `seek()` is a constant-time pointer move.
-//! - `read()` fetches a fresh window only when `pos` falls outside the
-//!   currently-cached window. Sequential playback stays inside the window
-//!   90%+ of the time.
-//! - HTTP calls happen via `reqwest::blocking` inside whatever thread is
-//!   calling `Read::read` — callers MUST already be on a blocking-friendly
-//!   thread (`spawn_blocking` or similar).
-//!
-//! `byte_len()` is determined once upfront from `Content-Range` of the
-//! initial probe fetch. If the server ignores ranges or omits the total,
-//! this source can't be constructed and the caller can stream sequentially.
+//! A seekable byte source over HTTP Range requests that downloads the whole file, chunk after chunk, from the moment it opens.
 
 use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Seek, SeekFrom};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
-use super::stream_buffer::BufferProgressCallback;
+use super::stream_buffer::{BufferProgressCallback, Captured, CompleteSink};
 
 const CHUNK: usize = 512 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long a connection may sit unused before the pool drops it. A CDN closes
-/// an idle keep-alive well inside a minute, and a pool that outlives the peer's
-/// hands out a dead socket: the write succeeds, no response ever comes, and the
-/// request burns the whole timeout. The gap between one track finishing its
-/// last range fetch and the next starting is longer than this, so a fresh
-/// connection per track is what happens anyway.
+/// A CDN closes an idle keep-alive well inside a minute, and a pooled socket that outlives the peer's burns a whole timeout.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// An in-flight background fetch of the window at `start`, so sequential
-/// playback overlaps the next window's download with decoding the current one
-/// instead of stalling the decoder a full network round-trip at every 512 KiB
-/// boundary — the mid-song stutter on slow links. A Mutex+Condvar slot rather
-/// than an mpsc receiver because the decoder wants the whole source `Sync`.
-struct Prefetch {
-    start: u64,
-    slot: std::sync::Arc<PrefetchSlot>,
-}
+/// The whole file is held in memory, so a larger one streams progressively instead.
+const MAX_WHOLE_FILE: u64 = 1024 * 1024 * 1024;
+
+/// How long the fill waits after a chunk it fetched on its own failed.
+const RETRY_AFTER: Duration = Duration::from_secs(2);
+
+/// Failed chunks in a row after which the fill waits for a reader to ask for one.
+const MAX_BACKGROUND_FAILURES: u32 = 4;
+
+/// How long a reader sleeps between looks at the chunk it waits for.
+const READ_WAIT: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
-struct PrefetchSlot {
-    result: std::sync::Mutex<Option<IoResult<Vec<u8>>>>,
-    ready: std::sync::Condvar,
+struct Fill {
+    data: Vec<u8>,
+    have: Vec<bool>,
+    missing: usize,
+    /// The chunk a reader is blocked on, fetched before any other.
+    demand: Option<usize>,
+    in_flight: Option<usize>,
+    /// Where the fill goes on from after the chunk it fetched last.
+    cursor: usize,
+    /// A chunk a reader asked for whose fetch failed, for that reader to hear.
+    failed: Option<(usize, ErrorKind, String)>,
+    background_failures: u32,
+    retry_at: Option<Instant>,
+    closed: bool,
 }
 
-impl PrefetchSlot {
-    fn put(&self, value: IoResult<Vec<u8>>) {
-        let mut guard = self.result.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(value);
-        self.ready.notify_all();
+impl Fill {
+    /// The first missing chunk from the cursor on, else the first one before it: a gap a seek skipped fills after the end.
+    fn next_missing(&self) -> Option<usize> {
+        let after = self.cursor.min(self.have.len());
+        (after..self.have.len())
+            .chain(0..after)
+            .find(|&chunk| !self.have[chunk])
+    }
+}
+
+struct Shared {
+    fill: Mutex<Fill>,
+    changed: Condvar,
+}
+
+enum Step {
+    Fetch { chunk: usize, demanded: bool },
+    Complete,
+    Closed,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Fill> {
+        self.fill.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn take_blocking(&self) -> IoResult<Vec<u8>> {
-        let mut guard = self.result.lock().unwrap_or_else(|e| e.into_inner());
+    fn next_step(&self) -> Step {
+        let mut fill = self.lock();
         loop {
-            if let Some(value) = guard.take() {
-                return value;
+            if fill.closed {
+                return Step::Closed;
             }
-            guard = self.ready.wait(guard).unwrap_or_else(|e| e.into_inner());
+            if fill.missing == 0 {
+                return Step::Complete;
+            }
+            if let Some(chunk) = fill.demand.take() {
+                if !fill.have[chunk] {
+                    fill.in_flight = Some(chunk);
+                    return Step::Fetch {
+                        chunk,
+                        demanded: true,
+                    };
+                }
+                continue;
+            }
+            if fill.background_failures >= MAX_BACKGROUND_FAILURES {
+                fill = self
+                    .changed
+                    .wait(fill)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            if let Some(wait) = fill
+                .retry_at
+                .and_then(|at| at.checked_duration_since(Instant::now()))
+                .filter(|wait| !wait.is_zero())
+            {
+                fill = self
+                    .changed
+                    .wait_timeout(fill, wait)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+                continue;
+            }
+            let Some(chunk) = fill.next_missing() else {
+                return Step::Complete;
+            };
+            fill.in_flight = Some(chunk);
+            return Step::Fetch {
+                chunk,
+                demanded: false,
+            };
         }
     }
 
-    fn try_take(&self) -> Option<IoResult<Vec<u8>>> {
-        self.result.lock().unwrap_or_else(|e| e.into_inner()).take()
+    /// Store what one fetch brought, and answer the byte range it filled.
+    fn land(&self, chunk: usize, demanded: bool, result: IoResult<Vec<u8>>) -> Option<(u64, u64)> {
+        let mut fill = self.lock();
+        fill.in_flight = None;
+        let landed = match result {
+            Ok(bytes) => {
+                let start = chunk * CHUNK;
+                let end = start + bytes.len();
+                fill.data[start..end].copy_from_slice(&bytes);
+                if !fill.have[chunk] {
+                    fill.have[chunk] = true;
+                    fill.missing -= 1;
+                }
+                fill.cursor = chunk + 1;
+                fill.background_failures = 0;
+                fill.retry_at = None;
+                if fill.failed.as_ref().is_some_and(|failed| failed.0 == chunk) {
+                    fill.failed = None;
+                }
+                Some((start as u64, end as u64))
+            }
+            Err(error) => {
+                tracing::debug!(%error, chunk, demanded, "a range chunk failed");
+                if demanded {
+                    fill.failed = Some((chunk, error.kind(), error.to_string()));
+                } else {
+                    fill.background_failures += 1;
+                }
+                fill.retry_at = Some(Instant::now() + RETRY_AFTER);
+                None
+            }
+        };
+        self.changed.notify_all();
+        landed
     }
 }
 
-pub struct RangeStreamSource {
-    url: String,
+/// What the fill thread needs, held until the first read or [`RangeStreamSource::capture`] starts it.
+struct FillJob {
     client: reqwest::blocking::Client,
+    url: String,
+    content_type: Option<String>,
+    progress: Option<BufferProgressCallback>,
+    complete: Option<CompleteSink>,
+}
+
+pub struct RangeStreamSource {
+    shared: Arc<Shared>,
     total_size: u64,
     pos: u64,
-    chunk: Vec<u8>,
-    chunk_start: u64,
-    prefetch: Option<Prefetch>,
-    progress: Option<BufferProgressCallback>,
+    url: String,
+    client: reqwest::blocking::Client,
+    /// Behind a lock only so the source stays `Sync`, as a decoder needs; a sink need not be.
+    pending: Mutex<Option<FillJob>>,
 }
 
 impl RangeStreamSource {
-    /// Probe the URL with a `Range: bytes=0-0` HEAD-equivalent to learn its
-    /// total size and confirm Range support. Returns the source positioned
-    /// at byte 0 with an empty cache.
+    /// Probe the URL with a one-byte range to learn its size and confirm range support; nothing more is fetched until it is read.
     pub fn new(url: String, user_agent: Option<String>) -> IoResult<Self> {
         Self::new_with_progress(url, user_agent, None)
     }
@@ -103,10 +188,7 @@ impl RangeStreamSource {
             user_agent.unwrap_or_else(|| concat!("Kopuz/", env!("CARGO_PKG_VERSION")).to_string());
         let client = shared_client(&ua)?;
 
-        // One-byte probe — cheap, and the server returns the full
-        // `Content-Range: bytes 0-0/<TOTAL>` we want. This is the first request
-        // after the gap between tracks, so it is the one a dead pooled
-        // connection strands.
+        // The first request after the gap between tracks, so the one a dead pooled connection strands.
         let resp = send_range(&client, &url, "bytes=0-0")?;
         let status = resp.status();
         if status != reqwest::StatusCode::PARTIAL_CONTENT {
@@ -117,16 +199,41 @@ impl RangeStreamSource {
         }
         let total_size = parse_total_size(&resp)
             .ok_or_else(|| IoError::other("range response didn't expose total size"))?;
+        if total_size > MAX_WHOLE_FILE {
+            return Err(IoError::new(
+                ErrorKind::Unsupported,
+                format!("{total_size} bytes is too large to hold whole"),
+            ));
+        }
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
 
+        let chunks = (total_size as usize).div_ceil(CHUNK);
+        let shared = Arc::new(Shared {
+            fill: Mutex::new(Fill {
+                data: vec![0; total_size as usize],
+                have: vec![false; chunks],
+                missing: chunks,
+                ..Fill::default()
+            }),
+            changed: Condvar::new(),
+        });
         Ok(Self {
-            url,
-            client,
+            shared,
             total_size,
             pos: 0,
-            chunk: Vec::with_capacity(CHUNK),
-            chunk_start: 0,
-            prefetch: None,
-            progress,
+            pending: Mutex::new(Some(FillJob {
+                client: client.clone(),
+                url: url.clone(),
+                content_type,
+                progress,
+                complete: None,
+            })),
+            url,
+            client,
         })
     }
 
@@ -149,86 +256,79 @@ impl RangeStreamSource {
         Ok(())
     }
 
-    fn install_chunk(&mut self, start: u64, bytes: Vec<u8>) {
-        let end = start + bytes.len() as u64;
-        self.chunk = bytes;
-        self.chunk_start = start;
-        if let Some(progress) = &self.progress {
-            progress(start, end, Some(self.total_size));
-        }
-    }
-
-    /// Drop the prefetch slot only once its worker has finished; a still-running
-    /// worker stays tracked so at most one range download is ever in flight,
-    /// no matter how often the caller seeks around it.
-    fn discard_prefetch_if_done(&mut self) {
-        if let Some(prefetch) = &self.prefetch
-            && prefetch.slot.try_take().is_some()
+    /// Hand the whole file to `sink` once every chunk has arrived, and start fetching them; a source dropped first never calls it.
+    pub fn capture(&mut self, sink: CompleteSink) {
+        if let Some(job) = self
+            .pending
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
         {
-            self.prefetch = None;
+            job.complete = Some(sink);
         }
+        self.start();
     }
 
-    fn fetch_chunk(&mut self, start: u64) -> IoResult<()> {
-        if let Some(prefetch) = self.prefetch.take_if(|p| p.start == start) {
-            match prefetch.slot.take_blocking() {
-                Ok(bytes) => {
-                    self.install_chunk(start, bytes);
-                    return Ok(());
-                }
-                Err(error) => {
-                    tracing::debug!(%error, start, "prefetched range failed; refetching inline");
-                }
-            }
-        }
-        self.discard_prefetch_if_done();
-        let bytes = fetch_range(&self.client, &self.url, start, self.total_size)?;
-        self.install_chunk(start, bytes);
-        Ok(())
-    }
-
-    /// Kick off the next window's download once sequential reading is past the
-    /// middle of the current one. At most one worker is in flight: a slot left
-    /// over from before a seek keeps blocking new spawns until its download
-    /// completes, and is discarded the first time it's seen finished.
-    fn maybe_prefetch_next(&mut self) {
-        let next_start = self.chunk_start + self.chunk.len() as u64;
-        if next_start >= self.total_size
-            || self.pos < self.chunk_start + (self.chunk.len() / 2) as u64
-        {
+    fn start(&mut self) {
+        let Some(job) = self
+            .pending
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        if self.total_size == 0 {
             return;
         }
-        if self.prefetch.is_some() {
-            if self
-                .prefetch
-                .as_ref()
-                .is_some_and(|p| p.start == next_start)
-            {
-                return;
-            }
-            self.discard_prefetch_if_done();
-            if self.prefetch.is_some() {
-                return;
+        let shared = self.shared.clone();
+        let total_size = self.total_size;
+        let spawned = std::thread::Builder::new()
+            .name("range-fill".into())
+            .spawn(move || run_fill(shared, job, total_size));
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "the range fill thread failed to start");
+        }
+    }
+}
+
+fn run_fill(shared: Arc<Shared>, job: FillJob, total_size: u64) {
+    let FillJob {
+        client,
+        url,
+        content_type,
+        progress,
+        complete,
+    } = job;
+    loop {
+        match shared.next_step() {
+            Step::Closed => return,
+            Step::Complete => break,
+            Step::Fetch { chunk, demanded } => {
+                let start = chunk as u64 * CHUNK as u64;
+                let result = fetch_range(&client, &url, start, total_size);
+                if let Some((start, end)) = shared.land(chunk, demanded, result)
+                    && let Some(progress) = &progress
+                {
+                    progress(start, end, Some(total_size));
+                }
             }
         }
-        let slot = std::sync::Arc::new(PrefetchSlot::default());
-        let worker_slot = slot.clone();
-        let client = self.client.clone();
-        let url = self.url.clone();
-        let total_size = self.total_size;
-        std::thread::spawn(move || {
-            worker_slot.put(fetch_range(&client, &url, next_start, total_size));
-        });
-        self.prefetch = Some(Prefetch {
-            start: next_start,
-            slot,
-        });
     }
+    let Some(complete) = complete else {
+        return;
+    };
+    let bytes = shared.lock().data.clone();
+    complete(Captured {
+        bytes,
+        content_type,
+    });
+}
 
-    fn pos_in_cache(&self, pos: u64) -> bool {
-        !self.chunk.is_empty()
-            && pos >= self.chunk_start
-            && pos < self.chunk_start + self.chunk.len() as u64
+impl Drop for RangeStreamSource {
+    fn drop(&mut self) {
+        self.shared.lock().closed = true;
+        self.shared.changed.notify_all();
     }
 }
 
@@ -240,7 +340,7 @@ impl RangeStreamSource {
 /// makes each chunk a single pipelined request on a warm connection.
 fn shared_client(ua: &str) -> IoResult<reqwest::blocking::Client> {
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     static CLIENTS: OnceLock<Mutex<HashMap<String, reqwest::blocking::Client>>> = OnceLock::new();
     let clients = CLIENTS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
@@ -283,7 +383,14 @@ fn send_range(
     send().map_err(|error| {
         let error = error.without_url();
         tracing::warn!(range, %error, "the retried range request failed too");
-        IoError::other(error)
+        let kind = if error.is_connect() {
+            ErrorKind::NotConnected
+        } else if error.is_timeout() {
+            ErrorKind::TimedOut
+        } else {
+            ErrorKind::Other
+        };
+        IoError::new(kind, error)
     })
 }
 
@@ -317,22 +424,37 @@ fn fetch_range(
 
 impl Read for RangeStreamSource {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        if self.pos >= self.total_size {
+        if self.pos >= self.total_size || buf.is_empty() {
             return Ok(0);
         }
-        if !self.pos_in_cache(self.pos) {
-            self.fetch_chunk(self.pos)?;
-            if self.chunk.is_empty() {
-                return Ok(0);
+        self.start();
+        let chunk = (self.pos / CHUNK as u64) as usize;
+        let mut fill = self.shared.lock();
+        loop {
+            if fill.have[chunk] {
+                let chunk_end = ((chunk + 1) * CHUNK).min(self.total_size as usize);
+                let at = self.pos as usize;
+                let n = buf.len().min(chunk_end - at);
+                buf[..n].copy_from_slice(&fill.data[at..at + n]);
+                self.pos += n as u64;
+                return Ok(n);
             }
+            if let Some((failed, kind, message)) = fill.failed.take()
+                && failed == chunk
+            {
+                return Err(IoError::new(kind, message));
+            }
+            if fill.in_flight != Some(chunk) && fill.demand != Some(chunk) {
+                fill.demand = Some(chunk);
+                self.shared.changed.notify_all();
+            }
+            fill = self
+                .shared
+                .changed
+                .wait_timeout(fill, READ_WAIT)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
-        let offset = (self.pos - self.chunk_start) as usize;
-        let available = self.chunk.len() - offset;
-        let to_copy = available.min(buf.len());
-        buf[..to_copy].copy_from_slice(&self.chunk[offset..offset + to_copy]);
-        self.pos += to_copy as u64;
-        self.maybe_prefetch_next();
-        Ok(to_copy)
     }
 }
 
@@ -373,7 +495,11 @@ fn total_size_from_content_range(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::total_size_from_content_range;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+
+    use super::*;
 
     #[test]
     fn parses_total_from_content_range() {
@@ -388,5 +514,181 @@ mod tests {
         assert_eq!(total_size_from_content_range("bytes 0-0/*"), None);
         assert_eq!(total_size_from_content_range("bytes 0-0/not-a-size"), None);
         assert_eq!(total_size_from_content_range("123456"), None);
+    }
+
+    /// A file of `len` bytes whose every byte says where it is.
+    fn body(len: usize) -> Vec<u8> {
+        (0..len).map(|at| (at * 7 % 251) as u8).collect()
+    }
+
+    /// Serves `body` by range on loopback, telling `seen` each range it was asked for; with `gate`, each chunk waits to be let through.
+    struct Server {
+        url: String,
+        seen: mpsc::Receiver<(u64, u64)>,
+        gate: Option<mpsc::SyncSender<()>>,
+    }
+
+    fn serve(body: Vec<u8>, gated: bool) -> Server {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/track", listener.local_addr().expect("addr"));
+        let (seen_tx, seen) = mpsc::channel();
+        let (gate, pass) = match gated {
+            true => {
+                let (tx, rx) = mpsc::sync_channel::<()>(64);
+                (Some(tx), Some(rx))
+            }
+            false => (None, None),
+        };
+        let body = Arc::new(body);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let Some((start, end)) = read_range(&stream) else {
+                    continue;
+                };
+                if seen_tx.send((start, end)).is_err() {
+                    return;
+                }
+                // The size probe and the tail check are answered at once; a chunk waits its turn.
+                if start != end
+                    && let Some(pass) = &pass
+                    && pass.recv().is_err()
+                {
+                    return;
+                }
+                answer(stream, &body, start, end);
+            }
+        });
+        Server { url, seen, gate }
+    }
+
+    fn read_range(stream: &TcpStream) -> Option<(u64, u64)> {
+        let mut reader = BufReader::new(stream);
+        let mut range = None;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).ok()? == 0 {
+                return None;
+            }
+            let line = line.trim_end();
+            if line.is_empty() {
+                return range;
+            }
+            if let Some(value) = line
+                .to_ascii_lowercase()
+                .strip_prefix("range: bytes=")
+                .map(str::to_string)
+            {
+                let (start, end) = value.split_once('-')?;
+                range = Some((start.parse().ok()?, end.parse().ok()?));
+            }
+        }
+    }
+
+    fn answer(mut stream: TcpStream, body: &[u8], start: u64, end: u64) {
+        let slice = &body[start as usize..=end as usize];
+        let head = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/webm\r\nContent-Length: {}\r\n\
+             Content-Range: bytes {start}-{end}/{}\r\nConnection: close\r\n\r\n",
+            slice.len(),
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(slice);
+    }
+
+    fn chunk_range(chunk: u64, len: usize) -> (u64, u64) {
+        let start = chunk * CHUNK as u64;
+        (start, (start + CHUNK as u64 - 1).min(len as u64 - 1))
+    }
+
+    fn capture_into(source: &mut RangeStreamSource) -> mpsc::Receiver<Captured> {
+        let (tx, rx) = mpsc::channel();
+        source.capture(Box::new(move |captured| {
+            let _ = tx.send(captured);
+        }));
+        rx
+    }
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn every_chunk_is_fetched_back_to_back_without_a_read() {
+        let len = 3 * CHUNK + 1000;
+        let server = serve(body(len), false);
+        let mut source = RangeStreamSource::new(server.url.clone(), None).expect("open");
+
+        let captured = capture_into(&mut source).recv_timeout(WAIT).expect("whole");
+
+        assert_eq!(server.seen.recv_timeout(WAIT), Ok((0, 0)), "the size probe");
+        let fetched: Vec<(u64, u64)> = server.seen.try_iter().collect();
+        assert_eq!(
+            fetched,
+            (0..4)
+                .map(|chunk| chunk_range(chunk, len))
+                .collect::<Vec<_>>(),
+            "no chunk waited on the playhead"
+        );
+        assert_eq!(source.pos, 0);
+        assert_eq!(captured.bytes, body(len), "byte for byte");
+        assert_eq!(captured.content_type.as_deref(), Some("audio/webm"));
+    }
+
+    #[test]
+    fn a_seek_past_the_fill_is_fetched_next_and_the_gap_after_the_end() {
+        let len = 8 * CHUNK;
+        let server = serve(body(len), true);
+        let gate = server.gate.clone().expect("gated");
+        let mut source = RangeStreamSource::new(server.url.clone(), None).expect("open");
+        let captured = capture_into(&mut source);
+        assert_eq!(server.seen.recv_timeout(WAIT), Ok((0, 0)));
+
+        gate.send(()).expect("let chunk 0 through");
+        assert_eq!(server.seen.recv_timeout(WAIT), Ok(chunk_range(0, len)));
+        assert_eq!(server.seen.recv_timeout(WAIT), Ok(chunk_range(1, len)));
+        // Chunk 1 is in flight while the listener jumps to chunk 6.
+        source
+            .seek(SeekFrom::Start(6 * CHUNK as u64 + 10))
+            .expect("seek");
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 16];
+            let n = source.read(&mut buf).expect("read past the seek");
+            (source, buf[..n].to_vec())
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        for _ in 0..7 {
+            gate.send(()).expect("let a chunk through");
+        }
+
+        let order: Vec<u64> = (0..6)
+            .map(|_| server.seen.recv_timeout(WAIT).expect("a chunk").0 / CHUNK as u64)
+            .collect();
+        assert_eq!(order, [6, 7, 2, 3, 4, 5], "the seek first, then the gap");
+        let (_source, read) = reader.join().expect("reader");
+        let at = 6 * CHUNK + 10;
+        assert_eq!(read, body(len)[at..at + read.len()]);
+        assert_eq!(captured.recv_timeout(WAIT).expect("whole").bytes, body(len));
+    }
+
+    #[test]
+    fn a_source_dropped_before_the_last_chunk_hands_nothing_over() {
+        let len = 4 * CHUNK;
+        let server = serve(body(len), true);
+        let gate = server.gate.clone().expect("gated");
+        let mut source = RangeStreamSource::new(server.url.clone(), None).expect("open");
+        let captured = capture_into(&mut source);
+        gate.send(()).expect("chunk 0");
+        assert_eq!(server.seen.recv_timeout(WAIT), Ok((0, 0)));
+        assert_eq!(server.seen.recv_timeout(WAIT), Ok(chunk_range(0, len)));
+
+        drop(source);
+        for _ in 0..4 {
+            let _ = gate.send(());
+        }
+
+        assert!(
+            captured.recv_timeout(Duration::from_secs(2)).is_err(),
+            "a skipped track is not kept"
+        );
     }
 }

@@ -78,46 +78,14 @@ pub fn serve(uri: http::Uri, range: Option<String>, responder: RequestAsyncRespo
                 .into_owned()
         };
         if uri.path().trim_start_matches('/') == "video" || uri.host() == Some("video") {
-            let Some(key) = query
-                .split('&')
-                .find_map(|part| part.strip_prefix("track="))
-                .map(&decode)
-            else {
-                return resp(400, &[], Vec::new());
-            };
-            let (start, end) = range.as_deref().and_then(byte_range).unwrap_or((0, None));
-            return match video_blocks::read(key, start, end).await {
-                Ok(chunk) => {
-                    let total = chunk
-                        .total
-                        .map_or_else(|| "*".to_string(), |total| total.to_string());
-                    if chunk.bytes.is_empty() {
-                        return resp(
-                            416,
-                            &[("Content-Range", &format!("bytes */{total}"))],
-                            Vec::new(),
-                        );
-                    }
-                    let last = chunk.start + chunk.bytes.len() as u64 - 1;
-                    resp(
-                        206,
-                        &[
-                            ("Content-Type", chunk.content_type.as_str()),
-                            ("Accept-Ranges", "bytes"),
-                            (
-                                "Content-Range",
-                                &format!("bytes {}-{last}/{total}", chunk.start),
-                            ),
-                            ("Cache-Control", "no-store"),
-                        ],
-                        chunk.bytes,
-                    )
-                }
-                Err(error) => {
-                    tracing::debug!(%error, "no video for track");
-                    resp(404, &[], Vec::new())
-                }
-            };
+            let mut response = video(query, range.as_deref())
+                .await
+                .map(std::borrow::Cow::from);
+            response.headers_mut().insert(
+                http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                http::HeaderValue::from_static("*"),
+            );
+            return response;
         }
         let file_path = query
             .split('&')
@@ -185,10 +153,77 @@ pub fn serve(uri: http::Uri, range: Option<String>, responder: RequestAsyncRespo
     );
 }
 
+/// One range of the music video `query`'s `track=` names, for the custom
+/// protocol and for Linux's loopback route alike.
+#[cfg(not(target_os = "android"))]
+pub(crate) async fn video(query: &str, range: Option<&str>) -> http::Response<Vec<u8>> {
+    fn resp(status: u16, headers: &[(&str, &str)], body: Vec<u8>) -> http::Response<Vec<u8>> {
+        let mut builder = http::Response::builder().status(status);
+        for (key, value) in headers {
+            builder = builder.header(*key, *value);
+        }
+        builder.body(body).unwrap_or_else(|_| {
+            let mut fallback = http::Response::new(Vec::new());
+            *fallback.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;
+            fallback
+        })
+    }
+
+    let Some(key) = video_key(query) else {
+        return resp(400, &[], Vec::new());
+    };
+    let (start, end) = range.and_then(byte_range).unwrap_or((0, None));
+    match video_blocks::read(key, start, end).await {
+        Ok(chunk) => {
+            let total = chunk
+                .total
+                .map_or_else(|| "*".to_string(), |total| total.to_string());
+            if chunk.bytes.is_empty() {
+                return resp(
+                    416,
+                    &[("Content-Range", &format!("bytes */{total}"))],
+                    Vec::new(),
+                );
+            }
+            let last = chunk.start + chunk.bytes.len() as u64 - 1;
+            resp(
+                206,
+                &[
+                    ("Content-Type", chunk.content_type.as_str()),
+                    ("Accept-Ranges", "bytes"),
+                    (
+                        "Content-Range",
+                        &format!("bytes {}-{last}/{total}", chunk.start),
+                    ),
+                    ("Cache-Control", "no-store"),
+                ],
+                chunk.bytes,
+            )
+        }
+        Err(error) => {
+            tracing::debug!(%error, "no video for track");
+            resp(404, &[], Vec::new())
+        }
+    }
+}
+
+/// The track a `video?track=` query names.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn video_key(query: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|part| part.strip_prefix("track="))
+        .map(|encoded| {
+            percent_encoding::percent_decode_str(encoded)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+}
+
 /// Video ranges, read ahead a block at a time. AVFoundation reads a few KB per request,
 /// and each would otherwise be a daemon call and a googlevideo fetch.
 #[cfg(not(target_os = "android"))]
-mod video_blocks {
+pub(crate) mod video_blocks {
     use std::collections::VecDeque;
     use std::sync::{Arc, LazyLock, Mutex};
     use std::time::Duration;
@@ -280,7 +315,7 @@ mod video_blocks {
 /// The first range of a `Range: bytes=` header, as a start and an inclusive
 /// end. Suffix ranges are not something a video element sends.
 #[cfg(not(target_os = "android"))]
-fn byte_range(header: &str) -> Option<(u64, Option<u64>)> {
+pub(crate) fn byte_range(header: &str) -> Option<(u64, Option<u64>)> {
     let (start, end) = header
         .trim()
         .strip_prefix("bytes=")?

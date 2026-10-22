@@ -682,3 +682,111 @@ async fn albums_and_artists_filter_by_a_downloaded_track() {
     assert_eq!(names(true).await, ["Boris"]);
     assert_eq!(names(false).await, ["Ada", "Cyd"]);
 }
+
+fn cached(key: &str, last_played_at: i64) -> db::CachedTrackRow {
+    db::CachedTrackRow {
+        track_key: key.to_string(),
+        source: "yt".to_string(),
+        path: format!("/cache{key}"),
+        size: 1_000,
+        content_type: "audio/webm".to_string(),
+        cached_at: 10,
+        last_played_at,
+    }
+}
+
+/// What plays offline is a download or a cached copy; `downloaded` still means downloads alone.
+#[tokio::test]
+async fn the_offline_filter_takes_downloads_and_cached_copies_alike() {
+    let (database, _dir, source) = library().await;
+    database
+        .set_offline_track("/b2.flac", Some("/offline/b2"))
+        .await
+        .unwrap();
+    database
+        .put_offline_cache(&cached("/e1.flac", 20))
+        .await
+        .unwrap();
+
+    let keys = async |filter: TrackFilter| -> Vec<String> {
+        let mut keys: Vec<String> = database
+            .tracks_page(&filter, ALL)
+            .await
+            .unwrap()
+            .iter()
+            .map(|track| track.id.key().into_owned())
+            .collect();
+        keys.sort();
+        assert_eq!(
+            database.tracks_count(&filter).await.unwrap() as usize,
+            keys.len()
+        );
+        keys
+    };
+    let filter = |offline, downloaded| TrackFilter {
+        source: source.clone(),
+        offline,
+        downloaded,
+        ..Default::default()
+    };
+    assert_eq!(
+        keys(filter(Some(true), None)).await,
+        ["/b2.flac", "/e1.flac"]
+    );
+    assert_eq!(keys(filter(None, Some(true))).await, ["/b2.flac"]);
+    assert_eq!(keys(filter(Some(false), None)).await.len(), 6);
+
+    let offline_albums = AlbumQuery {
+        offline: Some(true),
+        ..albums(&source)
+    };
+    assert_eq!(
+        titles(&database, &offline_albums).await,
+        ["beta", "Epsilon"]
+    );
+    let artists = ArtistQuery {
+        offline: Some(true),
+        ..artists(&source)
+    };
+    let names: Vec<String> = database
+        .artists_page(&artists, ALL)
+        .await
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|artist| artist.name)
+        .collect();
+    assert_eq!(names, ["Boris", "Cyd"]);
+}
+
+#[tokio::test]
+async fn the_cache_index_lists_least_recently_played_first_and_forgets_on_request() {
+    let (database, _dir, _source) = library().await;
+    for row in [cached("/a", 30), cached("/b", 10), cached("/c", 20)] {
+        database.put_offline_cache(&row).await.unwrap();
+    }
+    database.touch_offline_cache("/b", 40).await.unwrap();
+
+    let order = async || -> Vec<String> {
+        database
+            .offline_cache()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.track_key)
+            .collect()
+    };
+    assert_eq!(order().await, ["/c", "/a", "/b"]);
+
+    database
+        .remove_offline_cache(&["/c".to_string(), "/a".to_string()])
+        .await
+        .unwrap();
+    let left = database.offline_cache().await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0], cached("/b", 40));
+    assert!(
+        database.offline_tracks().await.unwrap().is_empty(),
+        "the cache is not the downloads"
+    );
+}

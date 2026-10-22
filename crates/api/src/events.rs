@@ -63,6 +63,43 @@ pub enum SourceState {
     Offline,
 }
 
+/// Whether the daemon reaches the internet, as its last check after a source stopped answering found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetworkStatus {
+    /// Every connectivity check failed, so only sources on this machine or its network are usable.
+    pub internet_down: bool,
+    /// The source the daemon moved off when the internet went down, kept so a frontend can offer it back once it is up.
+    pub left_source: Option<String>,
+    pub offline_mode: OfflineMode,
+}
+
+/// Whether listings and playback keep to what plays without the internet: downloads and cached songs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OfflineMode {
+    #[default]
+    Off,
+    /// The internet went down with nothing on this machine or its network to play; once it is back a frontend offers to leave, and `set_offline(false)` does.
+    Automatic,
+    /// Asked for, by `--offline` or `set_offline(true)`, and left only by `set_offline(false)`.
+    Requested,
+}
+
+impl OfflineMode {
+    pub fn is_on(self) -> bool {
+        self != Self::Off
+    }
+}
+
+/// The offline playback cache: songs kept from their own stream, least recently played evicted first past the cap; downloads are apart and never count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OfflineCacheStatus {
+    /// Off stops adding songs; the ones it holds stay and still play.
+    pub enabled: bool,
+    pub max_bytes: u64,
+    pub used_bytes: u64,
+    pub tracks: u32,
+}
+
 /// One event on the daemon's Subscribe stream (`proto/kopuz.proto` carries the
 /// wire shape). The variant names are the event identities. Clients
 /// must ignore unknown event types.
@@ -112,6 +149,8 @@ pub enum ApiEvent {
         source: String,
         state: SourceState,
     },
+    /// The internet went down or came back, or the source offered back changed.
+    NetworkStatus(NetworkStatus),
     Notice {
         level: NoticeLevel,
         code: String,

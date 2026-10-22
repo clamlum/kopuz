@@ -136,6 +136,18 @@ mod tests {
     }
 
     #[test]
+    fn two_counts_in_one_line_each_pick_their_own_plural() {
+        let summary = |tracks: usize, albums: usize| {
+            plain(t_with(
+                "onboarding_ready_summary",
+                &[("tracks", tracks.into()), ("albums", albums.into())],
+            ))
+        };
+        assert_eq!(summary(1, 1), "1 track, 1 album");
+        assert_eq!(summary(240, 18), "240 tracks, 18 albums");
+    }
+
+    #[test]
     fn a_string_argument_is_passed_as_text() {
         let text = plain(t_with("artist_load_failed", &[("error", "gone".into())]));
         assert_eq!(text, "Couldn't load this artist: gone");

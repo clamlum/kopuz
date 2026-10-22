@@ -13,6 +13,8 @@ usage: kopuzd [options]
   --socket <path>        socket (named pipe on Windows) to serve on
   --listen <ip>:<port>   also serve on a TCP port
   --db-path <file>       library database to open
+  --offline              start in offline mode: only downloads and cached
+                         songs list and play, until a frontend leaves it
   --app-id <id>          AppUserModelID the Windows media flyout and
                          notifications show this process as; defaults to
                          $KOPUZ_APP_ID, else none is set
@@ -67,6 +69,7 @@ fn parse_args(
                         .map_err(|error| format!("--app-icon {icon}: {error}"))?,
                 );
             }
+            "--offline" => args.offline = true,
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -160,6 +163,13 @@ mod tests {
         assert!(parse(&["--app-name"], None).is_err());
         assert!(parse(&["--app-name", "Kopuz"], None).is_err());
         assert!(parse(&["--app-icon", "icon.ico"], None).is_err());
+    }
+
+    #[test]
+    fn offline_is_off_unless_asked_for() {
+        assert!(!parse(&[], None).unwrap().offline);
+        assert!(parse(&["--offline"], None).unwrap().offline);
+        assert!(parse(&["--help"], None).unwrap_err().contains("--offline"));
     }
 
     #[test]

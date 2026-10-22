@@ -28,6 +28,30 @@ use crate::ytmusic::discover::{self, BrowsePage};
 /// source has such a playlist and the UI stays unaware of it.
 const LIKED_MUSIC_ID: &str = "LM";
 
+/// YouTube's personal mixes (My Supermix, My Mix 1, Discover Mix) carry this playlist id prefix; their titles are localized, the prefix is not.
+const PERSONAL_MIX_PREFIX: &str = "RDTMAK5uy_";
+
+/// Home feed pages read for mixes; they sit near its top.
+const MIX_PAGES: usize = 3;
+
+fn is_personal_mix(playlist_id: &str) -> bool {
+    playlist_id.starts_with(PERSONAL_MIX_PREFIX)
+}
+
+/// The mix tiles on one feed page not already in `mixes`, in feed order.
+fn collect_mixes(page: &BrowsePage, mixes: &mut Vec<discover::DiscoverItem>) {
+    for item in page.shelves.iter().flat_map(|shelf| shelf.items.iter()) {
+        if let discover::DiscoverItem::Playlist { playlist_id, .. } = item
+            && is_personal_mix(playlist_id)
+            && !mixes.iter().any(|held| {
+                matches!(held, discover::DiscoverItem::Playlist { playlist_id: id, .. } if id == playlist_id)
+            })
+        {
+            mixes.push(item.clone());
+        }
+    }
+}
+
 struct Reported {
     item_id: String,
     watch: Watch,
@@ -105,6 +129,7 @@ impl MediaSource for YtSource {
             stream_quality: true,
             explicit_flags: true,
             watch_history: self.client.is_authenticated(),
+            complete_play_history: false,
             library_actions: if self.client.is_authenticated() {
                 LibraryActions::ALL
             } else {
@@ -376,6 +401,25 @@ impl MediaSource for YtSource {
         pages
     }
 
+    async fn personal_mixes(&self) -> Result<Vec<discover::DiscoverItem>, SourceError> {
+        let mut page = self.browse_page(discover::HOME, None).await?;
+        let mut mixes = Vec::new();
+        for read in 1..=MIX_PAGES {
+            collect_mixes(&page, &mut mixes);
+            let Some(token) = page.continuation.take().filter(|_| read < MIX_PAGES) else {
+                break;
+            };
+            page = match self.browse_page(discover::HOME, Some(&token)).await {
+                Ok(next) => next,
+                Err(error) => {
+                    tracing::debug!(%error, "a later home page for mixes failed; keeping what was read");
+                    break;
+                }
+            };
+        }
+        Ok(mixes)
+    }
+
     async fn browse_page(
         &self,
         id: &str,
@@ -386,10 +430,11 @@ impl MediaSource for YtSource {
                 "a page is opened by its id".into(),
             ));
         }
-        Ok(match continuation {
-            Some(token) => self.client.browse_continuation(token).await?,
-            None => self.client.browse_page(id).await?,
-        })
+        match continuation {
+            Some(token) => self.client.browse_continuation(token).await,
+            None => self.client.browse_page(id).await,
+        }
+        .map_err(session_error)
     }
 
     fn search_filters(&self) -> Vec<SearchFilterEntry> {
@@ -837,6 +882,15 @@ impl MediaSource for YtSource {
     }
 }
 
+/// A signed-out answer is an expired session, which the daemon recovers and retries.
+fn session_error(error: String) -> SourceError {
+    if error == innertube::SIGNED_OUT {
+        SourceError::Auth
+    } else {
+        SourceError::Backend(error)
+    }
+}
+
 fn send_report(cookies: String, page_id: Option<String>, url: String) {
     tokio::spawn(innertube::as_account(page_id, async move {
         let visitor = player::signed_in_visitor(&cookies).await;
@@ -898,6 +952,77 @@ mod tests {
             .await
             .unwrap();
         assert!(src.reported.lock().unwrap().is_none());
+    }
+
+    fn playlist(id: &str, title: &str) -> discover::DiscoverItem {
+        discover::DiscoverItem::Playlist {
+            playlist_id: id.to_string(),
+            title: title.to_string(),
+            subtitle: String::new(),
+            thumbnail: None,
+            actions: discover::ItemActions::default(),
+        }
+    }
+
+    fn feed(items: Vec<discover::DiscoverItem>) -> BrowsePage {
+        BrowsePage {
+            shelves: vec![discover::DiscoverShelf {
+                title: "Mixed for you".into(),
+                strapline: None,
+                more: None,
+                items,
+                layout: discover::ShelfLayout::Carousel,
+                continuation: None,
+                search_filter: None,
+            }],
+            ..BrowsePage::default()
+        }
+    }
+
+    fn mix_ids(page: &BrowsePage) -> Vec<String> {
+        let mut mixes = Vec::new();
+        collect_mixes(page, &mut mixes);
+        mixes
+            .into_iter()
+            .map(|item| match item {
+                discover::DiscoverItem::Playlist { playlist_id, .. } => playlist_id,
+                other => panic!("not a playlist: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mix_is_known_by_its_id_prefix_and_never_by_its_title() {
+        let page = feed(vec![
+            playlist("RDTMAK5uy_supermix", "Something else entirely"),
+            playlist("PLnotamix", "My Supermix"),
+            playlist("RDCLAK5uy_curated", "Chill Mix"),
+            playlist("OLAK5uy_album", "Discover Mix"),
+            playlist("RDTMAK5uy_supermix", "the same mix again"),
+            playlist("RDTMAK5uy_mix1", "My Mix 1"),
+        ]);
+
+        assert_eq!(mix_ids(&page), ["RDTMAK5uy_supermix", "RDTMAK5uy_mix1"]);
+    }
+
+    #[test]
+    fn the_recorded_home_feed_yields_only_its_mix_tiles() {
+        let first: serde_json::Value =
+            serde_json::from_str(include_str!("../ytmusic/testdata/home.json")).unwrap();
+        let page = browse::parse_page(&first).expect("a browse page");
+        assert!(page.shelves.iter().flat_map(|s| &s.items).any(
+            |item| matches!(item, discover::DiscoverItem::Playlist { playlist_id, .. } if playlist_id.starts_with("RDCLAK5uy_"))
+        ));
+        assert!(mix_ids(&page).is_empty(), "curated playlists are no mixes");
+
+        let more: serde_json::Value =
+            serde_json::from_str(include_str!("../ytmusic/testdata/home_continuation.json"))
+                .unwrap();
+        let page = browse::parse_continuation(&more);
+        assert_eq!(
+            mix_ids(&page),
+            ["RDTMAK5uy_lr0LWzGrq6FU9GIxWvFHTRPQD2LHMqlFA"]
+        );
     }
 
     #[tokio::test]

@@ -76,7 +76,7 @@ pub fn PlaylistsPage(
     let is_vaxry = settings.read().ui.ui_style == UiStyle::Vaxry;
 
     rsx! {
-        div { class: if cfg!(target_os = "android") { "px-4 pt-2 absolute inset-0 flex flex-col" } else if is_vaxry { "px-6 pt-6 absolute inset-0 flex flex-col" } else { "px-8 pt-8 absolute inset-0 flex flex-col" },
+        div { class: crate::layout::page_container_class(&settings.read().ui.ui_style),
             if let Some(pid) = selected_playlist_id.read().clone() {
                 {
                     let pid_for_dl = pid.clone();

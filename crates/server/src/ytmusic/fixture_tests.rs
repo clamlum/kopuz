@@ -224,6 +224,14 @@ fn new_releases() {
 fn legacy_artist() {
     let artist = discover::parse_artist("UCRr1xG_2WIDs18a6cIiCxeA", &fixture!("artist"));
     assert_eq!(artist.name, "Daft Punk");
+    assert_eq!(
+        artist.shuffle_ref.as_deref(),
+        Some("mix:RDAOni3jl65KF37F9JYsJM8DGg")
+    );
+    assert_eq!(
+        artist.mix_ref.as_deref(),
+        Some("mix:RDEMni3jl65KF37F9JYsJM8DGg")
+    );
     assert!(artist.subscribers.is_some() && artist.banner_thumbnail.is_some());
     assert!(artist.sections.len() >= 6);
     let top = artist

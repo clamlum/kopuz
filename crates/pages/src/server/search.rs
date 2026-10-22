@@ -22,6 +22,8 @@ pub fn CatalogSearch(
     on_select_album: EventHandler<String>,
     on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
 ) -> Element {
+    let ui_style = crate::layout::use_ui_style();
+    let inset = crate::layout::page_inset_class(&ui_style);
     let nav = use_context::<components::NavigationController>();
     let on_open_artist = EventHandler::new(move |artist: String| nav.open_artist(artist));
     let first = filters
@@ -134,89 +136,91 @@ pub fn CatalogSearch(
     });
 
     rsx! {
-        div { class: "p-8 max-w-[1600px] mx-auto",
-            CatalogSearchBar {
-                search_query,
-                on_select_album,
-                on_select_playlist,
-                on_open_artist,
-            }
+        div { class: "{inset} pb-8",
+            div { class: crate::layout::PAGE_CONTENT,
+                CatalogSearchBar {
+                    search_query,
+                    on_select_album,
+                    on_select_playlist,
+                    on_open_artist,
+                }
 
-            div { class: "flex flex-wrap gap-2 mb-8", role: "radiogroup", aria_label: i18n::t("search"),
-                for option in filters.iter().cloned() {
-                    {
-                        let on = *filter.read() == option.id;
-                        rsx! {
-                            button {
-                                key: "{option.id}",
-                                role: "radio",
-                                aria_checked: if on { "true" } else { "false" },
-                                class: if on {
-                                    "app-chip text-xs px-3 py-1.5 rounded-lg bg-white/20 text-white font-medium transition-colors cursor-pointer"
-                                } else {
-                                    "app-chip text-xs px-3 py-1.5 rounded-lg bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-                                },
-                                onclick: move |_| filter.set(option.id.clone()),
-                                "{components::forms::text(&option.label)}"
+                div { class: "flex flex-wrap gap-2 mb-8", role: "radiogroup", aria_label: i18n::t("search"),
+                    for option in filters.iter().cloned() {
+                        {
+                            let on = *filter.read() == option.id;
+                            rsx! {
+                                button {
+                                    key: "{option.id}",
+                                    role: "radio",
+                                    aria_checked: if on { "true" } else { "false" },
+                                    class: if on {
+                                        "app-chip text-xs px-3 py-1.5 rounded-lg bg-white/20 text-white font-medium transition-colors cursor-pointer"
+                                    } else {
+                                        "app-chip text-xs px-3 py-1.5 rounded-lg bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                                    },
+                                    onclick: move |_| filter.set(option.id.clone()),
+                                    "{components::forms::text(&option.label)}"
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            if let Some(note) = corrected_note {
-                p { class: "text-sm text-white/50 mb-6", "{note}" }
-            }
+                if let Some(note) = corrected_note {
+                    p { class: "text-sm text-white/50 mb-6", "{note}" }
+                }
 
-            if query_text.is_empty() {
-                div { class: "py-24 flex flex-col items-center justify-center text-slate-600",
-                    i { class: "fa-solid fa-magnifying-glass text-4xl mb-4" }
-                    p { class: "text-lg", "{i18n::t(\"search_prompt\")}" }
-                }
-            } else if *loading.read() {
-                div { class: "flex justify-center py-24",
-                    i { class: "fa-solid fa-arrows-rotate fa-spin text-2xl text-white/60" }
-                }
-            } else if let Some(err) = error.read().clone() {
-                div { class: "py-12 text-rose-400 text-sm", "{err}" }
-            } else if results.iter().all(|shelf| shelf.items.is_empty()) {
-                div { class: "py-24 flex flex-col items-center justify-center text-slate-600",
-                    i { class: "fa-regular fa-folder-open text-4xl mb-4" }
-                    p { class: "text-lg", "{i18n::t_with(\"discover_results_for\", &[(\"query\", query_text.clone().into())])}" }
-                    p { class: "text-sm mt-1", "{i18n::t(\"discover_no_results_hint\")}" }
-                }
-            } else {
-                for (idx, shelf) in results.into_iter().enumerate() {
-                    {
-                        let shelf = if filtered && shelf.layout == ShelfLayout::Carousel {
-                            // One filter is one shelf, so it has the room to wrap.
-                            CatalogShelf { layout: ShelfLayout::Grid, ..shelf }
-                        } else {
-                            shelf
-                        };
-                        let show_all = shelf.search_filter.clone().map(|target| {
-                            EventHandler::new(move |_| filter.set(target.clone()))
-                        });
-                        rsx! {
-                            ShelfRow {
-                                key: "{idx}",
-                                shelf,
-                                scroll_id: format!("catalog-search-shelf-{idx}"),
-                                on_select_album,
-                                on_select_playlist,
-                                on_open_artist,
-                                show_all,
+                if query_text.is_empty() {
+                    div { class: "py-24 flex flex-col items-center justify-center text-slate-600",
+                        i { class: "fa-solid fa-magnifying-glass text-4xl mb-4" }
+                        p { class: "text-lg", "{i18n::t(\"search_prompt\")}" }
+                    }
+                } else if *loading.read() {
+                    div { class: "flex justify-center py-24",
+                        i { class: "fa-solid fa-arrows-rotate fa-spin text-2xl text-white/60" }
+                    }
+                } else if let Some(err) = error.read().clone() {
+                    div { class: "py-12 text-rose-400 text-sm", "{err}" }
+                } else if results.iter().all(|shelf| shelf.items.is_empty()) {
+                    div { class: "py-24 flex flex-col items-center justify-center text-slate-600",
+                        i { class: "fa-regular fa-folder-open text-4xl mb-4" }
+                        p { class: "text-lg", "{i18n::t_with(\"discover_results_for\", &[(\"query\", query_text.clone().into())])}" }
+                        p { class: "text-sm mt-1", "{i18n::t(\"discover_no_results_hint\")}" }
+                    }
+                } else {
+                    for (idx, shelf) in results.into_iter().enumerate() {
+                        {
+                            let shelf = if filtered && shelf.layout == ShelfLayout::Carousel {
+                                // One filter is one shelf, so it has the room to wrap.
+                                CatalogShelf { layout: ShelfLayout::Grid, ..shelf }
+                            } else {
+                                shelf
+                            };
+                            let show_all = shelf.search_filter.clone().map(|target| {
+                                EventHandler::new(move |_| filter.set(target.clone()))
+                            });
+                            rsx! {
+                                ShelfRow {
+                                    key: "{idx}",
+                                    shelf,
+                                    scroll_id: format!("catalog-search-shelf-{idx}"),
+                                    on_select_album,
+                                    on_select_playlist,
+                                    on_open_artist,
+                                    show_all,
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            div { id: "catalog-search-sentinel", class: "h-8" }
-            if *loading_more.read() {
-                div { class: "flex items-center justify-center gap-3 py-6 text-white/50 text-xs",
-                    i { class: "fa-solid fa-arrows-rotate fa-spin" }
-                    span { "{i18n::t(\"discover_more_loading\")}" }
+                div { id: "catalog-search-sentinel", class: "h-8" }
+                if *loading_more.read() {
+                    div { class: "flex items-center justify-center gap-3 py-6 text-white/50 text-xs",
+                        i { class: "fa-solid fa-arrows-rotate fa-spin" }
+                        span { "{i18n::t(\"discover_more_loading\")}" }
+                    }
                 }
             }
         }

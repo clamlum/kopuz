@@ -24,6 +24,16 @@ const PROGRESS_REPORT_STEP: usize = 64 * 1024;
 /// when the server exposes it.
 pub type BufferProgressCallback = Arc<dyn Fn(u64, u64, Option<u64>) + Send + Sync>;
 
+/// A track's whole file, as its stream downloaded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Captured {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+}
+
+/// Takes a stream's whole file once every byte has arrived; a stream dropped or cut short first drops it uncalled.
+pub type CompleteSink = Box<dyn FnOnce(Captured) + Send>;
+
 /// Shared state between the async downloader and sync readers.
 ///
 /// Fields:
@@ -95,6 +105,29 @@ impl StreamBuffer {
         icy_tx: Option<tokio::sync::watch::Sender<super::icy::IcyMeta>>,
         runtime: tokio::runtime::Handle,
         progress: Option<BufferProgressCallback>,
+    ) -> Self {
+        Self::open(url, is_radio, client, icy_tx, runtime, progress, None)
+    }
+
+    /// A track's progressive stream that hands its whole file to `complete` once the body has arrived in full.
+    pub fn capturing(
+        url: String,
+        client: reqwest::Client,
+        runtime: tokio::runtime::Handle,
+        progress: Option<BufferProgressCallback>,
+        complete: Option<CompleteSink>,
+    ) -> Self {
+        Self::open(url, false, client, None, runtime, progress, complete)
+    }
+
+    fn open(
+        url: String,
+        is_radio: bool,
+        client: reqwest::Client,
+        icy_tx: Option<tokio::sync::watch::Sender<super::icy::IcyMeta>>,
+        runtime: tokio::runtime::Handle,
+        progress: Option<BufferProgressCallback>,
+        complete: Option<CompleteSink>,
     ) -> Self {
         let prebuffer_size = if is_radio {
             16 * 1024
@@ -198,6 +231,11 @@ impl StreamBuffer {
                             "stream buffer HTTP response",
                         );
                         let total_size = response.content_length();
+                        let content_type = response
+                            .headers()
+                            .get(reqwest::header::CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
                         {
                             let (lock, notify) = &*state_clone;
                             let mut state = lock.lock().await;
@@ -222,8 +260,17 @@ impl StreamBuffer {
                         let mut total_buffered = 0usize;
                         let mut last_progress_report = 0usize;
                         let mut audio_scratch = Vec::new();
+                        let mut whole = false;
 
-                        while let Ok(Some(chunk)) = response.chunk().await {
+                        loop {
+                            let chunk = match response.chunk().await {
+                                Ok(Some(chunk)) => chunk,
+                                Ok(None) => {
+                                    whole = true;
+                                    break;
+                                }
+                                Err(_) => break,
+                            };
                             if Arc::strong_count(&state_clone) == 1 {
                                 break;
                             }
@@ -289,7 +336,21 @@ impl StreamBuffer {
                         state.done = true;
                         state.prebuffer_ready = true;
                         notify.notify_waiters();
+                        let whole = whole
+                            && total_buffered > 0
+                            && total_size.is_none_or(|size| size == total_buffered as u64);
+                        let captured = complete
+                            .filter(|_| whole)
+                            .map(|complete| (complete, state.buffer.clone()));
                         drop(state);
+                        if let Some((complete, bytes)) = captured {
+                            tokio::task::spawn_blocking(move || {
+                                complete(Captured {
+                                    bytes,
+                                    content_type,
+                                })
+                            });
+                        }
                         if total_buffered > 0
                             && let Some(progress) = &progress
                         {

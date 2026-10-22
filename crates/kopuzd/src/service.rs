@@ -510,6 +510,38 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(convert::catalog_detail_to_proto(&detail)))
     }
 
+    async fn get_for_you(
+        &self,
+        _request: Request<proto::GetForYouRequest>,
+    ) -> Result<Response<proto::ForYou>, Status> {
+        let mix = self.0.api.for_you().await.map_err(failed)?;
+        Ok(Response::new(convert::for_you_to_proto(&mix)))
+    }
+
+    async fn refresh_for_you(
+        &self,
+        _request: Request<proto::RefreshForYouRequest>,
+    ) -> Result<Response<proto::ForYou>, Status> {
+        let mix = self.0.api.refresh_for_you().await.map_err(failed)?;
+        Ok(Response::new(convert::for_you_to_proto(&mix)))
+    }
+
+    async fn get_discover_rows(
+        &self,
+        _request: Request<proto::GetDiscoverRowsRequest>,
+    ) -> Result<Response<proto::DiscoverRows>, Status> {
+        let rows = self.0.api.discover_rows().await.map_err(failed)?;
+        Ok(Response::new(convert::discover_rows_to_proto(&rows)))
+    }
+
+    async fn refresh_discover_rows(
+        &self,
+        _request: Request<proto::RefreshDiscoverRowsRequest>,
+    ) -> Result<Response<proto::DiscoverRows>, Status> {
+        let rows = self.0.api.refresh_discover_rows().await.map_err(failed)?;
+        Ok(Response::new(convert::discover_rows_to_proto(&rows)))
+    }
+
     async fn get_radio_stations(
         &self,
         _: Request<proto::GetRadioStationsRequest>,
@@ -1189,6 +1221,24 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(proto::RemoveDownloadResponse {}))
     }
 
+    async fn get_offline_cache_status(
+        &self,
+        _: Request<proto::GetOfflineCacheStatusRequest>,
+    ) -> Result<Response<proto::OfflineCacheStatus>, Status> {
+        let status = self.0.api.offline_cache_status().await.map_err(failed)?;
+        Ok(Response::new(convert::offline_cache_status_to_proto(
+            &status,
+        )))
+    }
+
+    async fn clear_offline_cache(
+        &self,
+        _: Request<proto::ClearOfflineCacheRequest>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        self.0.api.clear_offline_cache().await.map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
+    }
+
     /// An edit this build cannot read is answered invalid in its place; the readable ones still apply.
     async fn edit_config(
         &self,
@@ -1493,6 +1543,19 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(convert::draft_check_to_proto(&check)))
     }
 
+    async fn probe_source_draft(
+        &self,
+        request: Request<proto::SourceDraft>,
+    ) -> Result<Response<proto::DraftProbe>, Status> {
+        let probe = self
+            .0
+            .api
+            .probe_source_draft(convert::source_draft_from_proto(request.get_ref()))
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(convert::draft_probe_to_proto(&probe)))
+    }
+
     async fn upsert_source(
         &self,
         request: Request<proto::SourceDraft>,
@@ -1646,6 +1709,27 @@ impl Kopuz for KopuzGrpc {
         Ok(Response::new(proto::SourceStateResponse {
             state: convert::source_state_to_proto(state) as i32,
         }))
+    }
+
+    async fn get_network_status(
+        &self,
+        _request: Request<proto::GetNetworkStatusRequest>,
+    ) -> Result<Response<proto::NetworkStatus>, Status> {
+        let status = self.0.api.network_status().await.map_err(failed)?;
+        Ok(Response::new(convert::network_status_to_proto(&status)))
+    }
+
+    async fn set_offline(
+        &self,
+        request: Request<proto::SetOfflineRequest>,
+    ) -> Result<Response<proto::NetworkStatus>, Status> {
+        let status = self
+            .0
+            .api
+            .set_offline(request.get_ref().offline)
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(convert::network_status_to_proto(&status)))
     }
 
     async fn get_source_accounts(

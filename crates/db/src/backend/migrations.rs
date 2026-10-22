@@ -2025,6 +2025,8 @@ mod row_fill_tests {
             "ALTER TABLE tracks DROP COLUMN rg_album_peak",
             "ALTER TABLE tracks DROP COLUMN explicit",
             "ALTER TABLE tracks DROP COLUMN plays",
+            "ALTER TABLE listen_counts DROP COLUMN last_played_at",
+            "DROP TABLE offline_cache",
             "DELETE FROM _sqlx_migrations WHERE version >= 20260930000000",
         ] {
             sqlx::query(sql).execute(&pool).await.unwrap();
@@ -2756,5 +2758,51 @@ mod album_identity_tests {
         assert!(matches!(due.as_slice(), [Fill::DiscFolders]));
         snapshot_if_pending(&path, &pending);
         assert_eq!(snapshots(dir.path()), 1);
+    }
+}
+
+#[cfg(test)]
+mod last_played_tests {
+    use sqlx::SqlitePool;
+
+    /// Only a play still in its source's recent history is dated, from the upgrade; every other count stays undated.
+    #[tokio::test]
+    async fn a_recent_play_is_stamped_at_the_upgrade_and_an_older_one_stays_undated() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        super::run_migrations(&pool, None).await.unwrap();
+        for sql in [
+            "ALTER TABLE listen_counts DROP COLUMN last_played_at",
+            "DELETE FROM _sqlx_migrations WHERE version = 20261021000000",
+            "INSERT INTO listen_counts (source, track_key, count) VALUES \
+               ('local', '/recent.flac', 3), ('local', '/old.flac', 7), ('srv', '/recent.flac', 2)",
+            "INSERT INTO recently_played (source, track_key, played_at) VALUES ('local', '/recent.flac', 1)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let before: i64 = sqlx::query_scalar("SELECT unixepoch()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        super::run_migrations(&pool, None).await.unwrap();
+
+        let rows: Vec<(String, String, i64, Option<i64>)> = sqlx::query_as(
+            "SELECT source, track_key, count, last_played_at FROM listen_counts \
+              ORDER BY source, track_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let [old, recent, elsewhere] = rows.as_slice() else {
+            panic!("three counts: {rows:?}");
+        };
+        assert_eq!((old.1.as_str(), old.2, old.3), ("/old.flac", 7, None));
+        assert_eq!((recent.1.as_str(), recent.2), ("/recent.flac", 3));
+        assert!(recent.3.is_some_and(|at| at >= before), "{recent:?}");
+        assert_eq!(
+            (elsewhere.0.as_str(), elsewhere.3),
+            ("srv", None),
+            "the recent history is per source"
+        );
     }
 }

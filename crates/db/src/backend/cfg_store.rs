@@ -50,6 +50,27 @@ pub async fn load_sources(pool: &SqlitePool) -> Result<crate::StoredSources, DbE
     })
 }
 
+pub async fn play_history(
+    pool: &SqlitePool,
+    source: &Source,
+) -> Result<Vec<crate::PlayRecord>, DbError> {
+    let rows: Vec<(String, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT track_key, count, last_played_at FROM listen_counts \
+          WHERE source = ?1 AND count > 0 ORDER BY count DESC, track_key",
+    )
+    .bind(source.as_str())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(track_key, count, last_played_at)| crate::PlayRecord {
+            track_key,
+            count: count.max(0) as u64,
+            last_played_at,
+        })
+        .collect())
+}
+
 /// Every play count, under the uid keys every reader of the map looks them up by.
 pub async fn listen_counts(pool: &SqlitePool) -> Result<HashMap<String, u64>, DbError> {
     let counts = sqlx::query!(
@@ -632,19 +653,20 @@ pub(crate) async fn write_server_credentials(
     Ok(())
 }
 
-/// Increment one track's play count (1-row upsert — no whole-blob rewrite).
+/// Increment one track's play count and stamp when it was played (1-row upsert — no whole-blob rewrite).
 pub async fn bump_listen_count(
     pool: &SqlitePool,
     source: &Source,
     track_key: &str,
 ) -> Result<(), DbError> {
-    let src = source.as_str();
-    sqlx::query!(
-        "INSERT INTO listen_counts (source, track_key, count) VALUES (?1, ?2, 1) \
-         ON CONFLICT(source, track_key) DO UPDATE SET count = count + 1",
-        src,
-        track_key
+    sqlx::query(
+        "INSERT INTO listen_counts (source, track_key, count, last_played_at) \
+         VALUES (?1, ?2, 1, unixepoch()) \
+         ON CONFLICT(source, track_key) DO UPDATE \
+         SET count = count + 1, last_played_at = excluded.last_played_at",
     )
+    .bind(source.as_str())
+    .bind(track_key)
     .execute(pool)
     .await?;
     Ok(())

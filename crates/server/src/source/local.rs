@@ -48,6 +48,7 @@ impl MediaSource for LocalSource {
             stream_quality: false,
             explicit_flags: false,
             watch_history: false,
+            complete_play_history: true,
             library_actions: LibraryActions::NONE,
         }
     }

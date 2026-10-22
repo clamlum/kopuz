@@ -530,6 +530,42 @@ impl api::LibraryApi for GrpcApi {
         Ok(convert::catalog_detail_from_proto(detail.get_ref()))
     }
 
+    async fn for_you(&self) -> Result<api::ForYou, ApiError> {
+        let mix = self
+            .client()
+            .get_for_you(Request::new(proto::GetForYouRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::for_you_from_proto(mix.get_ref()))
+    }
+
+    async fn refresh_for_you(&self) -> Result<api::ForYou, ApiError> {
+        let mix = self
+            .client()
+            .refresh_for_you(Request::new(proto::RefreshForYouRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::for_you_from_proto(mix.get_ref()))
+    }
+
+    async fn discover_rows(&self) -> Result<api::DiscoverRows, ApiError> {
+        let rows = self
+            .client()
+            .get_discover_rows(Request::new(proto::GetDiscoverRowsRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::discover_rows_from_proto(rows.get_ref()))
+    }
+
+    async fn refresh_discover_rows(&self) -> Result<api::DiscoverRows, ApiError> {
+        let rows = self
+            .client()
+            .refresh_discover_rows(Request::new(proto::RefreshDiscoverRowsRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::discover_rows_from_proto(rows.get_ref()))
+    }
+
     async fn radio_stations(&self) -> Result<Vec<api::RadioStationInfo>, ApiError> {
         let list = self
             .client()
@@ -921,6 +957,23 @@ impl api::JobApi for GrpcApi {
             .iter()
             .map(convert::download_status_from_proto)
             .collect())
+    }
+
+    async fn offline_cache_status(&self) -> Result<api::OfflineCacheStatus, ApiError> {
+        let status = self
+            .client()
+            .get_offline_cache_status(Request::new(proto::GetOfflineCacheStatusRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::offline_cache_status_from_proto(status.get_ref()))
+    }
+
+    async fn clear_offline_cache(&self) -> Result<(), ApiError> {
+        self.client()
+            .clear_offline_cache(Request::new(proto::ClearOfflineCacheRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
     }
 
     async fn download_url(&self, url: String, format: String) -> Result<JobRef, ApiError> {
@@ -1349,6 +1402,18 @@ impl api::SourceApi for GrpcApi {
         Ok(convert::draft_check_from_proto(check.get_ref()))
     }
 
+    async fn probe_source_draft(
+        &self,
+        draft: api::SourceDraft,
+    ) -> Result<api::DraftProbe, ApiError> {
+        let probe = self
+            .client()
+            .probe_source_draft(Request::new(convert::source_draft_to_proto(&draft)))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::draft_probe_from_proto(probe.get_ref()))
+    }
+
     async fn set_source_settings(
         &self,
         id: String,
@@ -1504,6 +1569,24 @@ impl api::SourceApi for GrpcApi {
             .await
             .map_err(wire_error)?;
         Ok(convert::source_state_from_proto(state.get_ref().state))
+    }
+
+    async fn network_status(&self) -> Result<api::NetworkStatus, ApiError> {
+        let status = self
+            .client()
+            .get_network_status(Request::new(proto::GetNetworkStatusRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::network_status_from_proto(status.get_ref()))
+    }
+
+    async fn set_offline(&self, offline: bool) -> Result<api::NetworkStatus, ApiError> {
+        let status = self
+            .client()
+            .set_offline(Request::new(proto::SetOfflineRequest { offline }))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::network_status_from_proto(status.get_ref()))
     }
 
     async fn accounts(&self, id: String) -> Result<Vec<api::SourceAccount>, ApiError> {

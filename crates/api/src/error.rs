@@ -101,10 +101,14 @@ pub enum ErrorReason {
     InvalidSmbUrl,
     /// A server address that is not an http(s) URL.
     InvalidServerUrl,
+    /// The internet is down, and the source needs it.
+    NetworkDown,
+    /// Offline mode is on, and this track has no downloaded or cached copy to play.
+    OfflineMode,
 }
 
 impl ErrorReason {
-    pub const ALL: [ErrorReason; 21] = [
+    pub const ALL: [ErrorReason; 23] = [
         Self::SettingLocked,
         Self::ConnectNotOffered,
         Self::ApiKeyMissing,
@@ -126,6 +130,8 @@ impl ErrorReason {
         Self::AppleMusicTokenRequired,
         Self::InvalidSmbUrl,
         Self::InvalidServerUrl,
+        Self::NetworkDown,
+        Self::OfflineMode,
     ];
 
     /// The i18n key every frontend says this reason with, so they all phrase it alike.
@@ -152,6 +158,8 @@ impl ErrorReason {
             Self::AppleMusicTokenRequired => "apple_music_token_required",
             Self::InvalidSmbUrl => "invalid_smb_url",
             Self::InvalidServerUrl => "invalid_server_url",
+            Self::NetworkDown => "error_network_down",
+            Self::OfflineMode => "error_offline_mode",
         }
     }
 }

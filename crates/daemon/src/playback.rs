@@ -3,6 +3,7 @@
 use player::decoder;
 use player::engine::SourceFactory;
 use server::playback_ref::ResolvedStreamRef;
+use server::stream::stream_buffer::{Captured, CompleteSink};
 
 /// Factory for a resolved network stream (radio, YT range/sequential,
 /// SoundCloud HLS, Apple Music fMP4, or a plain buffered stream).
@@ -18,8 +19,10 @@ pub(crate) fn network_factory(
     icy_tx: Option<tokio::sync::watch::Sender<server::stream::icy::IcyMeta>>,
     rt_handle: tokio::runtime::Handle,
     buffer_progress: Option<server::stream::stream_buffer::BufferProgressCallback>,
+    complete: Option<CompleteSink>,
 ) -> SourceFactory {
     Box::new(move || {
+        let mut complete = complete;
         let build = || -> std::io::Result<_> {
             if is_radio {
                 let stream = server::stream::stream_buffer::StreamBuffer::new(
@@ -36,8 +39,7 @@ pub(crate) fn network_factory(
                 Ok(decoder::from_stream_with_hint(stream, "ogg"))
             } else if let Some((fmt, range_safe)) = yt_format {
                 // YT: HTTP Range-backed source. Symphonia can seek freely
-                // (Matroska Cues at the end, scrub anywhere) and startup
-                // probes only fetch the ~512 KiB they need. A URL the
+                // (Matroska Cues at the end, scrub anywhere). A URL the
                 // resolver called range-safe can still have its deep ranges
                 // refused (issue #731), so the tail is checked first.
                 let open_ranged = || {
@@ -62,7 +64,10 @@ pub(crate) fn network_factory(
                         }
                     },
                 };
-                if let Some(range) = range {
+                if let Some(mut range) = range {
+                    if let Some(sink) = complete.take() {
+                        range.capture(sink);
+                    }
                     let len = Some(range.total_size());
                     let (source, mut hint) = decoder::from_stream_with_len(range, len);
                     hint.with_extension(fmt.extension());
@@ -71,13 +76,12 @@ pub(crate) fn network_factory(
                     // No-pot fallback: googlevideo 403s deep ranges, and the
                     // probe reads the webm tail — stream sequentially instead
                     // of failing outright (issue #386). No scrubbing.
-                    let stream = server::stream::stream_buffer::StreamBuffer::with_progress(
+                    let stream = server::stream::stream_buffer::StreamBuffer::capturing(
                         stream_url,
-                        false,
                         server::stream::stream_buffer::stream_client(yt_user_agent),
-                        None,
                         rt_handle,
                         buffer_progress,
+                        complete.take(),
                     );
                     stream.wait_for_response_headers();
                     if let Some(error) = stream.response_error() {
@@ -95,6 +99,12 @@ pub(crate) fn network_factory(
                 // into one in-memory buffer Symphonia can decode.
                 let bytes =
                     server::stream::hls_source::assemble(hls_url, yt_user_agent.as_deref())?;
+                if let Some(sink) = complete.take() {
+                    sink(Captured {
+                        bytes: bytes.clone(),
+                        content_type: Some("audio/mp4".into()),
+                    });
+                }
                 let len = Some(bytes.len() as u64);
                 let cursor = std::io::Cursor::new(bytes);
                 let (source, mut hint) = decoder::from_stream_with_len(cursor, len);
@@ -133,6 +143,7 @@ pub(crate) fn network_factory(
                     storefront.to_string(),
                     language.to_string(),
                 );
+                let sink = complete.take();
                 let track = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     rt_handle.block_on(server::applemusic::stream::resolve_and_decrypt(
                         &adam_id,
@@ -140,6 +151,7 @@ pub(crate) fn network_factory(
                         &storefront,
                         &language,
                         buffer_progress.clone(),
+                        sink,
                     ))
                 }))
                 .unwrap_or_else(|panic| {
@@ -165,19 +177,21 @@ pub(crate) fn network_factory(
                     yt_user_agent.clone(),
                     buffer_progress.clone(),
                 ) {
-                    Ok(range) => {
+                    Ok(mut range) => {
+                        if let Some(sink) = complete.take() {
+                            range.capture(sink);
+                        }
                         let len = Some(range.total_size());
                         Ok(decoder::from_stream_with_len(range, len))
                     }
                     Err(error) => {
                         tracing::debug!(%error, "HTTP ranges unavailable; using progressive stream");
-                        let stream = server::stream::stream_buffer::StreamBuffer::with_progress(
+                        let stream = server::stream::stream_buffer::StreamBuffer::capturing(
                             stream_url,
-                            false,
                             server::stream::stream_buffer::stream_client(yt_user_agent),
-                            None,
                             rt_handle,
                             buffer_progress,
+                            complete.take(),
                         );
                         stream.wait_for_response_headers();
                         if let Some(error) = stream.response_error() {

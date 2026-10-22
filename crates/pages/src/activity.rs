@@ -112,7 +112,7 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
     let subtitle = i18n::t("most_played_tracks");
 
     rsx! {
-        div { class: if cfg!(target_os = "android") { "px-3 pt-3 absolute inset-0 flex flex-col" } else if is_vaxry { "px-6 pt-6 absolute inset-0 flex flex-col" } else { "px-8 pt-8 absolute inset-0 flex flex-col" },
+        div { class: crate::layout::page_container_class(&settings.read().ui.ui_style),
             // The app header names the page and a phone has no room for the columns.
             if !cfg!(target_os = "android") {
                 div { class: "max-w-[1600px] mx-auto w-full shrink-0",

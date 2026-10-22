@@ -429,6 +429,9 @@ pub fn config_to_proto(value: &config::Settings) -> Config {
         tracing_enabled: system.tracing_enabled,
         auto_check_updates: system.auto_check_updates,
         minimize_to_tray: system.minimize_to_tray,
+        connectivity_check_urls: Some(StringList {
+            values: system.connectivity_check_urls.clone(),
+        }),
         show_source_toggle: ui.show_source_toggle,
         show_row_images: ui.show_row_images,
         volume_scroll_step: playback.volume_scroll_step,
@@ -468,6 +471,8 @@ pub fn config_to_proto(value: &config::Settings) -> Config {
         lyrics_depth_blur: lyrics.lyrics_depth_blur,
         lyrics_depth_blur_strength: u32::from(lyrics.lyrics_depth_blur_strength),
         sync_interval_minutes: Some(library.sync_interval_minutes),
+        offline_cache_enabled: Some(library.offline_cache_enabled),
+        offline_cache_max_bytes: Some(library.offline_cache_max_bytes),
         discord_presence: integrations.discord_presence,
         discord_presence_source: integrations.discord_presence_source,
         spotify_browser: spotify.spotify_browser.clone(),
@@ -536,6 +541,10 @@ pub fn config_from_proto(value: &Config) -> config::Settings {
             auto_fetch_covers: value.auto_fetch_covers,
             cover_fetch_strategy: fetch_strategy_from_proto(value.cover_fetch_strategy),
             offline_quality: offline_quality_from_proto(value.offline_quality),
+            offline_cache_enabled: value.offline_cache_enabled.unwrap_or(true),
+            offline_cache_max_bytes: value
+                .offline_cache_max_bytes
+                .unwrap_or(config::DEFAULT_OFFLINE_CACHE_MAX_BYTES),
             sync_interval_minutes: value
                 .sync_interval_minutes
                 .unwrap_or(config::DEFAULT_SYNC_INTERVAL_MINUTES),
@@ -561,6 +570,10 @@ pub fn config_from_proto(value: &Config) -> config::Settings {
             tracing_enabled: value.tracing_enabled,
             auto_check_updates: value.auto_check_updates,
             minimize_to_tray: value.minimize_to_tray,
+            connectivity_check_urls: match &value.connectivity_check_urls {
+                Some(list) => list.values.clone(),
+                None => config::System::default().connectivity_check_urls,
+            },
         },
     }
 }
@@ -607,6 +620,40 @@ mod tests {
         let restored = config_from_proto(&Config::default()).playback;
         assert_eq!(restored.stream_quality, config::StreamQuality::High);
         assert!(!restored.autoplay_radio && !restored.skip_explicit);
+    }
+
+    #[test]
+    fn connectivity_checks_survive_the_wire_and_an_older_peer_keeps_the_defaults() {
+        for urls in [Vec::new(), vec!["https://check.example/up".to_string()]] {
+            let mut original = config::Settings::default();
+            original.system.connectivity_check_urls = urls.clone();
+            let bytes = config_to_proto(&original).encode_to_vec();
+            let restored = config_from_proto(&Config::decode(bytes.as_slice()).unwrap());
+            assert_eq!(restored.system.connectivity_check_urls, urls);
+        }
+        let older = config_from_proto(&Config::default());
+        assert_eq!(
+            older.system.connectivity_check_urls,
+            config::DEFAULT_CONNECTIVITY_CHECK_URLS
+        );
+    }
+
+    #[test]
+    fn the_offline_cache_settings_survive_the_wire_and_an_older_peer_keeps_the_defaults() {
+        let mut original = config::Settings::default();
+        original.library.offline_cache_enabled = false;
+        original.library.offline_cache_max_bytes = 2_000_000_000;
+        let bytes = config_to_proto(&original).encode_to_vec();
+        let restored = config_from_proto(&Config::decode(bytes.as_slice()).unwrap());
+        assert!(!restored.library.offline_cache_enabled);
+        assert_eq!(restored.library.offline_cache_max_bytes, 2_000_000_000);
+
+        let older = config_from_proto(&Config::default());
+        assert!(older.library.offline_cache_enabled, "on unless turned off");
+        assert_eq!(
+            older.library.offline_cache_max_bytes,
+            config::DEFAULT_OFFLINE_CACHE_MAX_BYTES
+        );
     }
 
     /// Every setting is on the wire now, the daemon-owned ones included, so every sample edit survives the round trip.

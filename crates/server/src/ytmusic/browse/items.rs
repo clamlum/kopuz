@@ -49,16 +49,16 @@ enum Target {
 }
 
 fn target(endpoint: &Value) -> Option<Target> {
-    let browse = &endpoint["browseEndpoint"];
-    let id = browse["browseId"].as_str()?;
-    // An album's link carries params too, but only a channel's pick a view of it.
-    let view = browse["params"].is_string();
+    let id = endpoint["browseEndpoint"]["browseId"].as_str()?;
+    // Home's Listen again tiles and bylines link a channel with params too
+    // (`ggMEgAL5BQ%3D%3D`), so params don't make a channel link a view of it.
+    // Shelf "more" links to an artist's Singles go through `PageLink::endpoint`.
     Some(match id {
         _ if id.starts_with("MPRE") => Target::Album(id.to_string()),
         _ if id.starts_with("MPSP") => Target::Podcast(id.to_string()),
         _ if id.starts_with("MPED") => Target::Episode(id.to_string()),
         _ if id.starts_with("MPLAUC") => Target::Artist(id["MPLA".len()..].to_string()),
-        _ if id.starts_with("UC") && !view => Target::Artist(id.to_string()),
+        _ if id.starts_with("UC") => Target::Artist(id.to_string()),
         _ if id.starts_with("VL") => Target::Playlist(id["VL".len()..].to_string()),
         _ => Target::Other,
     })
@@ -596,5 +596,23 @@ mod tests {
     fn a_library_artist_link_is_the_channel() {
         let endpoint = json!({"browseEndpoint": {"browseId": "MPLAUCabc"}});
         assert_eq!(target(&endpoint), Some(Target::Artist("UCabc".into())));
+    }
+
+    #[test]
+    fn a_listen_again_artist_tile_is_the_artist() {
+        let tile = json!({
+            "title": {"runs": [{"text": "nihmune"}]},
+            "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "UCabc",
+                "params": "ggMEgAL5BQ%3D%3D",
+                "browseEndpointContextSupportedConfigs": {
+                    "browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}
+                }
+            }}
+        });
+        assert!(matches!(
+            two_row_item(&tile),
+            Some(DiscoverItem::Artist { channel_id, .. }) if channel_id == "UCabc"
+        ));
     }
 }

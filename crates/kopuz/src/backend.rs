@@ -17,10 +17,18 @@ use daemon::boot::{Core, CoreArgs};
 
 static CORE: OnceLock<Core> = OnceLock::new();
 
+/// What the app was launched with that the core it hosts takes: `--offline` starts it in offline mode.
+pub fn core_args(argv: impl IntoIterator<Item = String>) -> CoreArgs {
+    CoreArgs {
+        offline: argv.into_iter().any(|arg| arg == "--offline"),
+        ..CoreArgs::default()
+    }
+}
+
 /// Build the core and start serving it. Blocks until the library is open and
 /// the config is known, because the tracing subscriber and the window are
 /// built from that config before the UI exists.
-pub fn start() -> Result<&'static Core, String> {
+pub fn start(args: CoreArgs) -> Result<&'static Core, String> {
     let (ready_tx, ready_rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("kopuz-core".into())
@@ -37,7 +45,7 @@ pub fn start() -> Result<&'static Core, String> {
                 }
             };
             runtime.block_on(async move {
-                let core = match daemon::boot::assemble(&CoreArgs::default()).await {
+                let core = match daemon::boot::assemble(&args).await {
                     Ok(core) => core,
                     Err(error) => {
                         let _ = ready_tx.send(Err(error.to_string()));
@@ -54,6 +62,20 @@ pub fn start() -> Result<&'static Core, String> {
                         }
                     };
                     if let Err(error) = utils::set_artwork_endpoint(endpoint) {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let endpoint = match crate::video_http::start().await {
+                        Ok(endpoint) => endpoint,
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(format!("video server: {error}")));
+                            return;
+                        }
+                    };
+                    if let Err(error) = utils::set_video_endpoint(endpoint) {
                         let _ = ready_tx.send(Err(error));
                         return;
                     }
@@ -186,5 +208,22 @@ mod tests {
         let _other = std::os::unix::net::UnixListener::bind(&theirs).expect("bind");
         release_socket();
         assert!(theirs.exists(), "a second release touches nothing");
+    }
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::core_args;
+
+    fn args(argv: &[&str]) -> daemon::boot::CoreArgs {
+        core_args(argv.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn offline_starts_the_hosted_core_offline() {
+        assert!(!args(&[]).offline);
+        assert!(args(&["--offline"]).offline);
+        assert!(args(&["--something", "--offline"]).offline);
+        assert_eq!(args(&["--offline"]).db_path, None);
     }
 }

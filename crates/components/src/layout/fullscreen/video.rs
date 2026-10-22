@@ -82,7 +82,10 @@ document.addEventListener("visibilitychange", () => {
 let anchor = null;
 let reported = 0;
 let lead = 0;
-let settling = false;
+// WebKitGTK reports a seek's target as currentTime until the pipeline plays again,
+// which on a slow CPU outlasts several ticks. Measured then, the stall reads as
+// drift and seeks again, forever. So a seek lands only once playback moves past it.
+let landing = null;
 const tick = () => {
     if (!video.isConnected) return;
     if (anchor && video.readyState >= 1 && !video.seeking) {
@@ -91,17 +94,25 @@ const tick = () => {
         const drift = video.currentTime - target;
         if (anchor.playing && video.paused) video.play().catch(() => {});
         if (!anchor.playing && !video.paused) video.pause();
-        if (settling && anchor.playing) {
-            lead = Math.min(1, Math.max(0, lead - drift));
+        if (landing) {
+            const moved = !anchor.playing || video.currentTime > landing.time + 0.05;
+            if (!moved && now - landing.at < 3000) {
+                setTimeout(tick, 250);
+                return;
+            }
+            if (moved && landing.learn && anchor.playing) {
+                lead = Math.min(1, Math.max(0, lead - drift));
+            }
+            landing = null;
         }
-        settling = false;
         if (anchor.playing && now - reported > 5000) {
             reported = now;
             dioxus.send(Math.round(drift * 1000));
         }
         if (Math.abs(drift) > (anchor.playing ? 0.15 : 0.05)) {
-            video.currentTime = Math.max(0, target + (anchor.playing ? lead : 0));
-            settling = Math.abs(drift) < 5;
+            const time = Math.max(0, target + (anchor.playing ? lead : 0));
+            video.currentTime = time;
+            landing = { time, at: now, learn: Math.abs(drift) < 5 };
         }
     }
     setTimeout(tick, 250);

@@ -10,18 +10,22 @@
 //! exactly one way to get a picture and one that cannot fetch a URL itself
 //! still works.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use api::{
     ApiError, ArtworkRef, ArtworkTarget, CatalogActions, CatalogChip, CatalogDetail,
     CatalogDetailRequest, CatalogHeader, CatalogItem, CatalogItemKind, CatalogPage, CatalogShelf,
-    ShelfLayout, Table,
+    DiscoverRows, ForYou, ForYouUnavailable, ShelfLayout, Table,
 };
+use rand::seq::SliceRandom;
 use server::source::RadioPage;
 use server::ytmusic::discover::{
     BrowsePage, DiscoverHome, DiscoverItem, DiscoverShelf, ItemActions, LinkKind, PageHeader,
 };
+use tokio::sync::OnceCell;
 
 use server::source::MediaSource;
 
@@ -32,11 +36,39 @@ use crate::sources::source_error;
 /// Roughly a few pages of browsing; the oldest tiles fall out.
 const MAX_REMEMBERED_TILES: usize = 4096;
 
+/// How many liked tracks seed the "For you" mix.
+const FOR_YOU_SEEDS: usize = 5;
+/// How many songs from the top of each seed's radio join it.
+const FOR_YOU_PER_RADIO: usize = 3;
+
+/// How many tiles a Discover row picks from the library.
+const DISCOVER_ROW_LIMIT: usize = 24;
+/// A favorite neither played nor liked for this long is forgotten.
+const FORGOTTEN_AFTER: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+/// How many of the most played tracks count as favorites beside the liked ones.
+const MOST_PLAYED: usize = 100;
+
+/// One build per source, shared by every caller that asks while it runs.
+type Build<T> = Arc<OnceCell<Result<T, ApiError>>>;
+type Builds<T> = Mutex<HashMap<config::Source, Build<T>>>;
+type ForYouMixes = Builds<Vec<reader::Track>>;
+type DiscoverPicks = Builds<DiscoverPick>;
+
+/// A source's Discover rows as the source and the library gave them, made wire rows on each ask.
+#[derive(Debug, Clone, Default)]
+struct DiscoverPick {
+    mixes: Vec<DiscoverItem>,
+    never_played: Vec<reader::Album>,
+    forgotten: Vec<reader::Track>,
+}
+
 pub struct CatalogService {
     db: db::Db,
     session: SessionHandle,
     library: Arc<LibraryService>,
     thumbnails: Mutex<Thumbnails>,
+    for_you: ForYouMixes,
+    discover: DiscoverPicks,
 }
 
 #[derive(Default)]
@@ -52,6 +84,8 @@ impl CatalogService {
             session,
             library,
             thumbnails: Mutex::new(Thumbnails::default()),
+            for_you: Mutex::default(),
+            discover: Mutex::default(),
         })
     }
 
@@ -413,7 +447,8 @@ impl CatalogService {
                     monthly_listeners: artist.monthly_listeners,
                     description: artist.description,
                     artwork,
-                    playback_id: artist.shuffle_playlist_id,
+                    shuffle_radio: artist.shuffle_ref,
+                    mix_radio: artist.mix_ref,
                     shelves: page.shelves,
                     continuation: page.continuation,
                     header: CatalogHeader::Artist,
@@ -755,6 +790,247 @@ impl CatalogService {
             .transient_track(key)
             .ok_or_else(|| ApiError::not_found("unknown radio seed"))
     }
+
+    pub async fn for_you(&self) -> Result<ForYou, ApiError> {
+        self.for_you_mix(false).await
+    }
+
+    pub async fn refresh_for_you(&self) -> Result<ForYou, ApiError> {
+        self.for_you_mix(true).await
+    }
+
+    async fn for_you_mix(&self, fresh: bool) -> Result<ForYou, ApiError> {
+        let source = self.source();
+        let track_radio = source.capabilities().radio.track;
+        let likes = match track_radio {
+            true => source.favorites().await.map_err(source_error)?,
+            false => Vec::new(),
+        };
+        if let Some(reason) = for_you_unavailable(track_radio, &likes) {
+            return Ok(ForYou::Unavailable(reason));
+        }
+        let build = held_build(&self.for_you, source.source(), fresh);
+        let built = build
+            .get_or_init(|| {
+                mix_for_you(likes, |seed| {
+                    let source = &source;
+                    async move { self.radio_songs(source.as_ref(), &seed).await }
+                })
+            })
+            .await
+            .clone();
+        match built {
+            Ok(tracks) => {
+                self.library.register_transient(&tracks);
+                let offline = self.session.offline();
+                Ok(ForYou::Mix(
+                    tracks
+                        .iter()
+                        .map(|track| crate::wire::track_info(track, offline))
+                        .collect(),
+                ))
+            }
+            Err(error) => {
+                forget_failed(&self.for_you, source.source(), &build);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn discover_rows(&self) -> Result<DiscoverRows, ApiError> {
+        self.discover(false).await
+    }
+
+    pub async fn refresh_discover_rows(&self) -> Result<DiscoverRows, ApiError> {
+        self.discover(true).await
+    }
+
+    async fn discover(&self, fresh: bool) -> Result<DiscoverRows, ApiError> {
+        let source = self.source();
+        let build = held_build(&self.discover, source.source(), fresh);
+        let built = build
+            .get_or_init(|| pick_discover(source.as_ref(), &self.db, unix_now()))
+            .await
+            .clone();
+        match built {
+            Ok(pick) => {
+                let offline = self.session.offline();
+                Ok(DiscoverRows {
+                    mixes: pick
+                        .mixes
+                        .into_iter()
+                        .map(|item| self.item(item, source.as_ref()))
+                        .collect(),
+                    never_played: pick
+                        .never_played
+                        .iter()
+                        .map(crate::library::album_info)
+                        .collect(),
+                    forgotten_favorites: pick
+                        .forgotten
+                        .iter()
+                        .map(|track| crate::wire::track_info(track, offline))
+                        .collect(),
+                })
+            }
+            Err(error) => {
+                forget_failed(&self.discover, source.source(), &build);
+                Err(error)
+            }
+        }
+    }
+
+    /// A seed's radio as its source ranks it; unlike [`Self::track_radio`] the seed is not pinned, since the mix drops it.
+    async fn radio_songs(
+        &self,
+        source: &dyn MediaSource,
+        seed: &str,
+    ) -> Result<Vec<reader::Track>, ApiError> {
+        let mut page = source.start_radio(seed).await.map_err(source_error)?;
+        crate::wire::listed_by(source.source(), &mut page.tracks);
+        Ok(page.tracks)
+    }
+}
+
+fn for_you_unavailable(track_radio: bool, likes: &[String]) -> Option<ForYouUnavailable> {
+    match (track_radio, likes.is_empty()) {
+        (false, _) => Some(ForYouUnavailable::NoTrackRadio),
+        (true, true) => Some(ForYouUnavailable::NoLikes),
+        (true, false) => None,
+    }
+}
+
+/// The build a request for `source`'s rows joins: the held one, or a new one when there is none or `fresh` asks to drop it.
+fn held_build<T>(builds: &Builds<T>, source: &config::Source, fresh: bool) -> Build<T> {
+    let mut builds = builds.lock().unwrap_or_else(PoisonError::into_inner);
+    if fresh {
+        builds.remove(source);
+    }
+    builds.entry(source.clone()).or_default().clone()
+}
+
+/// A failed build is not one to keep: the next request tries again, unless a refresh already replaced it.
+fn forget_failed<T>(builds: &Builds<T>, source: &config::Source, build: &Build<T>) {
+    let mut builds = builds.lock().unwrap_or_else(PoisonError::into_inner);
+    if builds
+        .get(source)
+        .is_some_and(|held| Arc::ptr_eq(held, build))
+    {
+        builds.remove(source);
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64)
+}
+
+fn db_error(error: db::DbError) -> ApiError {
+    ApiError::internal(format!("database error: {error}"))
+}
+
+/// The source's mixes, and where kopuz's play counts are its whole history, a pick of unplayed albums and forgotten favorites as of `now`.
+async fn pick_discover(
+    source: &dyn MediaSource,
+    db: &db::Db,
+    now: i64,
+) -> Result<DiscoverPick, ApiError> {
+    let mixes = source.personal_mixes().await.map_err(source_error)?;
+    if !source.capabilities().complete_play_history {
+        return Ok(DiscoverPick {
+            mixes,
+            ..DiscoverPick::default()
+        });
+    }
+    let key = source.source();
+    let mut never_played = db.unplayed_albums(key).await.map_err(db_error)?;
+    never_played.shuffle(&mut rand::rng());
+    never_played.truncate(DISCOVER_ROW_LIMIT);
+    let likes = db
+        .favorites_liked_at(key.as_str())
+        .await
+        .map_err(db_error)?;
+    let plays = db.play_history(key).await.map_err(db_error)?;
+    let cutoff = now.saturating_sub(FORGOTTEN_AFTER.as_secs() as i64);
+    let keys = forgotten_keys(&likes, &plays, cutoff);
+    let mut forgotten = db.tracks_by_keys(key, &keys).await.map_err(db_error)?;
+    forgotten.shuffle(&mut rand::rng());
+    forgotten.truncate(DISCOVER_ROW_LIMIT);
+    Ok(DiscoverPick {
+        mixes,
+        never_played,
+        forgotten,
+    })
+}
+
+/// The liked tracks and the [`MOST_PLAYED`] most played whose last play or like came before `cutoff`.
+fn forgotten_keys(likes: &[(String, i64)], plays: &[db::PlayRecord], cutoff: i64) -> Vec<String> {
+    let played: HashMap<&str, Option<i64>> = plays
+        .iter()
+        .map(|record| (record.track_key.as_str(), record.last_played_at))
+        .collect();
+    let liked: HashMap<&str, i64> = likes.iter().map(|(key, at)| (key.as_str(), *at)).collect();
+    let candidates = likes.iter().map(|(key, _)| key.as_str()).chain(
+        plays
+            .iter()
+            .take(MOST_PLAYED)
+            .map(|record| record.track_key.as_str()),
+    );
+    let mut seen = HashSet::new();
+    let mut forgotten = Vec::new();
+    for key in candidates {
+        if !seen.insert(key) {
+            continue;
+        }
+        // An undated play had left the recent history before times were kept, so it counts as long ago.
+        let last_play = played.get(key).copied().flatten();
+        let touched = last_play.max(liked.get(key).copied());
+        if touched.is_none_or(|at| at < cutoff) {
+            forgotten.push(key.to_string());
+        }
+    }
+    forgotten
+}
+
+/// Radios from up to [`FOR_YOU_SEEDS`] random likes, the top [`FOR_YOU_PER_RADIO`] of each that are not liked, without repeats, shuffled.
+async fn mix_for_you<F, Fut>(
+    mut likes: Vec<String>,
+    radio: F,
+) -> Result<Vec<reader::Track>, ApiError>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<Vec<reader::Track>, ApiError>>,
+{
+    let liked: HashSet<String> = likes.iter().cloned().collect();
+    likes.shuffle(&mut rand::rng());
+    likes.truncate(FOR_YOU_SEEDS);
+    let radios = futures_util::future::join_all(likes.iter().cloned().map(radio)).await;
+    let mut seen = HashSet::new();
+    let mut tracks = Vec::new();
+    let mut failure = None;
+    let mut answered = false;
+    for (seed, outcome) in likes.iter().zip(radios) {
+        match outcome {
+            Ok(songs) => {
+                answered = true;
+                let top = songs
+                    .into_iter()
+                    .filter(|track| !liked.contains(track.id.key().as_ref()))
+                    .take(FOR_YOU_PER_RADIO);
+                tracks.extend(top.filter(|track| seen.insert(track.id.key().into_owned())));
+            }
+            Err(error) => {
+                tracing::warn!(%error, seed, "a For you radio failed");
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    if let (false, Some(error)) = (answered, failure) {
+        return Err(error);
+    }
+    tracks.shuffle(&mut rand::rng());
+    Ok(tracks)
 }
 
 /// The library's way to the catalog, so tests can build a queue from a catalog id offline.
@@ -902,5 +1178,497 @@ mod tests {
 
         assert!(take_seed(&mut mix, "seed").is_none());
         assert_eq!(mix.len(), 2, "nothing was taken");
+    }
+
+    mod for_you {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        use api::{ApiError, ErrorCode, ForYouUnavailable};
+
+        use super::super::{
+            FOR_YOU_PER_RADIO, FOR_YOU_SEEDS, ForYouMixes, for_you_unavailable, forget_failed,
+            held_build, mix_for_you,
+        };
+        use super::track;
+
+        fn likes(keys: &[&str]) -> Vec<String> {
+            keys.iter().map(|key| key.to_string()).collect()
+        }
+
+        fn sorted(tracks: &[reader::Track]) -> Vec<String> {
+            let mut keys: Vec<String> = tracks.iter().map(|t| t.id.key().into_owned()).collect();
+            keys.sort();
+            keys
+        }
+
+        type Radio = std::future::Ready<Result<Vec<reader::Track>, ApiError>>;
+        type Asked = Arc<Mutex<Vec<String>>>;
+
+        /// A radio per seed from a fixed table; a seed missing from it fails as unreachable.
+        fn radios(table: &[(&str, &[&str])]) -> (impl Fn(String) -> Radio, Asked) {
+            let table: HashMap<String, Vec<String>> = table
+                .iter()
+                .map(|(seed, songs)| (seed.to_string(), likes(songs)))
+                .collect();
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let log = asked.clone();
+            let radio = move |seed: String| {
+                log.lock().unwrap().push(seed.clone());
+                std::future::ready(match table.get(&seed) {
+                    Some(songs) => Ok(songs.iter().map(|key| track(key)).collect()),
+                    None => Err(ApiError::new(ErrorCode::SourceUnreachable, "offline")),
+                })
+            };
+            (radio, asked)
+        }
+
+        #[tokio::test]
+        async fn each_radio_adds_its_top_three_without_the_seed() {
+            let (radio, _) = radios(&[("a", &["a", "r1", "r2", "r3", "r4"])]);
+
+            let mix = mix_for_you(likes(&["a"]), radio).await.unwrap();
+
+            assert_eq!(FOR_YOU_PER_RADIO, 3);
+            assert_eq!(sorted(&mix), ["r1", "r2", "r3"]);
+        }
+
+        #[tokio::test]
+        async fn liked_tracks_are_left_out_and_the_walk_goes_past_them() {
+            let (radio, _) = radios(&[("a", &["b", "r1", "a", "b", "r2", "r3", "r4"])]);
+
+            let mix = mix_for_you(likes(&["a", "b"]), radio).await.unwrap();
+
+            assert_eq!(sorted(&mix), ["r1", "r2", "r3"]);
+        }
+
+        #[tokio::test]
+        async fn a_radio_of_only_liked_tracks_adds_none() {
+            let (radio, _) = radios(&[("a", &["a", "b", "c"]), ("b", &["a", "c"]), ("c", &["b"])]);
+
+            let mix = mix_for_you(likes(&["a", "b", "c"]), radio).await.unwrap();
+
+            assert!(mix.is_empty(), "{:?}", sorted(&mix));
+        }
+
+        #[tokio::test]
+        async fn a_song_two_radios_share_is_mixed_in_once() {
+            let (radio, _) = radios(&[("a", &["x", "y", "z"]), ("b", &["y", "z", "w"])]);
+
+            let mix = mix_for_you(likes(&["a", "b"]), radio).await.unwrap();
+
+            assert_eq!(sorted(&mix), ["w", "x", "y", "z"]);
+        }
+
+        #[tokio::test]
+        async fn five_random_likes_seed_it_and_fewer_all_do() {
+            let songs: &[&str] = &["s1", "s2", "s3"];
+            let many = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8"];
+            let table: Vec<(&str, &[&str])> = many.iter().map(|seed| (*seed, songs)).collect();
+            let (radio, asked) = radios(&table);
+
+            mix_for_you(likes(&many), radio).await.unwrap();
+
+            let mut asked = asked.lock().unwrap().clone();
+            asked.sort();
+            asked.dedup();
+            assert_eq!(FOR_YOU_SEEDS, 5);
+            assert_eq!(asked.len(), FOR_YOU_SEEDS, "{asked:?}");
+            assert!(asked.iter().all(|seed| many.contains(&seed.as_str())));
+
+            let (radio, asked) = radios(&table);
+            mix_for_you(likes(&many[..3]), radio).await.unwrap();
+            let mut asked = asked.lock().unwrap().clone();
+            asked.sort();
+            assert_eq!(asked, ["l1", "l2", "l3"]);
+        }
+
+        #[tokio::test]
+        async fn the_radios_that_answered_make_the_mix_when_others_fail() {
+            let (radio, _) = radios(&[("b", &["x", "y"])]);
+
+            let mix = mix_for_you(likes(&["a", "b", "c"]), radio).await.unwrap();
+
+            assert_eq!(sorted(&mix), ["x", "y"]);
+        }
+
+        #[tokio::test]
+        async fn every_radio_failing_is_the_radios_error() {
+            let (radio, _) = radios(&[]);
+
+            let error = mix_for_you(likes(&["a", "b"]), radio).await.unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::SourceUnreachable);
+        }
+
+        #[test]
+        fn no_track_radio_or_no_likes_hides_the_row() {
+            assert_eq!(
+                for_you_unavailable(false, &likes(&["a"])),
+                Some(ForYouUnavailable::NoTrackRadio)
+            );
+            assert_eq!(
+                for_you_unavailable(true, &[]),
+                Some(ForYouUnavailable::NoLikes)
+            );
+            assert_eq!(for_you_unavailable(true, &likes(&["a"])), None);
+        }
+
+        fn server(id: &str) -> config::Source {
+            config::Source::Server(id.into())
+        }
+
+        async fn build_on(
+            mixes: &ForYouMixes,
+            source: &config::Source,
+            fresh: bool,
+            builds: &Mutex<u32>,
+        ) -> Result<Vec<reader::Track>, ApiError> {
+            let build = held_build(mixes, source, fresh);
+            build
+                .get_or_init(|| async {
+                    tokio::task::yield_now().await;
+                    let mut count = builds.lock().unwrap();
+                    *count += 1;
+                    Ok(vec![track(&format!("build-{count}"))])
+                })
+                .await
+                .clone()
+        }
+
+        #[tokio::test]
+        async fn the_mix_holds_until_a_refresh_builds_another() {
+            let mixes = ForYouMixes::default();
+            let builds = Mutex::new(0);
+            let yt = server("yt");
+
+            let first = build_on(&mixes, &yt, false, &builds).await.unwrap();
+            let again = build_on(&mixes, &yt, false, &builds).await.unwrap();
+            assert_eq!(sorted(&first), sorted(&again));
+            assert_eq!(*builds.lock().unwrap(), 1);
+
+            let refreshed = build_on(&mixes, &yt, true, &builds).await.unwrap();
+            assert_eq!(sorted(&refreshed), ["build-2"]);
+            let after = build_on(&mixes, &yt, false, &builds).await.unwrap();
+            assert_eq!(
+                sorted(&after),
+                ["build-2"],
+                "the refreshed mix is the one held"
+            );
+
+            let other = build_on(&mixes, &server("other"), false, &builds)
+                .await
+                .unwrap();
+            assert_eq!(
+                sorted(&other),
+                ["build-3"],
+                "each source has a mix of its own"
+            );
+        }
+
+        #[tokio::test]
+        async fn requests_while_it_builds_share_the_one_build() {
+            let mixes = ForYouMixes::default();
+            let builds = Mutex::new(0);
+            let yt = server("yt");
+
+            let (a, b) = tokio::join!(
+                build_on(&mixes, &yt, false, &builds),
+                build_on(&mixes, &yt, false, &builds)
+            );
+
+            assert_eq!(sorted(&a.unwrap()), sorted(&b.unwrap()));
+            assert_eq!(*builds.lock().unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_failed_build_is_not_kept() {
+            let mixes = ForYouMixes::default();
+            let yt = server("yt");
+            let build = held_build(&mixes, &yt, false);
+            build
+                .get_or_init(|| async { Err(ApiError::internal("down")) })
+                .await;
+
+            forget_failed(&mixes, &yt, &build);
+
+            assert!(!held_build(&mixes, &yt, false).initialized());
+        }
+
+        #[tokio::test]
+        async fn a_late_failure_leaves_a_refreshed_build_alone() {
+            let mixes = ForYouMixes::default();
+            let yt = server("yt");
+            let stale = held_build(&mixes, &yt, false);
+            let refreshed = held_build(&mixes, &yt, true);
+
+            forget_failed(&mixes, &yt, &stale);
+
+            assert!(Arc::ptr_eq(&refreshed, &held_build(&mixes, &yt, false)));
+        }
+    }
+
+    mod discover {
+        use std::sync::Arc;
+
+        use super::super::{
+            DISCOVER_ROW_LIMIT, DiscoverPicks, FORGOTTEN_AFTER, MOST_PLAYED, forgotten_keys,
+            held_build, pick_discover,
+        };
+        use super::track;
+
+        const DAY: i64 = 24 * 60 * 60;
+        const NOW: i64 = 1_800_000_000;
+
+        fn cutoff() -> i64 {
+            NOW - FORGOTTEN_AFTER.as_secs() as i64
+        }
+
+        fn played(key: &str, count: u64, at: Option<i64>) -> db::PlayRecord {
+            db::PlayRecord {
+                track_key: key.to_string(),
+                count,
+                last_played_at: at,
+            }
+        }
+
+        fn sorted(mut keys: Vec<String>) -> Vec<String> {
+            keys.sort();
+            keys
+        }
+
+        #[test]
+        fn the_cutoff_is_three_months() {
+            assert_eq!(FORGOTTEN_AFTER.as_secs() as i64, 90 * DAY);
+        }
+
+        #[test]
+        fn a_like_or_a_top_play_untouched_since_the_cutoff_is_forgotten() {
+            let old = cutoff() - DAY;
+            let recent = cutoff() + DAY;
+            let likes = vec![
+                ("liked-unplayed".to_string(), old),
+                ("liked-lately".to_string(), recent),
+                ("liked-played-lately".to_string(), old),
+                ("liked-played-long-ago".to_string(), old),
+                ("liked-played-undated".to_string(), old),
+                ("liked-lately-played-undated".to_string(), recent),
+            ];
+            let plays = vec![
+                played("top-long-ago", 50, Some(old)),
+                played("top-lately", 40, Some(recent)),
+                played("top-undated", 35, None),
+                played("liked-played-lately", 30, Some(recent)),
+                played("liked-played-long-ago", 20, Some(old)),
+                played("liked-played-undated", 10, None),
+                played("liked-lately-played-undated", 5, None),
+            ];
+
+            let forgotten = forgotten_keys(&likes, &plays, cutoff());
+
+            assert_eq!(
+                sorted(forgotten),
+                [
+                    "liked-played-long-ago",
+                    "liked-played-undated",
+                    "liked-unplayed",
+                    "top-long-ago",
+                    "top-undated",
+                ]
+            );
+        }
+
+        /// What the upgrade left: a play still in the recent history was stamped then, every older one is undated.
+        #[test]
+        fn a_recent_play_is_not_forgotten_but_an_undated_one_is_and_a_new_like_is_not() {
+            let upgraded = NOW - DAY;
+            let plays = vec![
+                played("in-the-recent-history", 9, Some(upgraded)),
+                played("older-than-the-history", 8, None),
+            ];
+            let likes = vec![("just-liked".to_string(), NOW)];
+
+            let forgotten = forgotten_keys(&likes, &plays, cutoff());
+
+            assert_eq!(forgotten, ["older-than-the-history"]);
+        }
+
+        #[test]
+        fn only_the_most_played_count_beside_the_likes() {
+            let old = cutoff() - DAY;
+            let plays: Vec<db::PlayRecord> = (0..=MOST_PLAYED)
+                .map(|n| played(&format!("t{n:03}"), (1000 - n) as u64, Some(old)))
+                .collect();
+
+            let forgotten = forgotten_keys(&[], &plays, cutoff());
+
+            assert_eq!(forgotten.len(), MOST_PLAYED);
+            let last = format!("t{MOST_PLAYED:03}");
+            assert!(!forgotten.contains(&last), "{last} is past the top");
+            let liked_too = forgotten_keys(&[(last.clone(), old)], &plays, cutoff());
+            assert!(
+                liked_too.contains(&last),
+                "a like counts whatever its plays"
+            );
+        }
+
+        struct Library {
+            _dir: tempfile::TempDir,
+            db: db::Db,
+        }
+
+        fn album(id: &str) -> reader::Album {
+            reader::Album {
+                id: id.to_string(),
+                title: id.to_string(),
+                artist: "Ada".into(),
+                genre: String::new(),
+                year: 0,
+                cover_path: None,
+                manual_cover: false,
+                artist_id: None,
+                artist_key: None,
+            }
+        }
+
+        /// One track per album on `source`: `/a` on al-a and so on; `/a` played and liked, `/b` liked.
+        async fn library(source: &config::Source, albums: &[&str]) -> Library {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db = db::init(&dir.path().join("discover.db")).await.expect("db");
+            let tracks: Vec<reader::Track> = albums
+                .iter()
+                .map(|name| reader::Track {
+                    album_id: format!("al-{name}"),
+                    ..track(&format!("/{name}"))
+                })
+                .collect();
+            db.upsert_tracks(source, &tracks).await.expect("tracks");
+            let rows: Vec<reader::Album> = albums
+                .iter()
+                .map(|name| album(&format!("al-{name}")))
+                .collect();
+            db.upsert_albums(source, &rows).await.expect("albums");
+            db.bump_listen_count(source, "/a").await.expect("play");
+            db.set_favorite(source.as_str(), "/a", true)
+                .await
+                .expect("like");
+            db.set_favorite(source.as_str(), "/b", true)
+                .await
+                .expect("like");
+            Library { _dir: dir, db }
+        }
+
+        fn ids(albums: &[reader::Album]) -> Vec<String> {
+            sorted(albums.iter().map(|album| album.id.clone()).collect())
+        }
+
+        fn keys(tracks: &[reader::Track]) -> Vec<String> {
+            sorted(
+                tracks
+                    .iter()
+                    .map(|track| track.id.key().into_owned())
+                    .collect(),
+            )
+        }
+
+        #[tokio::test]
+        async fn a_folder_library_offers_its_unplayed_albums_and_its_forgotten_favorites() {
+            let local = config::Source::default();
+            let library = library(&local, &["a", "b", "c"]).await;
+            let source =
+                server::source::active(library.db.clone(), &server::sources::Sources::default());
+            assert!(source.capabilities().complete_play_history);
+
+            let today = pick_discover(source.as_ref(), &library.db, super::super::unix_now())
+                .await
+                .expect("rows");
+            assert!(today.mixes.is_empty(), "a folder makes no mixes");
+            assert_eq!(ids(&today.never_played), ["al-b", "al-c"]);
+            assert!(
+                today.forgotten.is_empty(),
+                "everything was touched just now"
+            );
+
+            let later = super::super::unix_now() + FORGOTTEN_AFTER.as_secs() as i64 + DAY;
+            let then = pick_discover(source.as_ref(), &library.db, later)
+                .await
+                .expect("rows");
+            assert_eq!(keys(&then.forgotten), ["/a", "/b"]);
+        }
+
+        #[tokio::test]
+        async fn a_server_whose_plays_kopuz_only_partly_sees_gets_no_play_stat_rows() {
+            let id = "navi";
+            let mut server = config::MusicServer::new_with_service(
+                "Navidrome".into(),
+                "http://127.0.0.1:9".into(),
+                config::MusicService::Subsonic,
+            );
+            server.id = Some(id.into());
+            server.access_token = Some("token".into());
+            server.user_id = Some("ada".into());
+            let sources = server::sources::Sources {
+                server: Some(server),
+                active: config::Source::Server(id.into()),
+                ..Default::default()
+            };
+            let library = library(&sources.active, &["a", "b", "c"]).await;
+            let source = server::source::active(library.db.clone(), &sources);
+            assert!(!source.capabilities().complete_play_history);
+
+            let later = super::super::unix_now() + FORGOTTEN_AFTER.as_secs() as i64 + DAY;
+            let rows = pick_discover(source.as_ref(), &library.db, later)
+                .await
+                .expect("rows");
+
+            assert!(rows.mixes.is_empty());
+            assert!(
+                rows.never_played.is_empty(),
+                "its stats are not the whole history"
+            );
+            assert!(rows.forgotten.is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_big_library_is_cut_to_one_row() {
+            let local = config::Source::default();
+            let names: Vec<String> = (0..DISCOVER_ROW_LIMIT + 10)
+                .map(|n| format!("n{n}"))
+                .collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            let library = library(&local, &names).await;
+            let source =
+                server::source::active(library.db.clone(), &server::sources::Sources::default());
+
+            let rows = pick_discover(source.as_ref(), &library.db, super::super::unix_now())
+                .await
+                .expect("rows");
+
+            assert_eq!(rows.never_played.len(), DISCOVER_ROW_LIMIT);
+        }
+
+        #[tokio::test]
+        async fn the_rows_hold_until_a_refresh_picks_again() {
+            let picks = DiscoverPicks::default();
+            let local = config::Source::default();
+            let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let build = |fresh: bool| {
+                let built = built.clone();
+                let held = held_build(&picks, &local, fresh);
+                async move {
+                    held.get_or_init(|| async {
+                        built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(super::super::DiscoverPick::default())
+                    })
+                    .await
+                    .is_ok()
+                }
+            };
+
+            assert!(build(false).await && build(false).await);
+            assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(build(true).await && build(false).await);
+            assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 2);
+        }
     }
 }

@@ -6,8 +6,14 @@
 //! and sends the answers back, so adding a service is a spec in this file and
 //! no change at all on the other side of the API.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
 use api::schema::{ChoiceOption, FieldKind, FieldSpec, FieldValue, Icon, Problem, Text, value_of};
-use api::{ErrorReason, ServiceInfo, ServiceRef, SignInKind, SourceDraft};
+use api::{
+    ErrorReason, FolderProbe, ServerProbe, ServiceInfo, ServiceRef, SignInKind, SourceDraft,
+};
 use config::{Browser, MusicService, SavedServer, Settings};
 
 /// The field keys a form and its answers agree on.
@@ -87,6 +93,7 @@ pub fn all() -> Vec<ServiceInfo> {
         .map(|service| ServiceInfo {
             id: service.id().to_string(),
             name: name(*service),
+            summary: Text::key(summary(*service)),
             icon: icon(*service),
             accent: accent(*service).to_string(),
             experimental: matches!(service, MusicService::Spotify),
@@ -102,6 +109,7 @@ pub fn folders() -> ServiceInfo {
     ServiceInfo {
         id: FOLDERS.to_string(),
         name: Text::key("remote_music_folders"),
+        summary: Text::key("service_summary_folders"),
         icon: Icon::Class("fa-solid fa-folder-tree".into()),
         accent: "#6366f1".to_string(),
         experimental: false,
@@ -180,6 +188,22 @@ fn name(service: MusicService) -> Text {
         MusicService::Subsonic => Text::key("subsonic"),
         MusicService::Custom => Text::key("custom_manual"),
         other => Text::literal(other.display_name()),
+    }
+}
+
+/// The i18n key of the line a service picker shows under its name.
+fn summary(service: MusicService) -> &'static str {
+    match service {
+        MusicService::Jellyfin => "service_summary_jellyfin",
+        MusicService::Subsonic => "service_summary_subsonic",
+        MusicService::Custom => "service_summary_custom",
+        MusicService::YtMusic => "service_summary_ytmusic",
+        MusicService::SoundCloud => "service_summary_soundcloud",
+        MusicService::AppleMusic => "service_summary_applemusic",
+        MusicService::Spotify => "service_summary_spotify",
+        MusicService::Nextcloud => "service_summary_nextcloud",
+        MusicService::Clippsly => "service_summary_clippsly",
+        MusicService::Smb => "service_summary_smb",
     }
 }
 
@@ -408,8 +432,9 @@ pub fn add_fields(service: MusicService) -> Vec<FieldSpec> {
                 ..note_field()
             },
         ],
-        MusicService::Jellyfin | MusicService::Subsonic | MusicService::Custom => {
-            vec![url_field("server_url_placeholder")]
+        MusicService::Jellyfin => vec![url_field("server_url_placeholder")],
+        MusicService::Subsonic | MusicService::Custom => {
+            vec![url_field("subsonic_url_placeholder")]
         }
     };
     #[cfg(target_os = "android")]
@@ -711,6 +736,381 @@ impl FormProblem {
 
 pub fn problems(found: &[FormProblem]) -> Vec<Problem> {
     found.iter().map(FormProblem::problem).collect()
+}
+
+/// Audio files a folder probe counts before it reports "at least".
+pub const PROBE_FILE_CAP: u32 = 10_000;
+/// How long a folder probe walks one folder before it reports "at least".
+pub const PROBE_WALK_BUDGET: Duration = Duration::from_secs(5);
+/// How long a server probe waits for its one answer.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What probing a draft tries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeTarget {
+    Folders(Vec<String>),
+    Server(String),
+    Nothing,
+}
+
+/// The folders or the address a draft's probe tries; a server address that is not an http(s) URL is refused.
+pub fn probe_target(draft: &SourceDraft) -> Result<ProbeTarget, api::ApiError> {
+    if draft.service == FOLDERS {
+        return Ok(ProbeTarget::Folders(folder_paths(&draft.values)));
+    }
+    let service = MusicService::from_id(&draft.service)
+        .ok_or_else(|| api::ApiError::invalid_input("no such service"))?;
+    match service {
+        MusicService::Jellyfin
+        | MusicService::Subsonic
+        | MusicService::Custom
+        | MusicService::Nextcloud => {
+            let url = value_of(&draft.values, URL).unwrap_or_default().trim();
+            match reqwest::Url::parse(url) {
+                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") && parsed.has_host() => {
+                    Ok(ProbeTarget::Server(url.to_string()))
+                }
+                _ => Err(FormProblem::on(URL, ErrorReason::InvalidServerUrl).error()),
+            }
+        }
+        MusicService::YtMusic
+        | MusicService::SoundCloud
+        | MusicService::AppleMusic
+        | MusicService::Spotify
+        | MusicService::Clippsly
+        | MusicService::Smb => Ok(ProbeTarget::Nothing),
+    }
+}
+
+/// Walk one folder as the scanner does, counting audio files by its file-type rule, until `cap` files or `deadline`.
+pub fn probe_folder(path: &str, cap: u32, deadline: Instant) -> FolderProbe {
+    let root = Path::new(path);
+    let mut probe = FolderProbe {
+        path: path.to_string(),
+        exists: root.exists(),
+        ..FolderProbe::default()
+    };
+    let Ok(first) = std::fs::read_dir(root) else {
+        return probe;
+    };
+    probe.readable = true;
+    // A symlinked directory is followed like the scanner follows it, so each real one is walked once.
+    let mut walked: HashSet<PathBuf> = root.canonicalize().into_iter().collect();
+    let mut pending: Vec<PathBuf> = Vec::new();
+    let mut entries = Some(first);
+    while let Some(listing) = entries.take() {
+        for entry in listing.flatten() {
+            if probe.audio_files >= cap || Instant::now() >= deadline {
+                probe.at_least = true;
+                return probe;
+            }
+            let path = entry.path();
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() => {
+                    if path.canonicalize().is_ok_and(|real| walked.insert(real)) {
+                        pending.push(path);
+                    }
+                }
+                Ok(_) => {
+                    if reader::scanner::is_audio_file(&path) {
+                        probe.audio_files += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        while entries.is_none() {
+            let Some(next) = pending.pop() else { break };
+            entries = std::fs::read_dir(next).ok();
+        }
+    }
+    probe
+}
+
+pub fn probe_client() -> Result<reqwest::Client, api::ApiError> {
+    utils::http::builder()
+        .timeout(PROBE_TIMEOUT)
+        .build()
+        .map_err(|error| {
+            api::ApiError::internal(format!("an HTTP client failed to start: {error}"))
+        })
+}
+
+/// One GET to a server draft's address: a success status is reachable, any other status is reported, no answer is unreachable.
+pub async fn probe_server(client: &reqwest::Client, url: &str) -> ServerProbe {
+    match client.get(url).send().await {
+        Ok(response) if response.status().is_success() => ServerProbe::Reachable,
+        Ok(response) => ServerProbe::Status(response.status().as_u16()),
+        Err(error) => {
+            tracing::debug!(error = %error.without_url(), "a server draft did not answer");
+            ServerProbe::Unreachable
+        }
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn every_service_says_what_it_is_in_the_baseline_locale() {
+        let baseline = include_str!("../../i18n/locales/en.ftl");
+        let services = all();
+        assert_eq!(services.len(), MusicService::ALL.len() + 1, "folders too");
+        for service in services {
+            let Text::Key(key) = &service.summary else {
+                panic!("{} has no summary key", service.id);
+            };
+            assert!(
+                baseline
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{key} = "))),
+                "{key} is missing from en.ftl"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn later() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
+    fn draft(service: &str, values: Vec<FieldValue>) -> SourceDraft {
+        SourceDraft {
+            name: "Draft".into(),
+            service: service.into(),
+            values,
+            ..SourceDraft::default()
+        }
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(path, b"").expect("write");
+    }
+
+    #[test]
+    fn a_folder_counts_its_audio_by_the_scanner_rule_and_nothing_else() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("a.mp3"));
+        touch(&dir.path().join("deep/er/b.FLAC"));
+        touch(&dir.path().join("deep/cover.jpg"));
+        touch(&dir.path().join("notes.txt"));
+
+        let probe = probe_folder(&dir.path().to_string_lossy(), PROBE_FILE_CAP, later());
+
+        assert!(probe.exists && probe.readable);
+        assert_eq!(probe.audio_files, 2);
+        assert!(!probe.at_least);
+    }
+
+    #[test]
+    fn a_missing_folder_neither_exists_nor_reads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gone = dir.path().join("gone").to_string_lossy().into_owned();
+
+        let probe = probe_folder(&gone, PROBE_FILE_CAP, later());
+
+        assert_eq!(
+            probe,
+            FolderProbe {
+                path: gone,
+                ..FolderProbe::default()
+            }
+        );
+    }
+
+    #[test]
+    fn counting_stops_at_the_cap_and_says_at_least() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for n in 0..5 {
+            touch(&dir.path().join(format!("{n}.opus")));
+        }
+
+        let probe = probe_folder(&dir.path().to_string_lossy(), 3, later());
+
+        assert_eq!(probe.audio_files, 3);
+        assert!(probe.at_least);
+    }
+
+    #[test]
+    fn a_walk_past_its_deadline_says_at_least() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("a.mp3"));
+
+        let probe = probe_folder(
+            &dir.path().to_string_lossy(),
+            PROBE_FILE_CAP,
+            Instant::now(),
+        );
+
+        assert!(probe.readable && probe.at_least);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_loop_is_walked_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("inner/a.wav"));
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("inner/loop")).expect("symlink");
+
+        let probe = probe_folder(&dir.path().to_string_lossy(), PROBE_FILE_CAP, later());
+
+        assert_eq!(probe.audio_files, 1);
+        assert!(!probe.at_least);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_listed_exists_but_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locked = dir.path().join("locked");
+        touch(&locked.join("a.mp3"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        // Root lists anything, so there is nothing to see as root.
+        let listable = std::fs::read_dir(&locked).is_ok();
+
+        let probe = probe_folder(&locked.to_string_lossy(), PROBE_FILE_CAP, later());
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        if !listable {
+            assert!(probe.exists && !probe.readable);
+            assert_eq!(probe.audio_files, 0);
+        }
+    }
+
+    #[test]
+    fn folders_and_servers_are_probed_and_the_rest_are_not() {
+        let folders = vec![FieldValue::new(
+            DIRECTORIES,
+            api::schema::encode_directories(&["/a".to_string(), "/b".to_string()]),
+        )];
+        assert_eq!(
+            probe_target(&draft(FOLDERS, folders)),
+            Ok(ProbeTarget::Folders(vec!["/a".into(), "/b".into()]))
+        );
+        for service in ["jellyfin", "subsonic", "custom", "nextcloud"] {
+            let url = vec![FieldValue::new(URL, " https://music.example:8096 ")];
+            assert_eq!(
+                probe_target(&draft(service, url)),
+                Ok(ProbeTarget::Server("https://music.example:8096".into())),
+                "{service}"
+            );
+        }
+        for &service in MusicService::ALL {
+            if !matches!(
+                service,
+                MusicService::Jellyfin
+                    | MusicService::Subsonic
+                    | MusicService::Custom
+                    | MusicService::Nextcloud
+            ) {
+                let url = vec![FieldValue::new(URL, "smb://nas.local/music")];
+                assert_eq!(
+                    probe_target(&draft(service.id(), url)),
+                    Ok(ProbeTarget::Nothing),
+                    "{service:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_server_address_that_is_not_http_is_refused_by_reason() {
+        for url in ["", "jelly.local", "ftp://jelly.local", "http://"] {
+            let error = probe_target(&draft("jellyfin", vec![FieldValue::new(URL, url)]))
+                .expect_err("not an address to probe");
+            assert_eq!(error.reason, Some(ErrorReason::InvalidServerUrl), "{url:?}");
+        }
+        let unknown = probe_target(&draft("gopher", Vec::new())).expect_err("no such service");
+        assert_eq!(unknown.code, api::ErrorCode::InvalidInput);
+    }
+
+    /// A server that answers every request with `status` and an empty body.
+    async fn answering(status: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_server_that_answers_is_reachable_or_reports_its_status() {
+        let client = probe_client().expect("client");
+
+        assert_eq!(
+            probe_server(&client, &answering("200 OK").await).await,
+            ServerProbe::Reachable
+        );
+        assert_eq!(
+            probe_server(&client, &answering("401 Unauthorized").await).await,
+            ServerProbe::Status(401)
+        );
+        assert_eq!(
+            probe_server(&client, &answering("502 Bad Gateway").await).await,
+            ServerProbe::Status(502)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_port_or_a_silent_server_is_unreachable() {
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            format!("http://{}", listener.local_addr().expect("addr"))
+        };
+        let client = probe_client().expect("client");
+        assert_eq!(
+            probe_server(&client, &closed).await,
+            ServerProbe::Unreachable
+        );
+
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", silent.local_addr().expect("addr"));
+        let held = tokio::spawn(async move {
+            let mut streams = Vec::new();
+            while let Ok((stream, _)) = silent.accept().await {
+                streams.push(stream);
+            }
+        });
+        let impatient = utils::http::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .expect("client");
+        assert_eq!(
+            probe_server(&impatient, &url).await,
+            ServerProbe::Unreachable
+        );
+        held.abort();
+    }
 }
 
 #[cfg(test)]

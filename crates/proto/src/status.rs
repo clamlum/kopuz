@@ -62,10 +62,27 @@ pub fn from_status(status: &Status) -> api::ApiError {
     let reason = ErrorDetail::decode(status.details())
         .ok()
         .and_then(|detail| error_reason_from_proto(detail.reason));
+    let message = match status.message().trim() {
+        "" => empty_message(status.code()),
+        message => message.to_string(),
+    };
     api::ApiError {
         code,
-        message: status.message().to_string(),
+        message,
         reason,
+    }
+}
+
+// tonic answers an RPC an older daemon lacks with a bare UNIMPLEMENTED.
+fn empty_message(code: Code) -> String {
+    match code {
+        Code::Unimplemented => {
+            "the daemon doesn't support this request; update the daemon".to_string()
+        }
+        code => format!(
+            "the daemon failed without a message: {}",
+            code.description()
+        ),
     }
 }
 
@@ -104,6 +121,26 @@ mod tests {
         assert_eq!(back, error);
         let plain = from_status(&Status::invalid_argument("no reason"));
         assert_eq!(plain.reason, None);
+    }
+
+    #[test]
+    fn an_rpc_the_daemon_lacks_says_so() {
+        let error = from_status(&Status::new(Code::Unimplemented, ""));
+        assert_eq!(error.code, api::ErrorCode::Unsupported);
+        assert_eq!(
+            error.message,
+            "the daemon doesn't support this request; update the daemon"
+        );
+    }
+
+    #[test]
+    fn no_status_maps_to_an_empty_message() {
+        for code in [Code::NotFound, Code::Internal, Code::Unknown, Code::Aborted] {
+            let error = from_status(&Status::new(code, " "));
+            assert!(!error.message.trim().is_empty(), "{code:?}");
+        }
+        let kept = from_status(&Status::unimplemented("no lyrics here"));
+        assert_eq!(kept.message, "no lyrics here");
     }
 
     /// The daemon-sent half of the UNAVAILABLE split. The transport half

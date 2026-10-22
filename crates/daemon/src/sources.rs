@@ -13,18 +13,20 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use api::{
-    ApiError, BrowserSession, CredentialProvision, ErrorCode, ErrorReason, SourceCapabilities,
-    SourceDraft, SourceFolderEntry, SourceInfo, SourceLoginRequest, SourceState, Table,
+    ApiError, ApiEvent, BrowserSession, CredentialProvision, ErrorCode, ErrorReason, NetworkStatus,
+    OfflineMode, SourceCapabilities, SourceDraft, SourceFolderEntry, SourceInfo,
+    SourceLoginRequest, SourceState, Table,
 };
 use server::source::{AuthOutcome, MediaSource};
 use server::sources::Sources;
 
 use crate::config_service::ConfigService;
+use crate::network::{self, Verdict};
 use crate::recovery::{Recovery, once_more};
 use crate::session::SessionHandle;
 
@@ -52,6 +54,11 @@ pub struct SourceService {
     /// The core's runtime. The desktop UI calls this service in-process on
     /// its own thread, and work that blocks has to run here instead.
     runtime: tokio::runtime::Handle,
+    /// Itself, for the network checks a failed request starts in the background.
+    me: Weak<SourceService>,
+    network: Mutex<NetworkStatus>,
+    checker: network::Checker,
+    rechecking: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -61,6 +68,9 @@ pub(crate) trait Upstream: Send + Sync {
     /// The stored cookies after one `verify_session` rotation, else a fresh read of
     /// the profile it signed in with.
     async fn recover_ytmusic(&self, server: &config::MusicServer, id: &str) -> Option<String>;
+
+    /// Ask the connectivity check addresses whether the internet is there.
+    async fn internet(&self, urls: &[String]) -> Verdict;
 }
 
 struct Network;
@@ -69,6 +79,17 @@ struct Network;
 impl Upstream for Network {
     async fn validate(&self, source: &dyn MediaSource) -> AuthOutcome {
         source.validate().await
+    }
+
+    async fn internet(&self, urls: &[String]) -> Verdict {
+        let Some(client) = network::check_client() else {
+            return Verdict::Unchecked;
+        };
+        network::check(urls, |url| {
+            let client = client.clone();
+            async move { network::probe(&client, url).await }
+        })
+        .await
     }
 
     async fn recover_ytmusic(&self, server: &config::MusicServer, id: &str) -> Option<String> {
@@ -165,6 +186,7 @@ fn capabilities(source: &dyn server::source::MediaSource) -> SourceCapabilities 
         stream_quality: caps.stream_quality,
         explicit_flags: caps.explicit_flags,
         watch_history: caps.watch_history,
+        complete_play_history: caps.complete_play_history,
         sync: caps.sync,
         downloads: caps.downloads,
         uploads: caps.uploads,
@@ -292,7 +314,7 @@ impl SourceService {
         sources: Arc<Sources>,
         upstream: Arc<dyn Upstream>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
             db,
             session,
             config,
@@ -302,6 +324,10 @@ impl SourceService {
             upstream,
             recovery: Recovery::default(),
             runtime: tokio::runtime::Handle::current(),
+            me: me.clone(),
+            network: Mutex::new(NetworkStatus::default()),
+            checker: network::Checker::default(),
+            rechecking: AtomicBool::new(false),
         })
     }
 
@@ -532,7 +558,27 @@ impl SourceService {
         }
     }
 
+    /// A switch someone asked for; while the internet is down, only to a source that works without it.
     pub async fn switch_source(&self, id: &str) -> Result<SourceInfo, ApiError> {
+        if self.network_status().internet_down {
+            let (target, _) = self.resolve(id).await?;
+            let url = target.server.as_ref().map(|server| server.url.as_str());
+            if !network::is_local(&target.active, url)
+                && self.check_network(false).await == Verdict::Down
+            {
+                return Err(ApiError::new(
+                    ErrorCode::SourceUnreachable,
+                    "the internet is down, and only sources on this machine or its network work without it",
+                )
+                .because(ErrorReason::NetworkDown));
+            }
+        }
+        let info = self.switch_to(id).await?;
+        self.forget_left_source(None);
+        Ok(info)
+    }
+
+    async fn switch_to(&self, id: &str) -> Result<SourceInfo, ApiError> {
         let previous = self.snapshot().await.active.clone();
         let (target, _) = self.resolve(id).await?;
         let source = target.active.clone();
@@ -711,6 +757,37 @@ impl SourceService {
         })
     }
 
+    pub async fn probe_source_draft(
+        &self,
+        draft: SourceDraft,
+    ) -> Result<api::DraftProbe, ApiError> {
+        use crate::services::{PROBE_FILE_CAP, PROBE_WALK_BUDGET, ProbeTarget};
+        match crate::services::probe_target(&draft)? {
+            ProbeTarget::Folders(paths) => {
+                let walk = move || {
+                    paths
+                        .iter()
+                        .map(|path| {
+                            let deadline = std::time::Instant::now() + PROBE_WALK_BUDGET;
+                            crate::services::probe_folder(path, PROBE_FILE_CAP, deadline)
+                        })
+                        .collect()
+                };
+                let probes = self.runtime.spawn_blocking(walk).await.map_err(|error| {
+                    ApiError::internal(format!("a folder probe stopped: {error}"))
+                })?;
+                Ok(api::DraftProbe::Folders(probes))
+            }
+            ProbeTarget::Server(url) => {
+                let client = crate::services::probe_client()?;
+                Ok(api::DraftProbe::Server(
+                    crate::services::probe_server(&client, &url).await,
+                ))
+            }
+            ProbeTarget::Nothing => Ok(api::DraftProbe::NotProbeable),
+        }
+    }
+
     pub async fn upsert_source(&self, draft: SourceDraft) -> Result<SourceInfo, ApiError> {
         if draft.service == crate::services::FOLDERS {
             return self.upsert_folder_source(draft).await;
@@ -722,7 +799,10 @@ impl SourceService {
         match config::Source::from_column(id) {
             config::Source::LocalLibrary(_) => self.delete_folder_source(id).await,
             config::Source::Server(_) => self.delete_server(id).await,
-        }
+        }?;
+        self.forget_left_source(Some(id));
+        self.session.offline().cache().forget_source(id).await;
+        Ok(())
     }
 
     async fn upsert_server(&self, draft: SourceDraft) -> Result<SourceInfo, ApiError> {
@@ -1446,6 +1526,9 @@ impl SourceService {
             AuthOutcome::Unreachable => SourceState::Offline,
         };
         self.record_status(id, probe, state);
+        if state == SourceState::Offline {
+            self.after_unreachable(id);
+        }
         Ok(state)
     }
 
@@ -1454,7 +1537,255 @@ impl SourceService {
         A: Future<Output = Result<T, ApiError>>,
     {
         let seen = self.recovery.epoch();
-        once_more(attempt, auth_expired, || self.recover_active(seen)).await
+        let result = once_more(attempt, auth_expired, || self.recover_active(seen)).await;
+        if self.network_status().internet_down {
+            // Someone is using the app, which is a cue to see whether the internet is back.
+            self.check_network_soon();
+        } else if matches!(&result, Err(error) if error.code == ErrorCode::SourceUnreachable)
+            && let Some(id) = self.snapshot().await.active.server_id()
+        {
+            self.after_unreachable(id);
+        }
+        result
+    }
+
+    pub fn network_status(&self) -> NetworkStatus {
+        self.network
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn publish_network(&self) {
+        self.session
+            .emit_event(ApiEvent::NetworkStatus(self.network_status()));
+    }
+
+    /// The source to offer back is gone once someone picks a source, or once it is deleted.
+    fn forget_left_source(&self, deleted: Option<&str>) {
+        {
+            let mut status = self.network.lock().unwrap_or_else(PoisonError::into_inner);
+            match (&status.left_source, deleted) {
+                (None, _) => return,
+                (Some(left), Some(deleted)) if left != deleted => return,
+                _ => status.left_source = None,
+            }
+        }
+        self.publish_network();
+    }
+
+    /// A source failed to answer: ask about the internet in the background, if the source needs it and holds what it needs to answer.
+    fn after_unreachable(&self, id: &str) {
+        let Some(me) = self.me.upgrade() else {
+            return;
+        };
+        let id = id.to_string();
+        self.runtime.spawn(async move {
+            if me.needs_internet(&id).await {
+                me.check_network(false).await;
+            }
+        });
+    }
+
+    fn check_network_soon(&self) {
+        let Some(me) = self.me.upgrade() else {
+            return;
+        };
+        self.runtime.spawn(async move {
+            me.check_network(false).await;
+        });
+    }
+
+    /// A server across the internet with a sign-in or anonymous access, so its silence says something about the connection.
+    async fn needs_internet(&self, id: &str) -> bool {
+        let source = config::Source::from_column(id);
+        if source.server_id().is_none() {
+            return false;
+        }
+        let Ok(Some(server)) = self.db.load_server(id).await else {
+            return false;
+        };
+        let usable = server.access_token.is_some() || server.yt_anonymous;
+        usable && !network::is_local(&source, Some(&server.url))
+    }
+
+    /// One spaced, shared connectivity check and what follows from it; `fresh` skips the spacing, as a scheduled recheck does.
+    async fn check_network(&self, fresh: bool) -> Verdict {
+        let urls = self.current().await.system.connectivity_check_urls;
+        if urls.is_empty() {
+            self.internet_came_back();
+            return Verdict::Unchecked;
+        }
+        let upstream = self.upstream.clone();
+        let verdict = self
+            .checker
+            .run(fresh, || async move { upstream.internet(&urls).await })
+            .await;
+        match verdict {
+            Verdict::Down => self.internet_went_down().await,
+            Verdict::Up | Verdict::Unchecked => self.internet_came_back(),
+        }
+        verdict
+    }
+
+    async fn internet_went_down(&self) {
+        {
+            let mut status = self.network.lock().unwrap_or_else(PoisonError::into_inner);
+            if status.internet_down {
+                return;
+            }
+            status.internet_down = true;
+        }
+        let sources = self.snapshot().await;
+        let active = sources.active.clone();
+        let url = sources.server.as_ref().map(|server| server.url.as_str());
+        if !network::is_local(&active, url) {
+            match self.local_fallback(&sources).await {
+                Some(target) => match self.switch_to(target.as_str()).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            from = active.as_str(),
+                            to = target.as_str(),
+                            "the internet is down; moved to a source that works without it"
+                        );
+                        self.network
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .left_source = Some(active.as_str().to_string());
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "moving off a source that needs the internet failed")
+                    }
+                },
+                None => self.enter_offline_mode(),
+            }
+        }
+        self.publish_network();
+        self.spawn_rechecks();
+    }
+
+    /// The best source that works without the internet and holds music; a library with nothing in it is no place to land.
+    async fn local_fallback(&self, sources: &Sources) -> Option<config::Source> {
+        for candidate in network::local_candidates(&self.current().await, &sources.servers) {
+            let filter = db::TrackFilter {
+                source: candidate.clone(),
+                ..db::TrackFilter::default()
+            };
+            if self.db.tracks_count(&filter).await.is_ok_and(|n| n > 0) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// No source works without the internet, so the active one stays and offline mode keeps it to the songs with a copy here.
+    fn enter_offline_mode(&self) {
+        {
+            let mut status = self.network.lock().unwrap_or_else(PoisonError::into_inner);
+            if status.offline_mode.is_on() {
+                return;
+            }
+            status.offline_mode = OfflineMode::Automatic;
+        }
+        tracing::info!(
+            "the internet is down and no source works without it; offline mode keeps to downloads and cached songs"
+        );
+        self.offline_mode_moved();
+    }
+
+    /// Enter offline mode at someone's asking, or leave it however it was entered; only this leaves it.
+    pub fn set_offline(&self, on: bool) -> NetworkStatus {
+        let next = match on {
+            true => OfflineMode::Requested,
+            false => OfflineMode::Off,
+        };
+        let moved = {
+            let mut status = self.network.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut status.offline_mode, next).is_on() != next.is_on()
+        };
+        tracing::info!(on, "offline mode set");
+        if moved {
+            self.offline_mode_moved();
+        } else {
+            self.publish_network();
+        }
+        self.network_status()
+    }
+
+    /// Offline mode came on or went off: listings change what they hold, and every frontend hears it.
+    fn offline_mode_moved(&self) {
+        let on = self.network_status().offline_mode.is_on();
+        self.session.offline().set_offline_mode(on);
+        for table in [Table::Tracks, Table::Albums, Table::Artists, Table::Recents] {
+            self.session.invalidate(table);
+        }
+        self.publish_network();
+    }
+
+    fn internet_came_back(&self) {
+        {
+            let mut status = self.network.lock().unwrap_or_else(PoisonError::into_inner);
+            if !status.internet_down {
+                return;
+            }
+            status.internet_down = false;
+        }
+        tracing::info!("the internet is back");
+        self.publish_network();
+    }
+
+    /// While the internet is down, look again on a backoff until it is back.
+    fn spawn_rechecks(&self) {
+        if self.rechecking.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(me) = self.me.upgrade() else {
+            self.rechecking.store(false, Ordering::SeqCst);
+            return;
+        };
+        self.runtime.spawn(async move {
+            let mut attempt = 0;
+            while me.network_status().internet_down {
+                tokio::time::sleep(network::recheck_delay(attempt)).await;
+                attempt += 1;
+                if me.check_network(true).await != Verdict::Down {
+                    break;
+                }
+            }
+            me.rechecking.store(false, Ordering::SeqCst);
+            if me.network_status().internet_down {
+                me.spawn_rechecks();
+            }
+        });
+    }
+
+    /// Ask about the internet when playback fails for want of a connection, as a failed request does.
+    pub fn watch_network(self: &Arc<Self>) {
+        use tokio::sync::broadcast::error::RecvError;
+        let service = self.clone();
+        let mut events = self.session.subscribe();
+        self.runtime.spawn(async move {
+            let mut failing = false;
+            loop {
+                match events.recv().await {
+                    Ok(ApiEvent::PlayerState(state)) => {
+                        let unreachable = state
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.code == ErrorCode::SourceUnreachable);
+                        if unreachable
+                            && !failing
+                            && let Some(id) = service.snapshot().await.active.server_id()
+                        {
+                            service.after_unreachable(id);
+                        }
+                        failing = unreachable;
+                    }
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
     }
 
     async fn recover_active(&self, seen: u64) -> bool {
@@ -1788,6 +2119,9 @@ mod tests {
         recovered: Option<String>,
         recoveries: std::sync::atomic::AtomicUsize,
         validations: Mutex<std::collections::VecDeque<AuthOutcome>>,
+        /// What each connectivity check finds, in turn; up once the script runs out.
+        internet: Mutex<std::collections::VecDeque<Verdict>>,
+        internet_asks: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeUpstream {
@@ -1815,6 +2149,12 @@ mod tests {
             self.recoveries.fetch_add(1, Ordering::SeqCst);
             self.recovered.clone()
         }
+
+        async fn internet(&self, _: &[String]) -> Verdict {
+            self.internet_asks.fetch_add(1, Ordering::SeqCst);
+            let mut script = self.internet.lock().expect("script");
+            script.pop_front().unwrap_or(Verdict::Up)
+        }
     }
 
     struct Fixture {
@@ -1835,6 +2175,10 @@ mod tests {
     }
 
     async fn signed_in(upstream: Arc<FakeUpstream>) -> Fixture {
+        signed_in_with(upstream, config::Settings::default()).await
+    }
+
+    async fn signed_in_with(upstream: Arc<FakeUpstream>, settings: config::Settings) -> Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = db::init(&dir.path().join("sources.db")).await.expect("db");
         let mut seeded = youtube_music(false);
@@ -1849,7 +2193,7 @@ mod tests {
         let config = Arc::new(ConfigService::new(
             db.clone(),
             dir.path().join("settings.toml"),
-            config::Settings::default(),
+            settings,
         ));
         let player =
             player::player::Player::try_with_sink(Box::new(player::engine::NullSink::new()))
@@ -2246,5 +2590,291 @@ mod tests {
                 .any(|saved| saved.id == "local:b")
         );
         reached_the_session(&session, &fallback);
+    }
+
+    mod network_down {
+        use super::*;
+
+        /// YouTube Music active, beside a default folder library that holds a track.
+        async fn with_local_music(
+            upstream: Arc<FakeUpstream>,
+            settings: config::Settings,
+        ) -> Fixture {
+            let fixture = signed_in_with(upstream, settings).await;
+            let song = reader::Track {
+                id: reader::TrackId::Local("/music/song.flac".into()),
+                cover: None,
+                album_id: String::new(),
+                title: "Song".into(),
+                artist: "Ada".into(),
+                album: String::new(),
+                duration: 60,
+                khz: 44,
+                bitrate: 320,
+                track_number: None,
+                disc_number: None,
+                musicbrainz_release_id: None,
+                musicbrainz_recording_id: None,
+                musicbrainz_track_id: None,
+                playlist_item_id: None,
+                credits: Vec::new(),
+                artists: Vec::new(),
+                replay_gain: config::ReplayGainInfo::default(),
+                explicit: false,
+                plays: None,
+                counterpart: None,
+            };
+            fixture
+                .db
+                .upsert_tracks(&config::Source::default(), &[song])
+                .await
+                .expect("a local track");
+            fixture
+        }
+
+        fn scripted(verdicts: &[Verdict]) -> Arc<FakeUpstream> {
+            let upstream = FakeUpstream::default();
+            upstream
+                .internet
+                .lock()
+                .expect("script")
+                .extend(verdicts.iter().copied());
+            Arc::new(upstream)
+        }
+
+        fn asks(upstream: &FakeUpstream) -> usize {
+            upstream.internet_asks.load(Ordering::SeqCst)
+        }
+
+        async fn active(fixture: &Fixture) -> config::Source {
+            fixture.sources.snapshot().await.active.clone()
+        }
+
+        fn down(left: Option<&str>) -> NetworkStatus {
+            NetworkStatus {
+                internet_down: true,
+                left_source: left.map(str::to_string),
+                offline_mode: OfflineMode::Off,
+            }
+        }
+
+        #[tokio::test]
+        async fn the_internet_going_down_moves_to_the_default_folder_library() {
+            let upstream = scripted(&[Verdict::Down]);
+            let fixture = with_local_music(upstream.clone(), config::Settings::default()).await;
+            let mut events = fixture.sources.session.subscribe();
+
+            assert_eq!(fixture.sources.check_network(false).await, Verdict::Down);
+
+            assert_eq!(active(&fixture).await, config::Source::default());
+            assert_eq!(fixture.sources.network_status(), down(Some("yt")));
+            let published = loop {
+                match events.recv().await.expect("an event") {
+                    ApiEvent::NetworkStatus(status) => break status,
+                    _ => continue,
+                }
+            };
+            assert_eq!(published, down(Some("yt")));
+        }
+
+        #[tokio::test]
+        async fn with_no_source_that_works_offline_the_active_one_stays() {
+            // The default folder library is there, but holds nothing to play.
+            let fixture =
+                signed_in_with(scripted(&[Verdict::Down]), config::Settings::default()).await;
+
+            fixture.sources.check_network(false).await;
+
+            assert_eq!(active(&fixture).await, config::Source::Server("yt".into()));
+            let automatic = NetworkStatus {
+                offline_mode: OfflineMode::Automatic,
+                ..down(None)
+            };
+            assert_eq!(fixture.sources.network_status(), automatic);
+            assert!(fixture.sources.session.offline().offline_mode());
+        }
+
+        #[tokio::test]
+        async fn a_switch_to_a_source_that_needs_the_internet_is_refused_while_it_is_down() {
+            let upstream = scripted(&[Verdict::Down]);
+            let fixture = with_local_music(upstream.clone(), config::Settings::default()).await;
+            fixture.sources.check_network(false).await;
+
+            let refused = fixture
+                .sources
+                .switch_source("yt")
+                .await
+                .expect_err("the internet is down");
+
+            assert_eq!(refused.reason, Some(ErrorReason::NetworkDown));
+            assert_eq!(refused.code, ErrorCode::SourceUnreachable);
+            assert_eq!(asks(&upstream), 1, "the recent check still stands");
+            assert_eq!(active(&fixture).await, config::Source::default());
+            fixture
+                .sources
+                .switch_source(config::DEFAULT_LOCAL_ID)
+                .await
+                .expect("a folder library works without it");
+        }
+
+        #[tokio::test]
+        async fn the_internet_coming_back_is_published_and_nothing_switches_back() {
+            let upstream = scripted(&[Verdict::Down, Verdict::Up]);
+            let fixture = with_local_music(upstream.clone(), config::Settings::default()).await;
+            let mut events = fixture.sources.session.subscribe();
+            fixture.sources.check_network(false).await;
+
+            assert_eq!(fixture.sources.check_network(true).await, Verdict::Up);
+
+            let back = NetworkStatus {
+                internet_down: false,
+                left_source: Some("yt".into()),
+                offline_mode: OfflineMode::Off,
+            };
+            assert_eq!(fixture.sources.network_status(), back);
+            assert_eq!(active(&fixture).await, config::Source::default());
+            let published = loop {
+                match events.recv().await.expect("an event") {
+                    ApiEvent::NetworkStatus(status) if !status.internet_down => break status,
+                    _ => continue,
+                }
+            };
+            assert_eq!(published, back, "the source to offer back stays");
+
+            fixture
+                .sources
+                .switch_source("yt")
+                .await
+                .expect("online again");
+            assert_eq!(fixture.sources.network_status(), NetworkStatus::default());
+        }
+
+        #[tokio::test]
+        async fn failures_share_one_spaced_check() {
+            let upstream = scripted(&[Verdict::Up]);
+            let fixture = signed_in(upstream.clone()).await;
+
+            let (a, b) = tokio::join!(
+                fixture.sources.check_network(false),
+                fixture.sources.check_network(false)
+            );
+            fixture.sources.check_network(false).await;
+
+            assert_eq!((a, b), (Verdict::Up, Verdict::Up));
+            assert_eq!(asks(&upstream), 1);
+            assert_eq!(fixture.sources.network_status(), NetworkStatus::default());
+        }
+
+        #[tokio::test]
+        async fn an_empty_check_list_asks_nothing_and_leaves_a_failure_plain_offline() {
+            let mut settings = config::Settings::default();
+            settings.system.connectivity_check_urls.clear();
+            let upstream = scripted(&[Verdict::Down]);
+            let fixture = with_local_music(upstream.clone(), settings).await;
+
+            assert_eq!(
+                fixture.sources.check_network(false).await,
+                Verdict::Unchecked
+            );
+
+            assert_eq!(asks(&upstream), 0);
+            assert_eq!(fixture.sources.network_status(), NetworkStatus::default());
+            assert_eq!(active(&fixture).await, config::Source::Server("yt".into()));
+        }
+
+        #[tokio::test]
+        async fn a_source_that_stops_answering_starts_the_check() {
+            let upstream = scripted(&[Verdict::Down]);
+            upstream
+                .validations
+                .lock()
+                .expect("script")
+                .push_back(AuthOutcome::Unreachable);
+            let fixture = with_local_music(upstream.clone(), config::Settings::default()).await;
+            let mut events = fixture.sources.session.subscribe();
+
+            let state = fixture.sources.validate_source("yt").await.expect("probe");
+
+            assert_eq!(state, SourceState::Offline);
+            let published = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Ok(ApiEvent::NetworkStatus(status)) = events.recv().await {
+                        break status;
+                    }
+                }
+            })
+            .await
+            .expect("the check ran");
+            assert_eq!(published, down(Some("yt")));
+            assert_eq!(asks(&upstream), 1);
+        }
+
+        fn mode(fixture: &Fixture) -> OfflineMode {
+            fixture.sources.network_status().offline_mode
+        }
+
+        #[tokio::test]
+        async fn an_automatic_offline_mode_outlasts_the_outage_until_someone_leaves_it() {
+            let upstream = scripted(&[Verdict::Down, Verdict::Up]);
+            let fixture = signed_in_with(upstream, config::Settings::default()).await;
+            let mut events = fixture.sources.session.subscribe();
+            fixture.sources.check_network(false).await;
+            assert_eq!(mode(&fixture), OfflineMode::Automatic);
+
+            assert_eq!(fixture.sources.check_network(true).await, Verdict::Up);
+
+            let back = fixture.sources.network_status();
+            assert!(!back.internet_down);
+            assert_eq!(
+                back.offline_mode,
+                OfflineMode::Automatic,
+                "a frontend offers to leave"
+            );
+            assert!(fixture.sources.session.offline().offline_mode());
+            let left = fixture.sources.set_offline(false);
+            assert_eq!(left, NetworkStatus::default());
+            assert!(!fixture.sources.session.offline().offline_mode());
+            let mut invalidated = Vec::new();
+            let published = loop {
+                match events.recv().await.expect("an event") {
+                    ApiEvent::LibraryInvalidated { table } => invalidated.push(table),
+                    ApiEvent::NetworkStatus(status) if status.offline_mode == OfflineMode::Off => {
+                        break status;
+                    }
+                    _ => continue,
+                }
+            };
+            assert_eq!(published, NetworkStatus::default());
+            assert!(invalidated.contains(&Table::Tracks), "{invalidated:?}");
+        }
+
+        #[tokio::test]
+        async fn an_offline_mode_someone_asked_for_stays_through_the_internet_coming_back() {
+            let upstream = scripted(&[Verdict::Down, Verdict::Up]);
+            let fixture = with_local_music(upstream, config::Settings::default()).await;
+
+            let status = fixture.sources.set_offline(true);
+            assert_eq!(status.offline_mode, OfflineMode::Requested);
+            assert!(fixture.sources.session.offline().offline_mode());
+            fixture.sources.check_network(false).await;
+            fixture.sources.check_network(true).await;
+
+            assert_eq!(mode(&fixture), OfflineMode::Requested);
+            assert_eq!(
+                fixture.sources.set_offline(false).offline_mode,
+                OfflineMode::Off
+            );
+        }
+
+        #[tokio::test]
+        async fn a_move_to_the_folder_library_is_no_offline_mode() {
+            let fixture =
+                with_local_music(scripted(&[Verdict::Down]), config::Settings::default()).await;
+
+            fixture.sources.check_network(false).await;
+
+            assert_eq!(mode(&fixture), OfflineMode::Off);
+            assert!(!fixture.sources.session.offline().offline_mode());
+        }
     }
 }

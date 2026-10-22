@@ -482,6 +482,26 @@ impl api::LibraryApi for LocalApi {
             .await
     }
 
+    async fn for_you(&self) -> Result<api::ForYou, ApiError> {
+        self.recovering(|| async move { self.catalog()?.for_you().await })
+            .await
+    }
+
+    async fn refresh_for_you(&self) -> Result<api::ForYou, ApiError> {
+        self.recovering(|| async move { self.catalog()?.refresh_for_you().await })
+            .await
+    }
+
+    async fn discover_rows(&self) -> Result<api::DiscoverRows, ApiError> {
+        self.recovering(|| async move { self.catalog()?.discover_rows().await })
+            .await
+    }
+
+    async fn refresh_discover_rows(&self) -> Result<api::DiscoverRows, ApiError> {
+        self.recovering(|| async move { self.catalog()?.refresh_discover_rows().await })
+            .await
+    }
+
     async fn radio_stations(&self) -> Result<Vec<api::RadioStationInfo>, ApiError> {
         Ok(self.radio()?.stations().await)
     }
@@ -857,6 +877,14 @@ impl api::JobApi for LocalApi {
         }
     }
 
+    async fn offline_cache_status(&self) -> Result<api::OfflineCacheStatus, ApiError> {
+        Ok(self.session.offline().cache().status())
+    }
+
+    async fn clear_offline_cache(&self) -> Result<(), ApiError> {
+        self.session.offline().cache().clear().await
+    }
+
     async fn jobs(&self) -> Result<Vec<api::JobStatus>, ApiError> {
         match &self.jobs {
             Some(runner) => Ok(runner.list()),
@@ -917,6 +945,13 @@ impl api::SourceApi for LocalApi {
         draft: api::SourceDraft,
     ) -> Result<api::DraftCheck, ApiError> {
         self.sources()?.check_source_draft(draft).await
+    }
+
+    async fn probe_source_draft(
+        &self,
+        draft: api::SourceDraft,
+    ) -> Result<api::DraftProbe, ApiError> {
+        self.sources()?.probe_source_draft(draft).await
     }
 
     async fn set_source_settings(
@@ -986,6 +1021,14 @@ impl api::SourceApi for LocalApi {
 
     async fn validate_source(&self, id: String) -> Result<api::SourceState, ApiError> {
         self.sources()?.validate_source(&id).await
+    }
+
+    async fn network_status(&self) -> Result<api::NetworkStatus, ApiError> {
+        Ok(self.sources()?.network_status())
+    }
+
+    async fn set_offline(&self, offline: bool) -> Result<api::NetworkStatus, ApiError> {
+        Ok(self.sources()?.set_offline(offline))
     }
 
     async fn accounts(&self, id: String) -> Result<Vec<api::SourceAccount>, ApiError> {

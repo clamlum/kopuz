@@ -279,6 +279,7 @@ subsonic = Subsonic
 custom_manual = Aangepast (handmatige API)
 server_name_optional = Servernaam (optioneel)
 server_url_placeholder = http://localhost:8096
+subsonic_url_placeholder = http://localhost:4533
 nextcloud_url_placeholder = https://cloud.example.com
 nextcloud_help = Point this at your Nextcloud, then sign in with an app password. Your music folders are picked after it connects.
 apple_music_storefront = Storefront
@@ -368,7 +369,6 @@ refresh = Vernieuwen
 discover = Ontdekken
 discover_more_loading = Meer laden…
 discover_failed = Kan Ontdekken niet laden: { $error }
-discover_unsupported = Ontdekken is alleen beschikbaar wanneer YouTube Music de actieve server is.
 discover_show_all = Alles tonen
 catalog_page_explore = Verkennen
 catalog_page_charts = Hitlijsten
@@ -435,6 +435,7 @@ hide_section = Verbergen
 show_section = Tonen
 move_up = Omhoog
 move_down = Omlaag
+home_section_catalog = Aanbevelingen
 home_section_hero = Hero
 home_section_continue_listening = Verder luisteren
 home_section_listen_now = Nu luisteren
@@ -1081,3 +1082,75 @@ error_code_internal = Something went wrong: { $detail }
 error_code_source_challenged = The source wants to check that you're not a bot. Wait a few minutes and try again.
 error_code_source_refused = The source refused the request. This is on its side and usually clears up on its own.
 error_code_item_unavailable = The source can't play this. It may have been removed, made private or blocked in your region.
+copy_image = Copy image
+save_image = Save image…
+image_copied = Image copied
+image_saved = Image saved
+image_copy_failed = Couldn't copy the image: { $error }
+image_save_failed = Couldn't save the image: { $error }
+for_you = For you
+service_summary_folders = Music files on this computer or a mounted drive
+service_summary_jellyfin = Music from your own Jellyfin server
+service_summary_subsonic = Navidrome, Airsonic or a Subsonic server of your own
+service_summary_custom = Any other server with a Subsonic-compatible API, at the address you enter
+service_summary_ytmusic = YouTube Music's catalog, plus your library and likes when you sign in
+service_summary_soundcloud = Tracks, playlists and likes from your SoundCloud account
+service_summary_applemusic = Apple Music's catalog and your library; playback needs a subscription
+service_summary_spotify = Your Spotify library, played through Spotify in a browser; needs Premium
+service_summary_nextcloud = Music files stored in your Nextcloud
+service_summary_clippsly = Music you upload to your Clippsly cloud locker, streamed back from there
+service_summary_smb = Music files on a network share (SMB), read without mounting it
+onboarding_welcome_blurb = Kopuz plays the music on this computer, on your own server and on your streaming services, all from one place.
+onboarding_desktop_library_note = If you use the Kopuz desktop app, your library is already here
+onboarding_privacy_title = Privacy
+onboarding_privacy_discord = Discord presence shows the song you're playing on your Discord profile.
+onboarding_privacy_updates = Update checks ask GitHub for the newest Kopuz release when the app starts.
+onboarding_privacy_watch_history = YouTube watch history adds the songs you play here to your YouTube history, which shapes its recommendations.
+onboarding_ready_summary =
+    { $tracks ->
+        [one] { $tracks } track
+       *[other] { $tracks } tracks
+    }, { $albums ->
+        [one] { $albums } album
+       *[other] { $albums } albums
+    }
+onboarding_start_listening = Start listening
+onboarding_run_again = Run setup again
+onboarding_probe_found =
+    { $count ->
+        [one] Found { $count } track
+       *[other] Found { $count } tracks
+    }
+onboarding_probe_empty = No music found in this folder
+onboarding_probe_unreachable = Can't reach { $url }
+onboarding_step = Step { $current } of { $total }
+edit_url = Edit URL
+continue = Continue
+onboarding_group_local = On this computer
+tips_title = A few things to know
+tips_search = searches everything and runs commands
+tips_now_playing = Click the cover in the player bar to open Now Playing
+tips_source_switcher = Switch between your sources from the menu in the top bar
+daemon_down_title = Kopuz needs its background service
+daemon_down_hint = If it doesn't start, run systemctl --user enable --now kopuzd in a terminal.
+retry = Retry
+connectivity_check_urls = Connectivity checks
+connectivity_check_urls_description = Addresses asked when a source stops answering, to tell a dropped connection from a server that is down. Leave empty to skip the check.
+error_network_down = You're offline. Until the connection is back, only music on this computer or your local network can play.
+offline_mode = Offline mode
+offline_mode_on = Offline mode is on. Only downloads and cached songs play.
+offline_mode_off = Offline mode is off.
+offline_mark = Offline
+cached_mark = Cached
+offline_cache = Offline cache
+offline_cache_enabled = Keep songs you play for offline listening
+offline_cache_max_size = Maximum size
+offline_cache_used = { $used } of { $max } used
+offline_cache_clear = Clear cache
+offline_cache_description = Songs you stream from across the internet are kept on this computer so they play without a connection, and the next song is fetched ahead. Once the cache is full, the songs played longest ago go first. Downloads are kept apart and never removed. Turning this off keeps what is cached.
+back_online_switch_to = Back online, switch to { $source }?
+onboarding_offline_cache = Keep songs you play for offline listening (up to { $size })
+error_offline_mode = Offline mode is on, and this song has no downloaded or cached copy to play.
+discover_your_mixes = Your mixes
+discover_never_played = Never played
+discover_forgotten_favorites = Forgotten favorites

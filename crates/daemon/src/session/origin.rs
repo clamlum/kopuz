@@ -27,6 +27,8 @@ enum Stored {
         #[serde(default)]
         downloaded: Option<bool>,
         #[serde(default)]
+        offline: Option<bool>,
+        #[serde(default)]
         year_from: Option<u16>,
         #[serde(default)]
         year_to: Option<u16>,
@@ -101,6 +103,7 @@ pub(super) fn encode(context: &QueueContext) -> Option<String> {
             favorite: filter.favorite,
             sort: (&filter.sort).into(),
             downloaded: filter.downloaded,
+            offline: filter.offline,
             year_from: filter.year_from,
             year_to: filter.year_to,
             reverse: filter.reverse,
@@ -139,6 +142,7 @@ pub(super) fn decode(stored: &str) -> Option<QueueContext> {
             favorite,
             sort,
             downloaded,
+            offline,
             year_from,
             year_to,
             reverse,
@@ -150,6 +154,7 @@ pub(super) fn decode(stored: &str) -> Option<QueueContext> {
                 favorite,
                 sort: sort.into(),
                 downloaded,
+                offline,
                 year_from,
                 year_to,
                 reverse,
@@ -191,6 +196,7 @@ mod tests {
                         config::SortDirection::Desc,
                     )]),
                     downloaded: Some(false),
+                    offline: Some(true),
                     year_from: Some(1990),
                     year_to: Some(1999),
                     reverse: true,

@@ -1442,6 +1442,31 @@ mod tests {
     }
 
     #[test]
+    fn connectivity_checks_save_alone_and_an_env_list_pins_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let mut settings = Settings::default();
+        settings.system.connectivity_check_urls = vec!["https://check.example/up".into()];
+        let key = SettingKey::System(crate::SystemKey::ConnectivityCheckUrls);
+        assert!(save_settings(&path, &settings, &[key]).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text.trim(),
+            r#"connectivity_check_urls = ["https://check.example/up"]"#
+        );
+        assert_eq!(reloaded(&path), settings);
+
+        let env = vec![(
+            "KOPUZ_CONFIG_CONNECTIVITY_CHECK_URLS".to_string(),
+            "[]".to_string(),
+        )];
+        let layers = FileLayers::read_inner(&path, NIX_STORE_PREFIX, env.into_iter());
+        let restored = layers.merge_and_parse(Table::new()).unwrap();
+        assert!(restored.system.connectivity_check_urls.is_empty());
+        assert!(layers.is_locked("connectivity_check_urls"));
+    }
+
+    #[test]
     fn f32_fields_are_written_short_and_reload_identically() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");

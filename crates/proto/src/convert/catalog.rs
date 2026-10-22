@@ -257,6 +257,8 @@ pub fn catalog_detail_to_proto(value: &api::CatalogDetail) -> CatalogDetail {
             .map(|privacy| playlist_privacy_to_proto(privacy) as i32),
         release_kind: release_kind_to_proto(value.release_kind) as i32,
         monthly_listeners: value.monthly_listeners.clone(),
+        shuffle_radio: value.shuffle_radio.clone(),
+        mix_radio: value.mix_radio.clone(),
         owner: value.owner.clone(),
         plays: value.plays.clone(),
         web_url: value.web_url.clone(),
@@ -303,9 +305,75 @@ pub fn catalog_detail_from_proto(value: &CatalogDetail) -> api::CatalogDetail {
         privacy: value.privacy.and_then(playlist_privacy_from_proto),
         release_kind: release_kind_from_proto(value.release_kind),
         monthly_listeners: value.monthly_listeners.clone(),
+        shuffle_radio: value.shuffle_radio.clone(),
+        mix_radio: value.mix_radio.clone(),
         owner: value.owner.clone(),
         plays: value.plays.clone(),
         web_url: value.web_url.clone(),
+    }
+}
+
+pub fn for_you_to_proto(value: &api::ForYou) -> ForYou {
+    let outcome = match value {
+        api::ForYou::Mix(tracks) => for_you::Outcome::Mix(TrackList {
+            items: tracks.iter().map(track_info_to_proto).collect(),
+        }),
+        api::ForYou::Unavailable(reason) => {
+            let reason = match reason {
+                api::ForYouUnavailable::NoTrackRadio => ForYouUnavailable::NoTrackRadio,
+                api::ForYouUnavailable::NoLikes => ForYouUnavailable::NoLikes,
+            };
+            for_you::Outcome::Unavailable(reason as i32)
+        }
+    };
+    ForYou {
+        outcome: Some(outcome),
+    }
+}
+
+pub fn for_you_from_proto(value: &ForYou) -> api::ForYou {
+    match &value.outcome {
+        Some(for_you::Outcome::Mix(list)) => {
+            api::ForYou::Mix(list.items.iter().map(track_info_from_proto).collect())
+        }
+        Some(for_you::Outcome::Unavailable(reason)) => {
+            api::ForYou::Unavailable(match ForYouUnavailable::try_from(*reason) {
+                Ok(ForYouUnavailable::NoTrackRadio) => api::ForYouUnavailable::NoTrackRadio,
+                // A reason this build does not know still means there is no row to show.
+                Ok(ForYouUnavailable::NoLikes | ForYouUnavailable::Unspecified) | Err(_) => {
+                    api::ForYouUnavailable::NoLikes
+                }
+            })
+        }
+        None => api::ForYou::Mix(Vec::new()),
+    }
+}
+
+pub fn discover_rows_to_proto(value: &api::DiscoverRows) -> DiscoverRows {
+    DiscoverRows {
+        mixes: value.mixes.iter().map(catalog_item_to_proto).collect(),
+        never_played: value.never_played.iter().map(album_info_to_proto).collect(),
+        forgotten_favorites: value
+            .forgotten_favorites
+            .iter()
+            .map(track_info_to_proto)
+            .collect(),
+    }
+}
+
+pub fn discover_rows_from_proto(value: &DiscoverRows) -> api::DiscoverRows {
+    api::DiscoverRows {
+        mixes: value.mixes.iter().map(catalog_item_from_proto).collect(),
+        never_played: value
+            .never_played
+            .iter()
+            .map(album_info_from_proto)
+            .collect(),
+        forgotten_favorites: value
+            .forgotten_favorites
+            .iter()
+            .map(track_info_from_proto)
+            .collect(),
     }
 }
 
@@ -559,5 +627,50 @@ mod tests {
             station,
             radio_station_from_proto(&radio_station_to_proto(&station))
         );
+    }
+
+    #[test]
+    fn for_you_round_trips() {
+        let track = super::super::fixtures::sample_state()
+            .track
+            .expect("the sample state plays a track");
+        for value in [
+            api::ForYou::Mix(vec![track.clone(), track]),
+            api::ForYou::Mix(Vec::new()),
+            api::ForYou::Unavailable(api::ForYouUnavailable::NoTrackRadio),
+            api::ForYou::Unavailable(api::ForYouUnavailable::NoLikes),
+        ] {
+            assert_eq!(value, for_you_from_proto(&for_you_to_proto(&value)));
+        }
+    }
+
+    #[test]
+    fn discover_rows_round_trip() {
+        let track = super::super::fixtures::sample_state()
+            .track
+            .expect("the sample state plays a track");
+        let rows = api::DiscoverRows {
+            mixes: vec![api::CatalogItem {
+                kind: api::CatalogItemKind::Playlist,
+                id: "RDTMAK5uy_mix".into(),
+                title: "My Supermix".into(),
+                subtitle: Some("Ada, Boris".into()),
+                ..Default::default()
+            }],
+            never_played: vec![api::AlbumInfo {
+                id: "al-1".into(),
+                title: "Unheard".into(),
+                artist: "Ada".into(),
+                year: 2001,
+                ..Default::default()
+            }],
+            forgotten_favorites: vec![track],
+        };
+        for value in [rows, api::DiscoverRows::default()] {
+            assert_eq!(
+                value,
+                discover_rows_from_proto(&discover_rows_to_proto(&value))
+            );
+        }
     }
 }

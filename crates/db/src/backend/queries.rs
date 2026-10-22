@@ -190,6 +190,18 @@ fn bind_scalar_args<'q, O>(
     query
 }
 
+/// Whether the track keyed by `key` has a downloaded or a cached copy (`true`), or neither.
+fn plays_offline(key: &str, offline: bool) -> String {
+    let copy = format!(
+        "(EXISTS (SELECT 1 FROM offline_tracks o WHERE o.item_id = {key}) \
+          OR EXISTS (SELECT 1 FROM offline_cache oc WHERE oc.track_key = {key}))"
+    );
+    match offline {
+        true => copy,
+        false => format!("NOT {copy}"),
+    }
+}
+
 /// WHERE clause + ordered bind values for a filter (after the `source = ?1` bind).
 fn filter_clauses(filter: &TrackFilter) -> Clauses {
     let mut c = Clauses::default();
@@ -228,6 +240,10 @@ fn filter_clauses(filter: &TrackFilter) -> Clauses {
         c.sql.push_str(&format!(
             " AND {exists} (SELECT 1 FROM offline_tracks o WHERE o.item_id = t.track_key)"
         ));
+    }
+    if let Some(offline) = filter.offline {
+        c.sql
+            .push_str(&format!(" AND {}", plays_offline("t.track_key", offline)));
     }
     // A subquery rather than the album join, so the count query needs no join.
     let years = c.year_range("y.year", filter.year_from, filter.year_to);
@@ -573,6 +589,15 @@ pub async fn artists_page(
                WHERE dc.source = ?1 AND dc.artist_pk = ar.id)"
         ));
     }
+    if let Some(offline) = query.offline {
+        let exists = if offline { "EXISTS" } else { "NOT EXISTS" };
+        c.sql.push_str(&format!(
+            " AND {exists} (SELECT 1 FROM artist_credit_rows fc \
+                JOIN tracks ft ON ft.rowid_pk = fc.track_pk \
+               WHERE fc.source = ?1 AND fc.artist_pk = ar.id AND {})",
+            plays_offline("ft.track_key", true)
+        ));
+    }
     let src = query.source.as_str();
     let from = "FROM artist_credit_rows cr JOIN artists ar ON ar.id = cr.artist_pk";
 
@@ -849,6 +874,14 @@ pub async fn albums_page(
                WHERE dt.source = al.source AND dt.source_album_id = al.source_album_id)"
         ));
     }
+    if let Some(offline) = query.offline {
+        let exists = if offline { "EXISTS" } else { "NOT EXISTS" };
+        c.sql.push_str(&format!(
+            " AND {exists} (SELECT 1 FROM tracks ft \
+               WHERE ft.source = al.source AND ft.source_album_id = al.source_album_id AND {})",
+            plays_offline("ft.track_key", true)
+        ));
+    }
     if let Some(ids) = &query.ids {
         let slots: Vec<String> = ids.iter().map(|id| c.bind(Arg::Text(id.clone()))).collect();
         if slots.is_empty() {
@@ -961,6 +994,45 @@ pub async fn favorites(pool: &SqlitePool, server_id: &str) -> Result<Vec<String>
     )
     .fetch_all(pool)
     .await?)
+}
+
+pub async fn favorites_liked_at(
+    pool: &SqlitePool,
+    server_id: &str,
+) -> Result<Vec<(String, i64)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT ref, created_at FROM favorites WHERE server_id = ?1 AND dirty != 2 \
+         ORDER BY rank, rowid",
+    )
+    .bind(server_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// An album counts as played once any of its tracks has a play count or a place in the recent history.
+pub async fn unplayed_albums(pool: &SqlitePool, source: &Source) -> Result<Vec<Album>, DbError> {
+    let rows = sqlx::query_as::<_, AlbumRow>(
+        "SELECT al.source_album_id, al.title, al.artist, al.genre, al.year, al.cover_path, \
+                al.manual_cover, ar.key AS artist_key, ar.source_artist_id AS artist_source_id \
+           FROM albums al LEFT JOIN artists ar ON ar.id = al.artist_pk \
+          WHERE al.source = ?1 \
+            AND EXISTS (SELECT 1 FROM tracks t \
+                         WHERE t.source = al.source AND t.source_album_id = al.source_album_id) \
+            AND NOT EXISTS (SELECT 1 FROM tracks t \
+                              JOIN listen_counts lc \
+                                ON lc.source = t.source AND lc.track_key = t.track_key \
+                             WHERE t.source = al.source AND t.source_album_id = al.source_album_id \
+                               AND lc.count > 0) \
+            AND NOT EXISTS (SELECT 1 FROM tracks t \
+                              JOIN recently_played rp \
+                                ON rp.source = t.source AND rp.track_key = t.track_key \
+                             WHERE t.source = al.source AND t.source_album_id = al.source_album_id) \
+          ORDER BY al.artist COLLATE LOCALE, al.title COLLATE LOCALE",
+    )
+    .bind(source.as_str())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 pub async fn is_favorite(pool: &SqlitePool, server_id: &str, ref_: &str) -> Result<bool, DbError> {
@@ -1495,5 +1567,112 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].source_id, None);
         assert_eq!(artist(&pool, &source, "ar-1").await.unwrap(), None);
+    }
+
+    fn ids(albums: Vec<Album>) -> Vec<String> {
+        albums.into_iter().map(|album| album.id).collect()
+    }
+
+    #[tokio::test]
+    async fn an_album_is_unplayed_until_a_track_of_it_is_counted_or_recent() {
+        let (pool, source) = seeded().await;
+        super::super::writes::upsert_albums(&pool, &source, &[album("al-empty", "Nobody", None)])
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(unplayed_albums(&pool, &source).await.unwrap()),
+            ["al-1", "al-2"],
+            "an album with no tracks is not one to offer"
+        );
+
+        super::super::cfg_store::bump_listen_count(&pool, &source, "/b.flac")
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(unplayed_albums(&pool, &source).await.unwrap()),
+            ["al-2"]
+        );
+
+        super::super::cfg_store::push_recent(&pool, &source, "/c.flac")
+            .await
+            .unwrap();
+        assert!(unplayed_albums(&pool, &source).await.unwrap().is_empty());
+
+        let elsewhere = Source::Server("srv".into());
+        super::super::cfg_store::bump_listen_count(&pool, &elsewhere, "/a.flac")
+            .await
+            .unwrap();
+        assert!(unplayed_albums(&pool, &elsewhere).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_play_is_counted_and_stamped_per_source_most_played_first() {
+        let pool = mem_pool().await;
+        let source = Source::default();
+        let other = Source::Server("srv".into());
+        let bump = |source: &Source, key: &'static str| {
+            let pool = pool.clone();
+            let source = source.clone();
+            async move {
+                super::super::cfg_store::bump_listen_count(&pool, &source, key)
+                    .await
+                    .unwrap()
+            }
+        };
+        let before: i64 = sqlx::query_scalar("SELECT unixepoch()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        bump(&source, "/b.flac").await;
+        bump(&source, "/a.flac").await;
+        bump(&source, "/a.flac").await;
+        bump(&other, "/a.flac").await;
+
+        let history = super::super::cfg_store::play_history(&pool, &source)
+            .await
+            .unwrap();
+
+        let counted: Vec<(&str, u64)> = history
+            .iter()
+            .map(|record| (record.track_key.as_str(), record.count))
+            .collect();
+        assert_eq!(counted, [("/a.flac", 2), ("/b.flac", 1)]);
+        assert!(
+            history
+                .iter()
+                .all(|record| record.last_played_at.is_some_and(|at| at >= before))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_favorite_carries_when_it_was_liked_and_a_pending_unlike_drops_it() {
+        let pool = mem_pool().await;
+        let before: i64 = sqlx::query_scalar("SELECT unixepoch()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO favorites (server_id, ref, dirty, created_at) \
+             VALUES ('local', '/kept.flac', 0, 100), ('local', '/gone.flac', 0, 100)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        super::super::writes::set_favorite(&pool, "local", "/new.flac", true)
+            .await
+            .unwrap();
+        super::super::writes::set_favorite(&pool, "local", "/gone.flac", false)
+            .await
+            .unwrap();
+
+        let liked = favorites_liked_at(&pool, "local").await.unwrap();
+
+        assert_eq!(liked.len(), 2);
+        assert!(liked.contains(&("/kept.flac".to_string(), 100)));
+        assert!(
+            liked
+                .iter()
+                .any(|(key, at)| key == "/new.flac" && *at >= before)
+        );
     }
 }

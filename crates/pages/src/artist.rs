@@ -79,7 +79,7 @@ pub fn Artist(
 
     let artists_query = use_memo(move || hooks::ArtistQuery {
         sort: artist_sort.read().clone(),
-        downloaded: (caps().downloads && *is_offline.read()).then_some(true),
+        offline: (caps().downloads && *is_offline.read()).then_some(true),
         ..Default::default()
     });
     let artists_res = use_artists(source, artists_query);
@@ -97,7 +97,7 @@ pub fn Artist(
         }
         Some(hooks::AlbumQuery {
             artist_key: Some(artist_key),
-            downloaded: (caps().downloads && *is_offline.read()).then_some(true),
+            offline: (caps().downloads && *is_offline.read()).then_some(true),
             sort,
             ..Default::default()
         })
@@ -167,7 +167,10 @@ pub fn Artist(
         if !(caps().downloads && *is_offline.read()) {
             return tracks;
         }
-        tracks.into_iter().filter(|t| t.offline).collect()
+        tracks
+            .into_iter()
+            .filter(|t| t.offline || t.cached)
+            .collect()
     });
 
     let artist_cover = use_memo(move || {

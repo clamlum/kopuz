@@ -28,10 +28,14 @@ pub use sources::{MAX_MUSIC_UPLOAD_BYTES, StorageQuota, TrackUpload};
 pub use artwork::{ArtworkData, ArtworkRef, ArtworkRequest, ArtworkTarget};
 pub use catalog::{
     CatalogActions, CatalogChip, CatalogDetail, CatalogDetailRequest, CatalogHeader, CatalogItem,
-    CatalogItemKind, CatalogPage, CatalogShelf, Rating, ReleaseKind, ShelfLayout,
+    CatalogItemKind, CatalogPage, CatalogShelf, DiscoverRows, ForYou, ForYouUnavailable, Rating,
+    ReleaseKind, ShelfLayout,
 };
 pub use error::{ApiError, ErrorBody, ErrorCode, ErrorReason};
-pub use events::{ApiEvent, JobKind, JobProgress, NoticeLevel, SourceState, Table};
+pub use events::{
+    ApiEvent, JobKind, JobProgress, NetworkStatus, NoticeLevel, OfflineCacheStatus, OfflineMode,
+    SourceState, Table,
+};
 pub use jobs::{
     DownloadCandidate, DownloadHistoryEntry, DownloadItemState, DownloadItemStatus, DownloadState,
 };
@@ -64,10 +68,10 @@ pub use schema::{
 };
 pub use sources::{
     AlbumPresentation, ArtistPresentation, BrowserProfile, BrowserSession, CheckOutcome, CheckStep,
-    ConnectKind, ConnectionCheck, CredentialProvision, DraftCheck, FavoritesSyncMode,
-    IntegrationInfo, PageEntry, PlaylistCapability, SearchFilter, ServiceInfo, ServiceRef,
-    SignInKind, SourceAccount, SourceCapabilities, SourceDraft, SourceFolderEntry, SourceInfo,
-    SourceLoginRequest,
+    ConnectKind, ConnectionCheck, CredentialProvision, DraftCheck, DraftProbe, FavoritesSyncMode,
+    FolderProbe, IntegrationInfo, PageEntry, PlaylistCapability, SearchFilter, ServerProbe,
+    ServiceInfo, ServiceRef, SignInKind, SourceAccount, SourceCapabilities, SourceDraft,
+    SourceFolderEntry, SourceInfo, SourceLoginRequest,
 };
 
 pub use config::store::{LockSource, SettingLock};
@@ -260,6 +264,18 @@ pub trait LibraryApi: Send + Sync {
         request: CatalogDetailRequest,
     ) -> Result<CatalogDetail, ApiError>;
 
+    /// The active source's "For you" mix, built on first ask and held in memory; fails only when every radio does.
+    async fn for_you(&self) -> Result<ForYou, ApiError>;
+
+    /// Throw the mix away and build a new one from a fresh pick of liked tracks.
+    async fn refresh_for_you(&self) -> Result<ForYou, ApiError>;
+
+    /// The active source's Discover rows, built on first ask and held in memory until refreshed or the daemon restarts.
+    async fn discover_rows(&self) -> Result<DiscoverRows, ApiError>;
+
+    /// Throw the rows away and build them again: the source's mixes fetched anew, the play-stat rows picked afresh.
+    async fn refresh_discover_rows(&self) -> Result<DiscoverRows, ApiError>;
+
     /// Every station the configured registries hold, pinned ones marked.
     async fn radio_stations(&self) -> Result<Vec<RadioStationInfo>, ApiError>;
 
@@ -412,6 +428,12 @@ pub trait JobApi: Send + Sync {
     /// Per-item state for the downloads a batch is working through.
     async fn download_statuses(&self) -> Result<Vec<DownloadItemStatus>, ApiError>;
 
+    /// The songs kept from their own stream for offline listening; a download of one moves it out of the cache.
+    async fn offline_cache_status(&self) -> Result<OfflineCacheStatus, ApiError>;
+
+    /// Delete every cached song; downloads stay.
+    async fn clear_offline_cache(&self) -> Result<(), ApiError>;
+
     /// Fetch a URL to a file. What tool does it, and every option it is given
     /// beyond the format, is the daemon's; progress arrives as job events and
     /// the outcome joins [`Self::downloader_history`].
@@ -461,6 +483,9 @@ pub trait SourceApi: Send + Sync {
     /// What a draft would do if it were saved, and what is wrong with it.
     /// Cheap enough to call as a form is typed into.
     async fn check_source_draft(&self, draft: SourceDraft) -> Result<DraftCheck, ApiError>;
+
+    /// Try a draft before it is saved: count a folder source's audio files, or send one request to a server's address; stores nothing.
+    async fn probe_source_draft(&self, draft: SourceDraft) -> Result<DraftProbe, ApiError>;
 
     /// Answer a source's own options, a folder source's folders included.
     /// Absent keys are left alone, and an empty secret is not a request to
@@ -516,6 +541,12 @@ pub trait SourceApi: Send + Sync {
 
     /// Probe whether a source is reachable and still signed in.
     async fn validate_source(&self, id: String) -> Result<SourceState, ApiError>;
+
+    /// Whether the internet is reachable, and the source to offer back once it is; changes arrive as `NetworkStatus` events.
+    async fn network_status(&self) -> Result<NetworkStatus, ApiError>;
+
+    /// Enter offline mode (`true`), or leave it however it was entered; answers the status it leads to.
+    async fn set_offline(&self, offline: bool) -> Result<NetworkStatus, ApiError>;
 
     async fn accounts(&self, id: String) -> Result<Vec<SourceAccount>, ApiError>;
 

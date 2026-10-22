@@ -55,6 +55,10 @@ service Kopuz {
   rpc GetAlbumWebUrl(AlbumWebUrlRequest) returns (WebUrl);
   rpc GetCatalog(CatalogRequest) returns (CatalogPage);
   rpc GetCatalogDetail(CatalogDetailRequest) returns (CatalogDetail);
+  rpc GetForYou(GetForYouRequest) returns (ForYou);
+  rpc RefreshForYou(RefreshForYouRequest) returns (ForYou);
+  rpc GetDiscoverRows(GetDiscoverRowsRequest) returns (DiscoverRows);
+  rpc RefreshDiscoverRows(RefreshDiscoverRowsRequest) returns (DiscoverRows);
   rpc GetRadioStations(GetRadioStationsRequest) returns (RadioStationList);
   rpc SearchRadio(SearchRadioRequest) returns (RadioStationList);
   rpc PinRadioStation(PinRadioStationRequest) returns (Unit);
@@ -111,6 +115,8 @@ service Kopuz {
   rpc ClearDownloaderHistory(ClearDownloaderHistoryRequest) returns (Unit);
   rpc GetDownloadStatuses(GetDownloadStatusesRequest) returns (DownloadStatusList);
   rpc RemoveDownload(TrackRef) returns (RemoveDownloadResponse);
+  rpc GetOfflineCacheStatus(GetOfflineCacheStatusRequest) returns (OfflineCacheStatus);
+  rpc ClearOfflineCache(ClearOfflineCacheRequest) returns (Unit);
   rpc EditConfig(EditConfigRequest) returns (EditReport);
   rpc PreviewEqualizer(EqualizerSettings) returns (Unit);
   rpc PreviewReplayGain(ReplayGainSettings) returns (Unit);
@@ -122,6 +128,7 @@ service Kopuz {
   rpc SelectSource(SourceId) returns (SourceInfo);
   rpc SetSourceSettings(SetSourceSettingsRequest) returns (SourceInfo);
   rpc CheckSourceDraft(SourceDraft) returns (DraftCheck);
+  rpc ProbeSourceDraft(SourceDraft) returns (DraftProbe);
   rpc UpsertSource(SourceDraft) returns (SourceInfo);
   rpc DeleteSource(SourceId) returns (Unit);
   rpc ProvisionCredentials(CredentialProvision) returns (SourceInfo);
@@ -132,6 +139,8 @@ service Kopuz {
   rpc ImportBrowserSession(ImportBrowserSessionRequest) returns (SourceInfo);
   rpc BrowseSource(BrowseSourceRequest) returns (SourceFolderList);
   rpc ValidateSource(SourceId) returns (SourceStateResponse);
+  rpc GetNetworkStatus(GetNetworkStatusRequest) returns (NetworkStatus);
+  rpc SetOffline(SetOfflineRequest) returns (NetworkStatus);
   rpc TestSourceConnection(SourceId) returns (ConnectionReport);
   rpc CanOpenBrowser(CanOpenBrowserRequest) returns (BrowserAccess);
   rpc GetSourceAccounts(SourceId) returns (SourceAccountList);
@@ -241,6 +250,7 @@ message Event {
     // The reconnect gap exceeded the replay ring: refetch snapshots.
     Unit resync = 12;
     FrontendPrefsChanged frontend_prefs_changed = 13;
+    NetworkStatus network_status = 14;
   }
 }
 
@@ -302,6 +312,30 @@ message FrontendPrefsChanged {
 message SourceStatusEvent {
   string source = 1;
   SourceState state = 2;
+}
+
+// Whether the daemon reaches the internet, as its last check after a source stopped answering found.
+message NetworkStatus {
+  // Every connectivity check failed, so only sources on this machine or its network are usable.
+  bool internet_down = 1;
+  // The source the daemon moved off when the internet went down, to offer back once it is up.
+  optional string left_source = 2;
+  OfflineMode offline_mode = 3;
+}
+
+// Whether listings and playback keep to what plays without the internet: downloads and cached songs.
+enum OfflineMode {
+  OFFLINE_MODE_OFF = 0;
+  // The internet went down with nothing nearby to play; a frontend offers to leave once it is back.
+  OFFLINE_MODE_AUTOMATIC = 1;
+  // Asked for, by --offline or SetOffline, and left only by SetOffline.
+  OFFLINE_MODE_REQUESTED = 2;
+}
+
+message GetNetworkStatusRequest {}
+
+message SetOfflineRequest {
+  bool offline = 1;
 }
 
 message Notice {
@@ -547,6 +581,8 @@ message TrackFilter {
   optional uint32 year_to = 11;
   // Runs the whole ordering backwards.
   bool reverse = 12;
+  // Only tracks with (true) or without (false) a downloaded or a cached copy.
+  optional bool offline = 13;
 }
 
 message AlbumOrder {
@@ -566,6 +602,8 @@ message AlbumQuery {
   optional bool downloaded = 7;
   // Absent lists every album; present and empty lists none.
   AlbumIds ids = 8;
+  // Only albums with (true) or without (false) a track that plays offline, downloaded or cached.
+  optional bool offline = 9;
 }
 
 message AlbumIds {
@@ -586,6 +624,8 @@ message ArtistQuery {
   optional string search = 1;
   repeated ArtistOrder sort = 2;
   optional bool downloaded = 3;
+  // Only artists with (true) or without (false) a track that plays offline, downloaded or cached.
+  optional bool offline = 4;
 }
 
 message ArtistsRequest {
@@ -905,6 +945,8 @@ message SourceCapabilities {
   bool explicit_flags = 29;
   // It keeps a watch history of the account's plays.
   bool watch_history = 30;
+  // Every play of its tracks goes through kopuz, so kopuz's play counts are its whole listening history.
+  bool complete_play_history = 33;
 }
 
 message SearchFilter {
@@ -936,6 +978,8 @@ message ServiceInfo {
   string accent = 4;
   bool experimental = 5;
   repeated FieldSpec fields = 6;
+  // One plain line on what it plays from, for a picker.
+  Text summary = 7;
 }
 
 // Which service a configured source speaks: what to call it, how to draw it.
@@ -1006,6 +1050,42 @@ message SourceDraft {
 message DraftCheck {
   SignInKind sign_in = 1;
   repeated Problem problems = 2;
+}
+
+// What trying an unsaved draft found; nothing is stored.
+message DraftProbe {
+  oneof outcome {
+    FolderProbeList folders = 1;
+    ServerProbe server = 2;
+    // There is nothing to reach before it is signed in, as with a streaming service.
+    Unit not_probeable = 3;
+  }
+}
+
+// One per folder, in the order the draft lists them.
+message FolderProbeList {
+  repeated FolderProbe folders = 1;
+}
+
+message FolderProbe {
+  string path = 1;
+  bool exists = 2;
+  bool readable = 3;
+  // Audio files under it by the scanner's file-type rule.
+  uint32 audio_files = 4;
+  // The count stopped early, so there are at least audio_files.
+  bool at_least = 5;
+}
+
+// What one request to a server draft's address answered.
+message ServerProbe {
+  oneof outcome {
+    Unit reachable = 1;
+    // The name did not resolve, the connection failed or it timed out.
+    Unit unreachable = 2;
+    // An answer that is not a success.
+    uint32 status = 3;
+  }
 }
 
 message SetSourceSettingsRequest {
@@ -1345,6 +1425,9 @@ message CatalogDetail {
   ReleaseKind release_kind = 22;
   // For an artist; subtitle carries its subscribers.
   optional string monthly_listeners = 18;
+  // For an artist, PlaylistRadio ids of its Shuffle and Mix.
+  optional string shuffle_radio = 23;
+  optional string mix_radio = 24;
   optional string owner = 19;
   optional string plays = 20;
   optional string web_url = 21;
@@ -1359,6 +1442,34 @@ enum ReleaseKind {
   RELEASE_KIND_SINGLE = 2;
   RELEASE_KIND_EP = 3;
   RELEASE_KIND_AUDIOBOOK = 4;
+}
+
+message GetForYouRequest {}
+message RefreshForYouRequest {}
+
+// Why there is no mix; a frontend hides the row.
+enum ForYouUnavailable {
+  FOR_YOU_UNAVAILABLE_UNSPECIFIED = 0;
+  FOR_YOU_UNAVAILABLE_NO_TRACK_RADIO = 1;
+  FOR_YOU_UNAVAILABLE_NO_LIKES = 2;
+}
+
+message ForYou {
+  oneof outcome {
+    TrackList mix = 1;
+    ForYouUnavailable unavailable = 2;
+  }
+}
+
+message GetDiscoverRowsRequest {}
+message RefreshDiscoverRowsRequest {}
+
+// The active source's Discover rows; a row the source cannot fill is empty.
+message DiscoverRows {
+  repeated CatalogItem mixes = 1;
+  // Only where SourceCapabilities.complete_play_history holds.
+  repeated AlbumInfo never_played = 2;
+  repeated TrackInfo forgotten_favorites = 3;
 }
 
 // ---------------- radio ----------------
@@ -1515,6 +1626,8 @@ message TrackInfo {
   // How often it was played or watched, as the source wrote it ("1.2B plays").
   optional string plays = 25;
   optional TrackCounterpart counterpart = 26;
+  // Kept from its own stream for offline listening, evicted when the cache needs room; a download is `offline` instead.
+  bool cached = 27;
 }
 
 // Which cut of a recording a row is, for a source that has both.
@@ -1708,6 +1821,18 @@ message DownloadStatusList {
   repeated DownloadItemStatus items = 1;
 }
 
+message GetOfflineCacheStatusRequest {}
+message ClearOfflineCacheRequest {}
+
+// Songs kept from their own stream, least recently played evicted first past the cap; downloads never count.
+message OfflineCacheStatus {
+  // Off stops adding songs; the ones held stay and still play.
+  bool enabled = 1;
+  uint64 max_bytes = 2;
+  uint64 used_bytes = 3;
+  uint32 tracks = 4;
+}
+
 message DownloadList {
   repeated string keys = 1;
 }
@@ -1791,6 +1916,9 @@ message ConfigEdit {
     bool tracing_enabled = 33;
     bool auto_check_updates = 34;
     bool minimize_to_tray = 35;
+    StringList connectivity_check_urls = 83;
+    bool offline_cache_enabled = 84;
+    uint64 offline_cache_max_bytes = 85;
   }
 }
 
@@ -1910,6 +2038,9 @@ enum SettingKey {
   SETTING_KEY_SPOTIFY_PREFER_ACTIVE_DEVICE = 82;
   SETTING_KEY_DOWNLOADER_OUTPUT_DIR = 76;
   SETTING_KEY_DOWNLOADER_OPTIONS = 77;
+  SETTING_KEY_CONNECTIVITY_CHECK_URLS = 83;
+  SETTING_KEY_OFFLINE_CACHE_ENABLED = 84;
+  SETTING_KEY_OFFLINE_CACHE_MAX_BYTES = 85;
 }
 
 message GetFrontendPrefsRequest {
@@ -2049,6 +2180,11 @@ message Config {
   bool spotify_prefer_active_device = 82;
   string downloader_output_dir = 76;
   DownloaderOptions downloader_options = 77;
+  // Absent from a peer that predates it, which must not read as an empty list (no check).
+  StringList connectivity_check_urls = 83;
+  // Both absent from a peer that predates them, which must read as the defaults: on, and 5 GB.
+  optional bool offline_cache_enabled = 84;
+  optional uint64 offline_cache_max_bytes = 85;
 }
 
 message DownloaderOptions {
@@ -2291,6 +2427,8 @@ enum ErrorReason {
   ERROR_REASON_APPLE_MUSIC_TOKEN_REQUIRED = 19;
   ERROR_REASON_INVALID_SMB_URL = 20;
   ERROR_REASON_INVALID_SERVER_URL = 21;
+  ERROR_REASON_NETWORK_DOWN = 22;
+  ERROR_REASON_OFFLINE_MODE = 23;
 }
 
 enum ErrorCode {

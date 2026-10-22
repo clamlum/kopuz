@@ -48,6 +48,7 @@ impl MediaSource for OfflineServerSource {
             stream_quality: false,
             explicit_flags: false,
             watch_history: false,
+            complete_play_history: false,
             library_actions: LibraryActions::NONE,
         }
     }

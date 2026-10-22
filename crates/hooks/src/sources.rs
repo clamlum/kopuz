@@ -71,6 +71,36 @@ fn use_sources_provider() -> Signal<Option<Vec<api::SourceInfo>>> {
     rows
 }
 
+/// The daemon's network status, offline mode included: read on every resync, then followed as it changes.
+pub fn use_network_status() -> Signal<api::NetworkStatus> {
+    let api = use_api();
+    let mut status = use_signal(api::NetworkStatus::default);
+    use_future(move || {
+        let api = api.clone();
+        async move {
+            let mut events = api.events();
+            while let Some(event) = events.next().await {
+                let next = match event {
+                    api::ApiEvent::NetworkStatus(next) => next,
+                    // The stream opens with one, so this is the first read too.
+                    api::ApiEvent::Resync => match api.network_status().await {
+                        Ok(next) => next,
+                        Err(error) => {
+                            tracing::debug!(%error, "the network status could not be read");
+                            continue;
+                        }
+                    },
+                    _ => continue,
+                };
+                if *status.peek() != next {
+                    status.set(next);
+                }
+            }
+        }
+    });
+    status
+}
+
 /// The configured sources; `None` until the first answer arrives.
 pub fn use_sources() -> Signal<Option<Vec<api::SourceInfo>>> {
     use_context::<SourceRows>().0

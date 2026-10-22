@@ -60,9 +60,20 @@ impl Session {
                         Some("audio") | Some("bin")
                     )
                 })
+                .or_else(|| {
+                    // A cached copy plays online too, which spares the link.
+                    let cached = self.offline.cache().path(&item_id)?;
+                    self.offline.cache().played(&item_id);
+                    Some(cached)
+                })
         } else {
             None
         };
+        let offline_refused = self.offline.offline_mode()
+            && (is_radio
+                || (is_server
+                    && !self.offline.has_copy(&item_id)
+                    && crate::network::needs_internet(&self.sources)));
 
         let mut use_icy = false;
         let remote_ref = if factory_override.is_some() || offline_path.is_some() {
@@ -95,10 +106,11 @@ impl Session {
             None
         };
 
-        if factory_override.is_none()
-            && offline_path.is_none()
-            && local_path.is_none()
-            && remote_ref.is_none()
+        if offline_refused
+            || (factory_override.is_none()
+                && offline_path.is_none()
+                && local_path.is_none()
+                && remote_ref.is_none())
         {
             // A crossfade candidate that cannot resolve is dropped whole; the
             // end-of-track advance retries on the committed model and reports
@@ -127,18 +139,37 @@ impl Session {
                 at_ms: self.now_ms(),
                 playing: false,
             });
-            let message = if is_radio {
-                "couldn't load this track: the radio station or stream is unknown"
+            let (message, reason) = if offline_refused {
+                (
+                    "couldn't load this track: offline mode is on, and it has no copy here",
+                    Some(api::ErrorReason::OfflineMode),
+                )
+            } else if is_radio {
+                (
+                    "couldn't load this track: the radio station or stream is unknown",
+                    None,
+                )
             } else {
-                "couldn't load this track: no connected source can provide it"
+                (
+                    "couldn't load this track: no connected source can provide it",
+                    None,
+                )
             };
             self.error = Some(api::ErrorBody {
                 code: api::ErrorCode::SourceUnreachable,
                 message: message.to_string(),
-                reason: None,
+                reason,
             });
             return false;
         }
+        let capture =
+            if is_server && remote_ref.is_some() && crate::network::cacheable(&self.sources) {
+                self.offline
+                    .cache()
+                    .capture(&item_id, self.sources.active.as_str())
+            } else {
+                None
+            };
 
         self.error = None;
         if is_server {
@@ -231,6 +262,7 @@ impl Session {
             offline_path,
             local_path,
             remote_ref,
+            capture,
             active_source: self.active_source.clone(),
             stream_quality: self.settings.playback.stream_quality,
             artwork,
@@ -421,6 +453,7 @@ impl Session {
                 if self.arm_gapless_now() {
                     self.publish(state_tx, false);
                 }
+                self.prefetch_next();
             }
             Some(Err(error)) => {
                 tracing::error!(error = %error, "playback failed");
@@ -591,6 +624,8 @@ pub(super) struct ClassifiedLoad {
     offline_path: Option<PathBuf>,
     local_path: Option<PathBuf>,
     remote_ref: Option<(String, String)>,
+    /// Keeps the stream's whole file in the offline cache once it has arrived.
+    capture: Option<server::stream::stream_buffer::CompleteSink>,
     active_source: Option<server::source::ActiveSource>,
     stream_quality: config::StreamQuality,
     artwork: Option<String>,
@@ -721,6 +756,7 @@ impl ClassifiedLoad {
                             None,
                             rt_handle.clone(),
                             buffer_progress.clone(),
+                            None,
                         )()
                     }
                 })
@@ -761,6 +797,7 @@ impl ClassifiedLoad {
                     icy_tx,
                     rt_handle,
                     buffer_progress,
+                    self.capture.take(),
                 )
             }
         };

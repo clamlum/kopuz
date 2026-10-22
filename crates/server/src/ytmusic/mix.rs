@@ -7,6 +7,15 @@ use super::search::{linked_album, runs_with_browse};
 
 const ORIGIN: &str = "https://music.youtube.com";
 
+/// Marks a playlist ref as a mix YouTube already built (an artist's Shuffle
+/// or Mix). Those `RD…` ids are not browsable and play as they are, where any
+/// other playlist ref seeds a new `RDAMPL…` mix.
+const ISSUED_MIX: &str = "mix:";
+
+pub fn issued_mix_ref(playlist_id: &str) -> String {
+    format!("{ISSUED_MIX}{playlist_id}")
+}
+
 /// What a mix is generated from. The `RD…` id and whether the request pins a
 /// first video are both derived from this one value, so they can't be paired
 /// wrongly — a playlist mix with a `videoId` is not a request YT answers.
@@ -16,9 +25,18 @@ pub(super) enum MixSeed<'a> {
     /// A whole playlist — YT's own "Start radio" on a playlist. The queue is
     /// generated, so it bears no relation to the playlist's track list.
     Playlist(&'a str),
+    /// A mix YouTube already built, played under its own id.
+    Issued(&'a str),
 }
 
-impl MixSeed<'_> {
+impl<'a> MixSeed<'a> {
+    pub(super) fn from_playlist_ref(playlist_ref: &'a str) -> Self {
+        match playlist_ref.strip_prefix(ISSUED_MIX) {
+            Some(id) => Self::Issued(id),
+            None => Self::Playlist(playlist_ref),
+        }
+    }
+
     /// The `RD…` playlist id the mix is built under.
     fn mix_playlist_id(&self) -> String {
         match self {
@@ -28,6 +46,7 @@ impl MixSeed<'_> {
             // `RDAMPL` wants the bare one. Normalizing here rather than at
             // construction means no caller can skip it.
             Self::Playlist(id) => format!("RDAMPL{}", id.strip_prefix("VL").unwrap_or(id)),
+            Self::Issued(id) => id.to_string(),
         }
     }
 
@@ -37,7 +56,7 @@ impl MixSeed<'_> {
     fn pinned_video_id(&self) -> Option<&str> {
         match self {
             Self::Video(id) => Some(id),
-            Self::Playlist(_) => None,
+            Self::Playlist(_) | Self::Issued(_) => None,
         }
     }
 }
@@ -47,6 +66,7 @@ impl std::fmt::Display for MixSeed<'_> {
         match self {
             Self::Video(id) => write!(f, "video:{id}"),
             Self::Playlist(id) => write!(f, "playlist:{id}"),
+            Self::Issued(id) => write!(f, "{ISSUED_MIX}{id}"),
         }
     }
 }
@@ -509,6 +529,16 @@ mod tests {
         }));
 
         assert_eq!(page, MixPage::default());
+    }
+
+    #[test]
+    fn an_issued_mix_plays_under_its_own_id() {
+        let issued = issued_mix_ref("RDEMabc");
+        let seed = MixSeed::from_playlist_ref(&issued);
+        assert_eq!(seed.mix_playlist_id(), "RDEMabc");
+        assert_eq!(seed.pinned_video_id(), None);
+        let playlist = MixSeed::from_playlist_ref("PLabc");
+        assert_eq!(playlist.mix_playlist_id(), "RDAMPLPLabc");
     }
 }
 

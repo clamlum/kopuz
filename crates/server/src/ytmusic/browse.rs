@@ -71,11 +71,19 @@ pub async fn fetch_page(id: &str, cookies: Option<&str>) -> Result<BrowsePage, S
         payload["params"] = params.into();
     }
     let response = innertube::post(WEB_REMIX, "browse", payload, cookies).await?;
+    signed_in(&response, cookies)?;
     let mut page =
         parse_page(&response).ok_or_else(|| format!("{browse_id} is not a browse page"))?;
     let visitor = innertube::extract_visitor_data(&response);
     tag_continuations(&mut page, Endpoint::Browse, visitor.as_deref());
     Ok(page)
+}
+
+fn signed_in(response: &Value, cookies: Option<&str>) -> Result<(), String> {
+    if cookies.is_some_and(|c| !c.is_empty()) && innertube::answered_signed_out(response) {
+        return Err(innertube::SIGNED_OUT.to_string());
+    }
+    Ok(())
 }
 
 #[tracing::instrument(name = "yt.browse_continuation", skip_all)]
@@ -89,6 +97,7 @@ pub async fn fetch_continuation(token: &str, cookies: Option<&str>) -> Result<Br
         continuation.visitor,
     )
     .await?;
+    signed_in(&response, cookies)?;
     let mut page = parse_continuation(&response);
     stop_repeats(continuation.token, &mut page);
     tag_continuations(&mut page, continuation.endpoint, continuation.visitor);

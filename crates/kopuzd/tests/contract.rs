@@ -160,10 +160,18 @@ async fn spawn_pair() -> Pair {
         .upsert_tracks(&config::Source::default(), &seeded)
         .await
         .expect("seed tracks");
+    // No test may ask the real internet whether it is there; one that needs a check names its own address.
+    let quiet = config::Settings {
+        system: config::System {
+            connectivity_check_urls: Vec::new(),
+            ..config::System::default()
+        },
+        ..config::Settings::default()
+    };
     let config_service = Arc::new(ConfigService::new(
         database.clone(),
         dir.path().join("settings.toml"),
-        config::Settings::default(),
+        quiet,
     ));
     let credentials = daemon::CredentialStore::load(&database)
         .await
@@ -218,9 +226,11 @@ async fn spawn_pair() -> Pair {
     let downloader =
         daemon::UrlDownloadService::new(database.clone(), config_service.clone(), sources.clone());
     let prefs = daemon::PrefsService::new(database.clone(), session.clone());
+    let catalog = daemon::CatalogService::new(database.clone(), session.clone(), library.clone());
     let build_api = |session: SessionHandle| {
         LocalApi::new(session)
             .with_config(config_service.clone())
+            .with_catalog(catalog.clone())
             .with_prefs(prefs.clone())
             .with_library(library.clone())
             .with_jobs(jobs.clone())
@@ -2921,6 +2931,250 @@ async fn catalog_and_radio_report_absence_identically() {
     );
 }
 
+/// A folder library starts no radio, so "For you" is unavailable rather than an error, on both transports.
+#[tokio::test]
+async fn for_you_without_track_radio_hides_the_row_on_both_transports() {
+    let pair = spawn_pair().await;
+    pair.local
+        .set_favorite("/lib/seed-0.flac".into(), true)
+        .await
+        .expect("a like to seed from");
+    let hidden = api::ForYou::Unavailable(api::ForYouUnavailable::NoTrackRadio);
+
+    assert_eq!(pair.local.for_you().await, Ok(hidden.clone()));
+    assert_eq!(pair.wire.for_you().await, Ok(hidden.clone()));
+    assert_eq!(pair.local.refresh_for_you().await, Ok(hidden.clone()));
+    assert_eq!(pair.wire.refresh_for_you().await, Ok(hidden));
+}
+
+/// A source across the internet going quiet while the checks fail too is the internet down, on both transports, and a switch back to it is refused.
+#[tokio::test]
+async fn the_internet_going_down_reaches_both_transports_and_refuses_a_switch() {
+    use futures_util::StreamExt;
+    let pair = spawn_pair().await;
+    for api in [&pair.local as &dyn KopuzApi, &pair.wire] {
+        assert_eq!(
+            api.network_status().await,
+            Ok(api::NetworkStatus::default())
+        );
+    }
+    let closed = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        format!("http://{}/", listener.local_addr().expect("address"))
+    };
+    let report = pair
+        .wire
+        .edit_config(vec![config::SettingsEdit::System(
+            config::SystemEdit::ConnectivityCheckUrls(vec![closed]),
+        )])
+        .await
+        .expect("edit");
+    assert_eq!(report.outcomes, [api::EditOutcome::Applied]);
+    let far = pair
+        .wire
+        .upsert_source(api::SourceDraft {
+            name: "Far away".into(),
+            service: "jellyfin".into(),
+            values: vec![api::FieldValue::new("url", "https://jellyfin.invalid")],
+            ..Default::default()
+        })
+        .await
+        .expect("add");
+    pair.wire
+        .provision_credentials(api::CredentialProvision {
+            server_id: far.id.clone(),
+            secret: "token".into(),
+            user_id: Some("ada".into()),
+            browser: None,
+        })
+        .await
+        .expect("sign in");
+    let mut events = pair.wire.events();
+
+    assert_eq!(
+        pair.wire.validate_source(far.id.clone()).await,
+        Ok(api::SourceState::Offline)
+    );
+
+    let down = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = events.next().await {
+            if let ApiEvent::NetworkStatus(status) = event {
+                return status;
+            }
+        }
+        panic!("the event stream ended");
+    })
+    .await
+    .expect("the check ran");
+    assert!(down.internet_down);
+    assert_eq!(
+        down.left_source, None,
+        "the active folder library needs no move"
+    );
+    assert_eq!(pair.local.network_status().await, Ok(down));
+    let refused = pair
+        .wire
+        .switch_source(far.id)
+        .await
+        .expect_err("the internet is down");
+    assert_eq!(refused.reason, Some(api::ErrorReason::NetworkDown));
+}
+
+/// A folder library's Discover rows agree on both transports and hold until a refresh, even past a play.
+#[tokio::test]
+async fn discover_rows_agree_across_transports_and_hold_until_refreshed() {
+    let pair = spawn_pair().await;
+    let local = config::Source::default();
+    let names: Vec<String> = (0..30).map(|n| format!("al-{n}")).collect();
+    let tracks: Vec<Track> = names
+        .iter()
+        .map(|name| Track {
+            album_id: name.clone(),
+            ..track(&format!("/lib/{name}.flac"))
+        })
+        .collect();
+    pair.database.upsert_tracks(&local, &tracks).await.unwrap();
+    let albums: Vec<reader::Album> = names
+        .iter()
+        .map(|name| reader::Album {
+            id: name.clone(),
+            title: name.clone(),
+            artist: "Ada".into(),
+            genre: String::new(),
+            year: 0,
+            cover_path: None,
+            manual_cover: false,
+            artist_id: None,
+            artist_key: None,
+        })
+        .collect();
+    pair.database.upsert_albums(&local, &albums).await.unwrap();
+    let active = pair
+        .wire
+        .sources()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|source| source.active)
+        .expect("an active source");
+    assert!(active.capabilities.complete_play_history);
+
+    let first = pair.local.discover_rows().await.unwrap();
+    assert_eq!(pair.wire.discover_rows().await, Ok(first.clone()));
+    assert!(first.mixes.is_empty());
+    assert!(!first.never_played.is_empty());
+    let picked = first.never_played[0].id.clone();
+    pair.database
+        .bump_listen_count(&local, &format!("/lib/{picked}.flac"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        pair.wire.discover_rows().await,
+        Ok(first),
+        "held until refreshed"
+    );
+    let refreshed = pair.wire.refresh_discover_rows().await.unwrap();
+    assert!(
+        refreshed
+            .never_played
+            .iter()
+            .all(|album| album.id != picked),
+        "a played album leaves the row once it is picked again"
+    );
+    assert_eq!(pair.local.discover_rows().await, Ok(refreshed));
+}
+
+/// An unsaved draft is probed alike on both transports: folders counted, a server asked once, a streaming service left alone.
+#[tokio::test]
+async fn a_draft_probe_agrees_across_transports() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let pair = spawn_pair().await;
+    let music = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(music.path().join("album")).expect("mkdir");
+    std::fs::write(music.path().join("album/one.flac"), b"").expect("write");
+    std::fs::write(music.path().join("two.mp3"), b"").expect("write");
+    let missing = music.path().join("missing").to_string_lossy().into_owned();
+    let folders = api::SourceDraft {
+        name: "Mine".into(),
+        service: "folders".into(),
+        values: vec![api::FieldValue::new(
+            "directories",
+            api::encode_directories(&[
+                music.path().to_string_lossy().into_owned(),
+                missing.clone(),
+            ]),
+        )],
+        ..Default::default()
+    };
+    let expected = api::DraftProbe::Folders(vec![
+        api::FolderProbe {
+            path: music.path().to_string_lossy().into_owned(),
+            exists: true,
+            readable: true,
+            audio_files: 2,
+            at_least: false,
+        },
+        api::FolderProbe {
+            path: missing,
+            ..Default::default()
+        },
+    ]);
+    assert_eq!(
+        pair.local.probe_source_draft(folders.clone()).await,
+        Ok(expected.clone())
+    );
+    assert_eq!(pair.wire.probe_source_draft(folders).await, Ok(expected));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+        }
+    });
+    let server = api::SourceDraft {
+        name: "Jelly".into(),
+        service: "jellyfin".into(),
+        values: vec![api::FieldValue::new("url", &address)],
+        ..Default::default()
+    };
+    let answered = api::DraftProbe::Server(api::ServerProbe::Status(404));
+    assert_eq!(
+        pair.local.probe_source_draft(server.clone()).await,
+        Ok(answered.clone())
+    );
+    assert_eq!(pair.wire.probe_source_draft(server).await, Ok(answered));
+
+    let streaming = api::SourceDraft {
+        name: "YT".into(),
+        service: "ytmusic".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        pair.wire.probe_source_draft(streaming).await,
+        Ok(api::DraftProbe::NotProbeable)
+    );
+    let bad = api::SourceDraft {
+        name: "Jelly".into(),
+        service: "jellyfin".into(),
+        values: vec![api::FieldValue::new("url", "jelly.local")],
+        ..Default::default()
+    };
+    let refused = pair
+        .wire
+        .probe_source_draft(bad)
+        .await
+        .expect_err("not an address");
+    assert_eq!(refused.reason, Some(api::ErrorReason::InvalidServerUrl));
+}
+
 /// Opening a page the source does not have fails the same way on both transports.
 #[tokio::test]
 async fn catalog_pages_agree_across_transports() {
@@ -4079,4 +4333,97 @@ async fn upcoming_edits_agree_across_transports() {
         let wire = pair.wire.queue_edit(edit).await.expect("wire no-op");
         assert_eq!((local.rev, wire.rev), (rev, rev));
     }
+}
+
+/// Offline mode is the same daemon state on both transports: entered and left by either, heard by both.
+#[tokio::test]
+async fn offline_mode_is_set_and_heard_on_both_transports() {
+    use futures_util::StreamExt;
+    let pair = spawn_pair().await;
+    let mut events = pair.local.events();
+
+    let on = pair.wire.set_offline(true).await.expect("enter");
+    assert_eq!(on.offline_mode, api::OfflineMode::Requested);
+    for api in [&pair.local as &dyn KopuzApi, &pair.wire] {
+        assert_eq!(api.network_status().await, Ok(on.clone()));
+    }
+    let heard = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = events.next().await {
+            if let ApiEvent::NetworkStatus(status) = event {
+                return status;
+            }
+        }
+        panic!("the event stream ended");
+    })
+    .await
+    .expect("published");
+    assert_eq!(heard, on);
+
+    let off = pair.local.set_offline(false).await.expect("leave");
+    assert_eq!(off, api::NetworkStatus::default());
+    assert_eq!(pair.wire.network_status().await, Ok(off));
+}
+
+/// The offline cache's status and its clearing answer alike on both transports, and neither touches a download.
+#[tokio::test]
+async fn the_offline_cache_answers_alike_on_both_transports() {
+    let pair = spawn_pair().await;
+    let local = pair.local.offline_cache_status().await.expect("local");
+    assert_eq!(pair.wire.offline_cache_status().await, Ok(local));
+    assert_eq!(local.used_bytes, 0);
+    assert_eq!(local.max_bytes, config::DEFAULT_OFFLINE_CACHE_MAX_BYTES);
+
+    pair.wire.clear_offline_cache().await.expect("wire clear");
+    pair.local.clear_offline_cache().await.expect("local clear");
+    assert_eq!(pair.wire.offline_cache_status().await, Ok(local));
+}
+
+/// The `offline` filter rides the wire and keeps to rows with a copy, a downloaded one included.
+#[tokio::test]
+async fn the_offline_filter_agrees_on_both_transports() {
+    let pair = spawn_pair().await;
+    let copy = pair._dir.path().join("seed-0.flac");
+    std::fs::write(&copy, b"audio").expect("a copy");
+    pair.database
+        .set_offline_track("/lib/seed-0.flac", Some(&copy.to_string_lossy()))
+        .await
+        .expect("registered");
+    let everything = Page {
+        offset: 0,
+        limit: 100,
+    };
+    for offline in [Some(true), Some(false)] {
+        let filter = TrackFilter {
+            offline,
+            ..Default::default()
+        };
+        let local = pair
+            .local
+            .tracks(filter.clone(), everything)
+            .await
+            .expect("local");
+        let wire = pair.wire.tracks(filter, everything).await.expect("wire");
+        assert_eq!(local, wire, "{offline:?}");
+        let keys: Vec<&str> = wire.items.iter().map(|row| row.key.as_str()).collect();
+        match offline {
+            Some(true) => assert_eq!(keys, ["/lib/seed-0.flac"]),
+            _ => assert_eq!(keys, ["/lib/seed-1.flac"]),
+        }
+    }
+    let albums = api::AlbumQuery {
+        offline: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(
+        pair.local.albums(albums.clone(), everything).await,
+        pair.wire.albums(albums, everything).await
+    );
+    let artists = api::ArtistQuery {
+        offline: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(
+        pair.local.artists(artists.clone(), everything).await,
+        pair.wire.artists(artists, everything).await
+    );
 }

@@ -22,14 +22,23 @@ pub enum NextOutcome {
 /// `start` stays on its track when kept, else moves to the next kept one (the
 /// last, when nothing after it is).
 pub fn without_explicit(tracks: Vec<Track>, start: Option<usize>) -> (Vec<Track>, Option<usize>) {
+    keep_where(tracks, start, |track| !track.explicit)
+}
+
+/// The tracks `keep` takes, with `start` kept as [`without_explicit`] keeps it.
+pub fn keep_where(
+    tracks: Vec<Track>,
+    start: Option<usize>,
+    keep: impl Fn(&Track) -> bool,
+) -> (Vec<Track>, Option<usize>) {
     let start = start.map(|start| {
         tracks
             .iter()
             .take(start)
-            .filter(|track| !track.explicit)
+            .filter(|track| keep(track))
             .count()
     });
-    let kept: Vec<Track> = tracks.into_iter().filter(|track| !track.explicit).collect();
+    let kept: Vec<Track> = tracks.into_iter().filter(|track| keep(track)).collect();
     let start = start.map(|start| start.min(kept.len().saturating_sub(1)));
     (kept, start)
 }

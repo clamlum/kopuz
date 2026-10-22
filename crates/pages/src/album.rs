@@ -38,12 +38,13 @@ pub fn Album(
     mut current_queue_index: Signal<usize>,
 ) -> Element {
     let nav_ctrl = use_context::<components::NavigationController>();
+    let ui_style = crate::layout::use_ui_style();
 
     let open_album_menu = use_signal(|| None::<String>);
 
     rsx! {
         div {
-            class: if cfg!(target_os = "android") { "px-4 pt-2 absolute inset-0 flex flex-col" } else { "px-8 pt-8 absolute inset-0 flex flex-col" },
+            class: crate::layout::page_container_class(&ui_style),
 
             if album_id.read().is_empty() {
                 div { class: "flex-1 min-h-0 flex flex-col",
@@ -69,6 +70,10 @@ pub fn Album(
     }
 }
 
+/// Cards mounted at first paint and added per scroll; a large library otherwise
+/// builds every card and its menu before the page can show anything.
+const ALBUM_BATCH: usize = 60;
+
 #[component]
 fn AlbumGrid(mut album_id: Signal<String>, mut open_album_menu: Signal<Option<String>>) -> Element {
     let source = use_active_source();
@@ -85,7 +90,7 @@ fn AlbumGrid(mut album_id: Signal<String>, mut open_album_menu: Signal<Option<St
     let albums_query = use_memo(move || {
         Some(hooks::AlbumQuery {
             sort: album_sort.read().clone(),
-            downloaded: (caps().downloads && *is_offline.read()).then_some(true),
+            offline: (caps().downloads && *is_offline.read()).then_some(true),
             ..Default::default()
         })
     });
@@ -105,23 +110,48 @@ fn AlbumGrid(mut album_id: Signal<String>, mut open_album_menu: Signal<Option<St
             .and_then(Result::ok)
             .unwrap_or_default()
     });
-    let available_sort_fields = use_memo(move || hooks::sort::available_album_fields(&albums()));
+    let available_sort_fields =
+        use_memo(move || hooks::sort::available_album_fields(&albums.read()));
     // A source's first sync lists nothing until it lands, which is not an empty library.
     let filling = hooks::jobs::use_library_filling();
 
-    // Restore the grid scroll once after the albums first render; guarded so DB
-    // reactivity re-runs don't keep snapping the view back to the saved offset.
-    let mut scroll_restored = use_signal(|| false);
+    let mut shown = use_signal(|| ALBUM_BATCH);
+    crate::server::use_infinite_scroll(
+        "album-grid-sentinel",
+        move || shown().min(albums.read().len()),
+        move || {
+            if *shown.peek() < albums.peek().len() {
+                shown += ALBUM_BATCH;
+            }
+        },
+    );
+
+    // Restore the saved offset once. A deep one lies past the first batch: the
+    // browser clamps to the bottom instead, which brings the sentinel in and
+    // loads the next batch, and the restore runs again until the grid's own
+    // scroll event reports it landed. Guarded so DB reactivity re-runs don't
+    // keep snapping the view back.
+    let target = use_hook(|| crate::scroll_persist::get("albums"));
+    let mut scroll_restored = use_signal(move || target <= 0.0);
     use_effect(move || {
-        if *scroll_restored.read() || albums().is_empty() {
+        let loaded = shown();
+        if *scroll_restored.peek() || albums.read().is_empty() {
             return;
         }
-        scroll_restored.set(true);
-        let _ = dioxus::document::eval(&crate::scroll_persist::restore_eval(
-            "album-grid-scroll",
-            "albums",
+        let _ = dioxus::document::eval(&format!(
+            "requestAnimationFrame(() => {{ \
+             const el = document.getElementById('album-grid-scroll'); \
+             if (el) el.scrollTop = {target}; }});"
         ));
+        if loaded >= albums.peek().len() {
+            scroll_restored.set(true);
+        }
     });
+
+    let delete_from_disk = caps().delete_from_disk;
+    let open_id = open_album_menu.read().clone();
+    let albums = albums.read();
+    let shown = shown();
 
     rsx! {
         div { class: "flex-1 min-h-0 flex flex-col",
@@ -132,14 +162,22 @@ fn AlbumGrid(mut album_id: Signal<String>, mut open_album_menu: Signal<Option<St
         div {
             id: "album-grid-scroll",
             class: "flex-1 min-h-0 overflow-y-auto pb-8",
-            onscroll: move |e| crate::scroll_persist::save("albums", e.scroll_top()),
-            if albums_res.read().is_none() || (albums().is_empty() && filling()) {
+            onscroll: move |e| {
+                let top = e.scroll_top();
+                // The clamped offsets a restore passes through are not where the user left it.
+                if *scroll_restored.peek() {
+                    crate::scroll_persist::save("albums", top);
+                } else if top >= target - 1.0 {
+                    scroll_restored.set(true);
+                }
+            },
+            if albums_res.read().is_none() || (albums.is_empty() && filling()) {
                 div { class: "flex items-center justify-center py-12",
                     i { class: "fa-solid fa-spinner fa-spin text-3xl text-white/20" }
                 }
             } else if let Some(Err(error)) = albums_res.read().clone() {
                 crate::layout::ReadError { error }
-            } else if albums().is_empty() {
+            } else if albums.is_empty() {
                 p { class: "text-slate-500", "{i18n::t(\"no_albums_found\")}" }
             } else {
                 div {
@@ -147,84 +185,101 @@ fn AlbumGrid(mut album_id: Signal<String>, mut open_album_menu: Signal<Option<St
                     // restyled by the `.view-list` CSS), so toggling only patches this
                     // container's class — no per-card re-render or cover refetch.
                     class: if *view_mode.read() == AlbumViewMode::List { "view-list" } else { "grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-6" },
-                    for album in albums() {
-                        {
-                            let cap = caps();
-                            let id_for_nav = album.id.clone();
-                            let id_for_menu = album.id.clone();
-                            let is_open = open_album_menu.read().as_deref() == Some(&album.id);
-                            let cover_url = hooks::artwork::for_album(&album, hooks::artwork::Size::Thumb);
-                            let remove_label = if cap.delete_from_disk {
-                                i18n::t("delete_album").to_string()
-                            } else {
-                                i18n::t("remove_from_cache").to_string()
-                            };
-                            rsx! {
-                                div {
-                                    key: "{album.id}",
-                                    class: if is_open { "vcard group relative z-50 p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-colors" } else { "vcard group relative p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-colors" },
-                                    style: if is_open { "content-visibility: visible; contain: none;" } else { "content-visibility: auto;" },
-                                    oncontextmenu: {
-                                        let id = id_for_menu.clone();
-                                        move |evt| {
-                                            evt.prevent_default();
-                                            components::dots_menu::open_at_pointer(&evt);
-                                            open_album_menu.set(Some(id.clone()));
-                                        }
-                                    },
-
-                                    div {
-                                        class: "vcard-click cursor-pointer",
-                                        onclick: move |_| album_id.set(id_for_nav.clone()),
-                                        div {
-                                            class: "vcard-cover aspect-square rounded-lg bg-stone-800 mb-3 overflow-hidden relative",
-                                            style: "-webkit-user-drag: none;",
-                                            ondragstart: move |evt| evt.prevent_default(),
-                                            if let Some(url) = &cover_url {
-                                                img { src: "{url}", class: "w-full h-full object-cover group-hover:scale-105 transition-transform duration-300", decoding: "async", loading: "lazy", draggable: "false", ondragstart: move |evt| evt.prevent_default() }
-                                            } else {
-                                                div { class: "w-full h-full flex items-center justify-center",
-                                                    i { class: "fa-solid fa-compact-disc text-4xl text-white/20" }
-                                                }
-                                            }
-                                        }
-                                        div {
-                                            class: "vcard-meta",
-                                            h3 { class: "text-white font-medium truncate", "{album.title}" }
-                                            p { class: "text-sm text-stone-400 truncate", "{album.artist}" }
-                                        }
-                                    }
-
-                                    div { class: "vcard-menu absolute bottom-3 right-3",
-                                        components::album_actions::AlbumActionsMenu {
-                                            album_id: id_for_menu.clone(),
-                                            album_title: album.title.clone(),
-                                            artist_key: album.artist_key.clone(),
-                                            is_open: Some(is_open),
-                                            on_open: {
-                                                let id = id_for_menu.clone();
-                                                Some(EventHandler::new(move |_| open_album_menu.set(Some(id.clone()))))
-                                            },
-                                            on_close: Some(EventHandler::new(move |_| open_album_menu.set(None))),
-                                            button_class: "opacity-0 group-hover:opacity-100 focus:opacity-100 bg-black/40".to_string(),
-                                            anchor: "right".to_string(),
-                                            delete_label: Some(remove_label.clone()),
-                                            on_delete: {
-                                                let id = id_for_menu.clone();
-                                                Some(EventHandler::new(move |_| {
-                                                    open_album_menu.set(None);
-                                                    hooks::library_actions::delete_album(id.clone(), cap.delete_from_disk);
-                                                }))
-                                            },
-                                        }
-                                    }
-                                }
-                            }
+                    for album in albums.iter().take(shown) {
+                        AlbumCard {
+                            key: "{album.id}",
+                            album: album.clone(),
+                            is_open: open_id.as_deref() == Some(album.id.as_str()),
+                            delete_from_disk,
+                            album_id,
+                            open_album_menu,
                         }
                     }
                 }
+                if shown < albums.len() {
+                    div { id: "album-grid-sentinel", class: "h-8" }
+                }
             }
         }
+        }
+    }
+}
+
+/// Its own component so a menu opening or a library refresh re-renders only the cards whose props changed.
+#[component]
+fn AlbumCard(
+    album: api::AlbumInfo,
+    is_open: bool,
+    delete_from_disk: bool,
+    mut album_id: Signal<String>,
+    mut open_album_menu: Signal<Option<String>>,
+) -> Element {
+    let id_for_nav = album.id.clone();
+    let id_for_menu = album.id.clone();
+    let cover_url = hooks::artwork::for_album(&album, hooks::artwork::Size::Thumb);
+    let remove_label = if delete_from_disk {
+        i18n::t("delete_album").to_string()
+    } else {
+        i18n::t("remove_from_cache").to_string()
+    };
+    rsx! {
+        div {
+            class: if is_open { "vcard group relative z-50 p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-colors" } else { "vcard group relative p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-colors" },
+            style: if is_open { "content-visibility: visible; contain: none;" } else { "content-visibility: auto;" },
+            oncontextmenu: {
+                let id = id_for_menu.clone();
+                move |evt| {
+                    evt.prevent_default();
+                    components::dots_menu::open_at_pointer(&evt);
+                    open_album_menu.set(Some(id.clone()));
+                }
+            },
+
+            div {
+                class: "vcard-click cursor-pointer",
+                onclick: move |_| album_id.set(id_for_nav.clone()),
+                div {
+                    class: "vcard-cover aspect-square rounded-lg bg-stone-800 mb-3 overflow-hidden relative",
+                    style: "-webkit-user-drag: none;",
+                    ondragstart: move |evt| evt.prevent_default(),
+                    if let Some(url) = &cover_url {
+                        img { src: "{url}", class: "w-full h-full object-cover group-hover:scale-105 transition-transform duration-300", decoding: "async", loading: "lazy", draggable: "false", ondragstart: move |evt| evt.prevent_default() }
+                    } else {
+                        div { class: "w-full h-full flex items-center justify-center",
+                            i { class: "fa-solid fa-compact-disc text-4xl text-white/20" }
+                        }
+                    }
+                }
+                div {
+                    class: "vcard-meta",
+                    h3 { class: "text-white font-medium truncate", "{album.title}" }
+                    p { class: "text-sm text-stone-400 truncate", "{album.artist}" }
+                }
+            }
+
+            div { class: "vcard-menu absolute bottom-3 right-3",
+                components::album_actions::AlbumActionsMenu {
+                    album_id: id_for_menu.clone(),
+                    album_title: album.title.clone(),
+                    artist_key: album.artist_key.clone(),
+                    is_open: Some(is_open),
+                    on_open: {
+                        let id = id_for_menu.clone();
+                        Some(EventHandler::new(move |_| open_album_menu.set(Some(id.clone()))))
+                    },
+                    on_close: Some(EventHandler::new(move |_| open_album_menu.set(None))),
+                    button_class: "opacity-0 group-hover:opacity-100 focus:opacity-100 bg-black/40".to_string(),
+                    anchor: "right".to_string(),
+                    delete_label: Some(remove_label.clone()),
+                    on_delete: {
+                        let id = id_for_menu.clone();
+                        Some(EventHandler::new(move |_| {
+                            open_album_menu.set(None);
+                            hooks::library_actions::delete_album(id.clone(), delete_from_disk);
+                        }))
+                    },
+                }
+            }
         }
     }
 }
@@ -350,7 +405,7 @@ fn AlbumDetail(
             .clone()
             .unwrap_or_default()
             .into_iter()
-            .filter(|t| !offline || t.offline)
+            .filter(|t| !offline || t.offline || t.cached)
             .collect::<Vec<api::TrackInfo>>()
     });
 

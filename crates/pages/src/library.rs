@@ -241,7 +241,7 @@ pub fn LibraryPage(
     let is_vaxry = settings.read().ui.ui_style == UiStyle::Vaxry;
     rsx! {
         div {
-            class: if cfg!(target_os = "android") { "px-3 pt-3 absolute inset-0 flex flex-col overflow-x-hidden" } else if is_vaxry { "px-6 pt-6 absolute inset-0 flex flex-col" } else { "px-8 pt-8 absolute inset-0 flex flex-col" },
+            class: crate::layout::page_container_class(&settings.read().ui.ui_style),
 
             if *show_playlist_modal.read() {
                 PlaylistModal {

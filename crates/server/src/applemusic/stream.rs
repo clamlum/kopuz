@@ -367,7 +367,16 @@ pub async fn resolve_and_decrypt(
     storefront: &str,
     language: &str,
     progress: Option<crate::stream::stream_buffer::BufferProgressCallback>,
+    complete: Option<crate::stream::stream_buffer::CompleteSink>,
 ) -> Result<super::progressive::ProgressiveTrack, String> {
+    let hand_over = |bytes: &[u8], complete: Option<crate::stream::stream_buffer::CompleteSink>| {
+        if let Some(complete) = complete {
+            complete(crate::stream::stream_buffer::Captured {
+                bytes: bytes.to_vec(),
+                content_type: Some("audio/mp4".into()),
+            });
+        }
+    };
     let bearer_token = auth::get_bearer_token().await?;
     // Resolve the id to a catalog Adam id if needed (library ids don't work with web playback)
     let api = crate::applemusic::AppleMusicApi::new(
@@ -391,6 +400,7 @@ pub async fn resolve_and_decrypt(
                     let total = cached.len() as u64;
                     p(0, total, Some(total));
                 }
+                hand_over(&cached, complete);
                 return Ok(super::progressive::ProgressiveTrack::ready(cached));
             }
         }
@@ -413,6 +423,7 @@ pub async fn resolve_and_decrypt(
                     &bearer_token,
                     media_user_token,
                     progress,
+                    complete,
                 )
                 .await;
             }
@@ -434,6 +445,7 @@ pub async fn resolve_and_decrypt(
                 p(0, total, Some(total));
             }
             store_decrypted_blocking(&cache_path, &bytes);
+            hand_over(&bytes, complete);
             return Ok(super::progressive::ProgressiveTrack::ready(bytes));
         }
     };
@@ -539,6 +551,7 @@ pub async fn resolve_and_decrypt(
         if let Some(path) = plaintext_cache {
             store_decrypted_blocking(&path, &decrypted);
         }
+        hand_over(&decrypted, complete);
     })?;
     Ok(track)
 }
@@ -555,6 +568,7 @@ async fn licence_and_decrypt(
     bearer_token: &str,
     media_user_token: &str,
     progress: Option<crate::stream::stream_buffer::BufferProgressCallback>,
+    complete: Option<crate::stream::stream_buffer::CompleteSink>,
 ) -> Result<super::progressive::ProgressiveTrack, String> {
     let key_id = STANDARD
         .decode(&key.kid_base64)
@@ -581,8 +595,15 @@ async fn licence_and_decrypt(
     let (track, sink) = super::progressive::ProgressiveTrack::streaming(total);
     sink.push(&encrypted);
     sink.finish();
-    // Already cached, so nothing to write when it finishes.
-    track.begin_decrypt(cdm, cdm_session, key_id, progress, |_| {})?;
+    // Already cached here, so only a sink hears when it finishes.
+    track.begin_decrypt(cdm, cdm_session, key_id, progress, move |decrypted| {
+        if let Some(complete) = complete {
+            complete(crate::stream::stream_buffer::Captured {
+                bytes: decrypted,
+                content_type: Some("audio/mp4".into()),
+            });
+        }
+    })?;
     Ok(track)
 }
 
@@ -603,9 +624,16 @@ pub async fn download_decrypted(
     language: &str,
     progress: Option<crate::stream::stream_buffer::BufferProgressCallback>,
 ) -> Result<Vec<u8>, String> {
-    let track = resolve_and_decrypt(adam_id, media_user_token, storefront, language, progress)
-        .await
-        .map_err(|e| format!("resolve for download: {e}"))?;
+    let track = resolve_and_decrypt(
+        adam_id,
+        media_user_token,
+        storefront,
+        language,
+        progress,
+        None,
+    )
+    .await
+    .map_err(|e| format!("resolve for download: {e}"))?;
 
     // Decryption is CPU-bound and the wait is a blocking one, so neither belongs
     // on a runtime worker.

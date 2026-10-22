@@ -4,6 +4,10 @@
   "autoplay_radio": false,
   "back_behavior": "RewindThenPrev",
   "channel_mode": "Stereo",
+  "connectivity_check_urls": [
+    "http://cp.cloudflare.com/generate_204",
+    "http://detectportal.firefox.com/success.txt"
+  ],
   "cover_art_background": false,
   "cover_art_blur": 0,
   "cover_art_darkening": 45,
@@ -72,6 +76,8 @@
   "lyrics_offset_auto": true,
   "lyrics_offset_ms": 1000,
   "minimize_to_tray": false,
+  "offline_cache_enabled": true,
+  "offline_cache_max_bytes": 5000000000,
   "offline_quality": "Kbps256",
   "pause_watch_history": false,
   "player_bar_position": "Bottom",

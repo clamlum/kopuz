@@ -11,7 +11,7 @@ use api::{
 };
 use reader::Album;
 
-use super::{LibraryService, album_query, artist_query, db_error, db_page};
+use super::{LibraryService, album_query, artist_query, db_error, db_page, offline_filter};
 
 /// Paging a fully materialized list. The database returns whole collections
 /// for these (they are small next to the track table), so the window is
@@ -28,7 +28,7 @@ fn window<T: Clone>(rows: &[T], page: Page) -> (u32, Vec<T>) {
 }
 
 /// An album row as the wire carries it, keyed to the artist it bills.
-fn album_info(album: &Album) -> AlbumInfo {
+pub(crate) fn album_info(album: &Album) -> AlbumInfo {
     AlbumInfo {
         id: album.id.clone(),
         title: album.title.clone(),
@@ -69,11 +69,12 @@ impl LibraryService {
             return Ok(Vec::new());
         }
         let offline = self.offline();
-        let rows = self
+        let mut rows = self
             .db
             .tracks_by_keys(&self.query_source(), keys)
             .await
             .map_err(db_error)?;
+        self.keep_offline(&mut rows);
         Ok(rows
             .iter()
             .map(|track| crate::wire::track_info(track, &offline))
@@ -130,7 +131,10 @@ impl LibraryService {
     }
 
     pub async fn albums(&self, query: AlbumQuery, page: Page) -> Result<AlbumPage, ApiError> {
-        let query = album_query(self.query_source(), query);
+        let Some(offline) = offline_filter(query.offline, self.offline_reads()) else {
+            return Ok(AlbumPage::default());
+        };
+        let query = album_query(self.query_source(), query, offline);
         let listing = self
             .db
             .albums_page(&query, db_page(page))
@@ -143,6 +147,16 @@ impl LibraryService {
     }
 
     pub async fn albums_recently_added(&self, page: Page) -> Result<AlbumPage, ApiError> {
+        if self.offline_reads() {
+            let newest = AlbumQuery {
+                sort: vec![config::SortCriterion::new(
+                    config::AlbumSortField::RecentlyAdded,
+                    config::SortDirection::Desc,
+                )],
+                ..AlbumQuery::default()
+            };
+            return self.albums(newest, page).await;
+        }
         // The store applies the recency order and the cut, so it has to see the
         // whole window the caller is paging within, not just the page length.
         let depth = page.offset.saturating_add(page.limit);
@@ -167,11 +181,12 @@ impl LibraryService {
 
     pub async fn album_tracks(&self, id: &str, page: Page) -> Result<TrackPage, ApiError> {
         let offline = self.offline();
-        let rows = self
+        let mut rows = self
             .db
             .album_tracks(&self.query_source(), id)
             .await
             .map_err(db_error)?;
+        self.keep_offline(&mut rows);
         let (total, items) = window(&rows, page);
         Ok(TrackPage {
             total,
@@ -187,7 +202,10 @@ impl LibraryService {
     /// covers", so the covers and photos are loaded once for the page rather
     /// than per row -- the same walk `ArtworkService` does, on bulk data.
     pub async fn artists(&self, query: ArtistQuery, page: Page) -> Result<ArtistPage, ApiError> {
-        let query = artist_query(self.query_source(), query);
+        let Some(offline) = offline_filter(query.offline, self.offline_reads()) else {
+            return Ok(ArtistPage::default());
+        };
+        let query = artist_query(self.query_source(), query, offline);
         let listing = self
             .db
             .artists_page(&query, db_page(page))
@@ -242,11 +260,12 @@ impl LibraryService {
     pub async fn artist_tracks(&self, artist: &str, page: Page) -> Result<TrackPage, ApiError> {
         let offline = self.offline();
         let row = self.artist_row(artist).await?;
-        let rows = self
+        let mut rows = self
             .db
             .artist_tracks(&self.query_source(), &row.key, None)
             .await
             .map_err(db_error)?;
+        self.keep_offline(&mut rows);
         let (total, items) = window(&rows, page);
         Ok(TrackPage {
             total,
@@ -260,11 +279,12 @@ impl LibraryService {
 
     pub async fn artist_sample_tracks(&self, page: Page) -> Result<TrackPage, ApiError> {
         let offline = self.offline();
-        let rows = self
+        let mut rows = self
             .db
             .artist_sample_tracks(&self.query_source(), page.limit)
             .await
             .map_err(db_error)?;
+        self.keep_offline(&mut rows);
         let total = rows.len() as u32;
         Ok(TrackPage {
             total,
@@ -289,11 +309,12 @@ impl LibraryService {
 
     pub async fn genre_tracks(&self, genre: &str, page: Page) -> Result<TrackPage, ApiError> {
         let offline = self.offline();
-        let rows = self
+        let mut rows = self
             .db
             .genre_tracks(&self.query_source(), genre)
             .await
             .map_err(db_error)?;
+        self.keep_offline(&mut rows);
         let (total, items) = window(&rows, page);
         Ok(TrackPage {
             total,
@@ -315,11 +336,12 @@ impl LibraryService {
             .recently_played(&source, page.offset.saturating_add(page.limit))
             .await
             .map_err(db_error)?;
-        let rows = self
+        let mut rows = self
             .db
             .tracks_by_keys(&source, &keys)
             .await
             .map_err(db_error)?;
+        self.keep_offline(&mut rows);
         let ordered: Vec<_> = keys
             .iter()
             .filter_map(|key| rows.iter().find(|track| track.id.key() == key.as_str()))
@@ -338,6 +360,9 @@ impl LibraryService {
     }
 
     pub async fn search(&self, query: &str) -> Result<SearchResults, ApiError> {
+        if self.offline_reads() {
+            return self.search_offline(query).await;
+        }
         let sources = self.current_sources();
         let offline = self.offline();
         // A remote source answers over the network, so search is the one read
@@ -358,6 +383,33 @@ impl LibraryService {
                 .map(|track| crate::wire::track_info(track, &offline))
                 .collect(),
             albums: albums.iter().map(album_info).collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Search while offline mode keeps to the copies here: the library's own rows with one, never the source.
+    async fn search_offline(&self, query: &str) -> Result<SearchResults, ApiError> {
+        let tracks = self
+            .tracks(
+                api::TrackFilter {
+                    search: Some(query.to_string()),
+                    ..api::TrackFilter::default()
+                },
+                Page::default(),
+            )
+            .await?;
+        let albums = self
+            .albums(
+                AlbumQuery {
+                    search: Some(query.to_string()),
+                    ..AlbumQuery::default()
+                },
+                Page::default(),
+            )
+            .await?;
+        Ok(SearchResults {
+            tracks: tracks.items,
+            albums: albums.albums,
             ..Default::default()
         })
     }

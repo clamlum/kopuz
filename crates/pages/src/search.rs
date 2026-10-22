@@ -3,7 +3,7 @@ use components::search_bar::SearchBar;
 use components::search_genre_detail::SearchGenreDetail;
 use components::search_genres::SearchGenres;
 use components::search_results::SearchResults;
-use config::{Settings, UiStyle};
+use config::Settings;
 use dioxus::prelude::*;
 use hooks::use_db_queries::{use_active_source, use_genre_tracks};
 use hooks::use_search_data::use_search_data;
@@ -91,11 +91,9 @@ fn LocalSearch(
 
     let genre_tracks = use_memo(move || genre_tracks_res.read().clone().unwrap_or_default());
 
-    let is_vaxry = settings.read().ui.ui_style == UiStyle::Vaxry;
-
     rsx! {
         div {
-            class: if cfg!(target_os = "android") { "px-3 pt-3 absolute inset-0 flex flex-col" } else if is_vaxry { "px-6 pt-6 absolute inset-0 flex flex-col" } else { "p-8 absolute inset-0 flex flex-col" },
+            class: crate::layout::page_container_class(&settings.read().ui.ui_style),
 
             if *show_playlist_modal.read() {
                 PlaylistModal {

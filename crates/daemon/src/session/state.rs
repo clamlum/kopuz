@@ -30,6 +30,9 @@ impl Session {
         }
         let _ = state_tx.send(state.clone());
         self.emit(ApiEvent::PlayerState(Box::new(state)));
+        if queue_changed && matches!(self.intent, PlaybackIntent::Committed { .. }) {
+            self.prefetch_next();
+        }
         CommandAck { rev: self.rev }
     }
 

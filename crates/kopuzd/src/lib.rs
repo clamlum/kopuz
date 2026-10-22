@@ -37,12 +37,15 @@ pub struct ServeArgs {
     pub listen: Option<std::net::SocketAddr>,
     pub db_path: Option<String>,
     pub identity: Option<identity::AppIdentity>,
+    /// Start in offline mode: listings and playback keep to downloads and cached songs until `SetOffline` leaves it.
+    pub offline: bool,
 }
 
 impl ServeArgs {
     fn core(&self) -> CoreArgs {
         CoreArgs {
             db_path: self.db_path.clone(),
+            offline: self.offline,
         }
     }
 }

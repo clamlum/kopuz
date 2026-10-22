@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AlbumSortField, AlbumViewMode, ArtistSortField, ArtistViewOrder, HOME_SECTION_KEYS,
     HomeSection, ListenNowStyle, SortCriterion, SortDirection, SortOrder, TrackSortField,
-    default_home_sections, default_sidebar_order,
+    default_catalog_home_sections, default_home_sections, default_sidebar_order,
 };
 
 /// Stored one key per field, named as the field and holding it as JSON.
@@ -28,6 +28,8 @@ pub struct UiPrefs {
     pub artist_view_order: ArtistViewOrder,
     pub sidebar_order: Vec<String>,
     pub home_sections: Vec<HomeSection>,
+    /// Home while the active source has a catalog of its own.
+    pub catalog_home_sections: Vec<HomeSection>,
     pub listen_now_style: ListenNowStyle,
     pub hero_height: u32,
 }
@@ -58,6 +60,7 @@ impl Default for UiPrefs {
             artist_view_order: ArtistViewOrder::Tracks,
             sidebar_order: default_sidebar_order(),
             home_sections: default_home_sections(),
+            catalog_home_sections: default_catalog_home_sections(),
             listen_now_style: ListenNowStyle::List,
             hero_height: 300,
         }
@@ -65,6 +68,23 @@ impl Default for UiPrefs {
 }
 
 impl UiPrefs {
+    /// The home layout in use, with or without a source catalog.
+    pub fn home_layout(&self, catalog: bool) -> &Vec<HomeSection> {
+        if catalog {
+            &self.catalog_home_sections
+        } else {
+            &self.home_sections
+        }
+    }
+
+    pub fn home_layout_mut(&mut self, catalog: bool) -> &mut Vec<HomeSection> {
+        if catalog {
+            &mut self.catalog_home_sections
+        } else {
+            &mut self.home_sections
+        }
+    }
+
     /// Each field under its key, as the JSON value a preference stores; compare these, not their text, whose key order varies.
     pub fn entries(&self) -> BTreeMap<String, serde_json::Value> {
         match serde_json::to_value(self) {
@@ -112,19 +132,8 @@ impl UiPrefs {
 
     /// Keep every known home section and sidebar entry exactly once, appending what a stored order lacks.
     pub fn normalize(&mut self) {
-        let allowed: HashSet<&str> = HOME_SECTION_KEYS.iter().copied().collect();
-        let mut seen: HashSet<String> = HashSet::new();
-        self.home_sections.retain(|section| {
-            allowed.contains(section.key.as_str()) && seen.insert(section.key.clone())
-        });
-        for key in HOME_SECTION_KEYS {
-            if !seen.contains(*key) {
-                self.home_sections.push(HomeSection {
-                    key: (*key).to_string(),
-                    enabled: true,
-                });
-            }
-        }
+        normalize_sections(&mut self.home_sections, true);
+        normalize_sections(&mut self.catalog_home_sections, false);
 
         let all_keys = default_sidebar_order();
         for key in &all_keys {
@@ -133,6 +142,23 @@ impl UiPrefs {
             }
         }
         self.sidebar_order.retain(|k| all_keys.contains(k));
+    }
+}
+
+/// A key the stored order lacks is appended, shown or hidden as `append_enabled` says.
+fn normalize_sections(sections: &mut Vec<HomeSection>, append_enabled: bool) {
+    let allowed: HashSet<&str> = HOME_SECTION_KEYS.iter().copied().collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    sections.retain(|section| {
+        allowed.contains(section.key.as_str()) && seen.insert(section.key.clone())
+    });
+    for key in HOME_SECTION_KEYS {
+        if !seen.contains(*key) {
+            sections.push(HomeSection {
+                key: (*key).to_string(),
+                enabled: append_enabled,
+            });
+        }
     }
 }
 
@@ -204,5 +230,25 @@ mod tests {
         assert_eq!(prefs.home_sections[0].key, "playlists");
         assert!(!prefs.home_sections[0].enabled);
         assert_eq!(prefs.home_sections.len(), HOME_SECTION_KEYS.len());
+    }
+
+    #[test]
+    fn the_catalog_home_opens_on_the_feed_and_hides_what_it_lacks() {
+        let defaults = UiPrefs::default();
+        let shown: Vec<&str> = defaults
+            .catalog_home_sections
+            .iter()
+            .filter(|section| section.enabled)
+            .map(|section| section.key.as_str())
+            .collect();
+        assert_eq!(shown, ["catalog", "playlists"]);
+
+        let prefs = UiPrefs::from_entries([(
+            "catalog_home_sections",
+            r#"[{"key":"hero","enabled":true}]"#,
+        )]);
+        assert_eq!(prefs.catalog_home_sections[0].key, "hero");
+        assert!(prefs.catalog_home_sections[1..].iter().all(|s| !s.enabled));
+        assert_eq!(prefs.catalog_home_sections.len(), HOME_SECTION_KEYS.len());
     }
 }

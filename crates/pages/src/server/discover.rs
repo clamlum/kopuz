@@ -33,19 +33,32 @@ pub(crate) fn failure_text(error: &api::ApiError) -> String {
     )
 }
 
+/// The feed's cache id; no catalog page has an empty one.
+const FEED: &str = "";
+
+fn feed_detail(shelves: &[CatalogShelf], continuation: &Option<String>) -> api::CatalogDetail {
+    api::CatalogDetail {
+        shelves: shelves.to_vec(),
+        continuation: continuation.clone(),
+        ..api::CatalogDetail::default()
+    }
+}
+
 fn keys_of(tracks: &[TrackInfo]) -> Vec<String> {
     tracks.iter().map(|track| track.key.clone()).collect()
 }
 
+/// The source's feed for one that lists no catalog pages, as Home's catalog section.
 #[component]
 #[tracing::instrument(name = "render.discover_home", skip_all)]
-pub fn DiscoverPage(
+pub fn CatalogFeed(
     on_select_album: EventHandler<String>,
     on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
     on_open_artist: EventHandler<String>,
 ) -> Element {
     let api = hooks::use_api();
     let caps = hooks::sources::use_capabilities();
+    let cache = hooks::catalog_cache::use_catalog_cache();
     let mut shelves = use_signal(Vec::<CatalogShelf>::new);
     let mut continuation = use_signal(|| None::<String>);
     let mut loading_more = use_signal(|| false);
@@ -62,15 +75,32 @@ pub fn DiscoverPage(
         if !shelves.peek().is_empty() {
             return;
         }
+        if let Some(cached) = cache.get(CatalogItemKind::Page, FEED) {
+            shelves.set(cached.detail.shelves);
+            continuation.set(cached.detail.continuation);
+            initial_loading.set(false);
+            if cached.fresh {
+                return;
+            }
+        }
         let home_span = tracing::info_span!("discover.load_home");
         let api = api.clone();
         spawn(
             async move {
                 match api.catalog(None).await {
                     Ok(page) => {
-                        shelves.write().extend(page.shelves);
+                        cache.put(
+                            CatalogItemKind::Page,
+                            FEED,
+                            feed_detail(&page.shelves, &page.continuation),
+                        );
+                        shelves.set(page.shelves);
                         continuation.set(page.continuation);
                         error.set(None);
+                    }
+                    // A stale copy on screen beats an error over it.
+                    Err(failure) if !shelves.peek().is_empty() => {
+                        tracing::warn!(error = %failure, "catalog feed refresh failed");
                     }
                     Err(failure) => error.set(Some(failure_text(&failure))),
                 }
@@ -96,6 +126,11 @@ pub fn DiscoverPage(
                     Ok(page) => {
                         shelves.write().extend(page.shelves);
                         continuation.set(page.continuation);
+                        cache.update(
+                            CatalogItemKind::Page,
+                            FEED,
+                            feed_detail(&shelves.peek(), &continuation.peek()),
+                        );
                     }
                     Err(failure) => error.set(Some(failure_text(&failure))),
                 }
@@ -111,19 +146,8 @@ pub fn DiscoverPage(
         load_more,
     );
 
-    if !caps().discover {
-        return rsx! {
-            div { class: "flex items-center justify-center h-full text-white/60 p-12 text-center",
-                p { "{i18n::t(\"discover_unsupported\")}" }
-            }
-        };
-    }
-
     rsx! {
-        div { class: "p-6 md:p-10 max-w-[1600px] mx-auto",
-            h1 { class: "text-3xl md:text-4xl font-black text-white mb-2", "{i18n::t(\"discover\")}" }
-            div { class: "h-px bg-white/10 mb-8" }
-
+        div {
             if *initial_loading.read() {
                 div { class: "flex justify-center py-24",
                     i { class: "fa-solid fa-arrows-rotate fa-spin text-2xl text-white/60" }
@@ -734,6 +758,8 @@ pub fn DiscoverPlaylistDetail(
     selected_playlist_kind: Signal<CatalogItemKind>,
     on_back: EventHandler<()>,
 ) -> Element {
+    let ui_style = crate::layout::use_ui_style();
+    let inset = crate::layout::page_inset_class(&ui_style);
     let api = hooks::use_api();
     let mut tracks = use_signal(Vec::<TrackInfo>::new);
     let mut artwork = use_signal(|| None::<api::ArtworkRef>);
@@ -814,19 +840,23 @@ pub fn DiscoverPlaylistDetail(
     // to the shared track list so a catalog list looks like every other one.
     if *loading.read() {
         return rsx! {
-            div { class: "p-6 md:p-10 max-w-[1600px] mx-auto",
-                BackButton { on_back }
-                div { class: "flex justify-center py-24",
-                    i { class: "fa-solid fa-arrows-rotate fa-spin text-2xl text-white/60" }
+            div { class: "{inset} pb-10",
+                div { class: crate::layout::PAGE_CONTENT,
+                    BackButton { on_back }
+                    div { class: "flex justify-center py-24",
+                        i { class: "fa-solid fa-arrows-rotate fa-spin text-2xl text-white/60" }
+                    }
                 }
             }
         };
     }
     if let Some(err) = error.read().clone() {
         return rsx! {
-            div { class: "p-6 md:p-10 max-w-[1600px] mx-auto",
-                BackButton { on_back }
-                div { class: "py-12 text-rose-400 text-sm", "{err}" }
+            div { class: "{inset} pb-10",
+                div { class: crate::layout::PAGE_CONTENT,
+                    BackButton { on_back }
+                    div { class: "py-12 text-rose-400 text-sm", "{err}" }
+                }
             }
         };
     }
@@ -910,9 +940,9 @@ pub fn DiscoverArtistPage(
     on_select_playlist: EventHandler<(CatalogItemKind, String, String)>,
     on_open_artist: EventHandler<String>,
 ) -> Element {
+    let ui_style = crate::layout::use_ui_style();
+    let inline = crate::layout::page_inline_class(&ui_style);
     let api = hooks::use_api();
-    let ctrl = use_context::<hooks::use_player_controller::PlayerController>();
-    let now_playing = use_context::<DiscoverNowPlaying>().0;
     let mut artist = use_signal(|| None::<api::CatalogDetail>);
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| None::<String>);
@@ -976,9 +1006,10 @@ pub fn DiscoverArtistPage(
     }
 
     rsx! {
-        div { class: "max-w-[1600px] mx-auto",
+        div { class: "relative max-w-[1600px] mx-auto",
+            // Over the banner rather than above it, so the banner starts at the top.
             button {
-                class: "inline-flex items-center gap-2 text-white/70 hover:text-white text-sm cursor-pointer mt-6 ml-6 md:ml-10 mb-2 group",
+                class: "absolute top-4 left-4 md:left-6 z-10 w-9 h-9 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white/80 hover:text-white hover:bg-black/60 transition-colors cursor-pointer group",
                 onclick: move |_| on_back.call(()),
                 i { class: "fa-solid fa-chevron-left text-xs transition-transform group-hover:-translate-x-0.5" }
             }
@@ -988,20 +1019,27 @@ pub fn DiscoverArtistPage(
                     i { class: "fa-solid fa-arrows-rotate fa-spin text-2xl text-white/60" }
                 }
             } else if let Some(err) = error.read().clone() {
-                div { class: "py-12 px-6 md:px-10 text-rose-400 text-sm", "{err}" }
+                div { class: "pt-20 pb-12 {inline} text-rose-400 text-sm", "{err}" }
             } else if let Some(detail) = artist.read().clone() {
                 {
                     let banner = hooks::artwork::url(detail.artwork.as_ref(), hooks::artwork::Size::Thumb);
                     let banner_style = banner
                         .map(|url| format!("background-image: linear-gradient(to bottom, rgba(0,0,0,0.2) 0%, rgba(0,0,0,0.95) 100%), url('{url}'); background-size: cover; background-position: center; min-height: 360px;"))
                         .unwrap_or_else(|| "min-height: 280px;".to_string());
-                    let shuffle_id = detail.playback_id.clone();
+                    let shuffle = detail
+                        .shuffle_radio
+                        .clone()
+                        .and_then(components::playback::radio_actions::playlist_radio_handler);
+                    let radio = detail
+                        .mix_radio
+                        .clone()
+                        .and_then(components::playback::radio_actions::playlist_radio_handler);
                     let share_url = detail.web_url.clone();
                     rsx! {
                         div {
                             class: "relative overflow-hidden flex flex-col justify-end",
                             style: "{banner_style}",
-                            div { class: "px-6 md:px-10 pt-16 pb-10 flex flex-col gap-4",
+                            div { class: "{inline} pt-16 pb-10 flex flex-col gap-4",
                                 h1 { class: "text-4xl md:text-6xl font-black text-white break-words drop-shadow-lg", "{detail.title}" }
                                 {
                                     let counts: Vec<String> = [detail.monthly_listeners.clone(), detail.subtitle.clone()]
@@ -1018,19 +1056,20 @@ pub fn DiscoverArtistPage(
                                     p { class: "text-sm text-white/60 max-w-3xl line-clamp-3", "{description}" }
                                 }
                                 div { class: "flex items-center gap-3 mt-2",
-                                    if let Some(id) = shuffle_id {
+                                    if let Some(shuffle) = shuffle {
                                         button {
                                             class: "inline-flex items-center gap-2 bg-white text-black px-6 py-2.5 rounded-full font-bold hover:scale-105 active:scale-95 transition-transform cursor-pointer",
-                                            onclick: move |_| {
-                                                play_catalog(
-                                                    CatalogItemKind::Playlist,
-                                                    id.clone(),
-                                                    ctrl,
-                                                    now_playing,
-                                                );
-                                            },
+                                            onclick: move |_| shuffle.call(()),
                                             i { class: "fa-solid fa-shuffle text-[11px]" }
                                             span { class: "text-sm", "{i18n::t(\"shuffle\")}" }
+                                        }
+                                    }
+                                    if let Some(radio) = radio {
+                                        button {
+                                            class: "app-button-outlined inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-white/20 text-white/70 hover:text-white hover:border-white/40 hover:bg-white/10 transition-colors active:scale-95 cursor-pointer",
+                                            onclick: move |_| radio.call(()),
+                                            i { class: "{components::playback::radio_actions::RADIO_ICON} text-[11px]" }
+                                            span { class: "text-sm", "{components::playback::radio_actions::radio_label()}" }
                                         }
                                     }
                                     components::catalog_actions::CatalogActionButtons {
@@ -1047,7 +1086,7 @@ pub fn DiscoverArtistPage(
                                 }
                             }
                         }
-                        div { class: "px-6 md:px-10 pt-8",
+                        div { class: "{inline} pt-8",
                             for (idx, shelf) in detail.shelves.iter().enumerate() {
                                 ShelfRow {
                                     key: "{idx}",

@@ -504,7 +504,7 @@ impl YouTubeMusicClient {
     pub async fn start_playlist_mix(&self, playlist_id: &str) -> Result<mix::MixPage, String> {
         self.account(async {
             mix::fetch(
-                mix::MixSeed::Playlist(playlist_id),
+                mix::MixSeed::from_playlist_ref(playlist_id),
                 self.cookies.as_deref().unwrap_or(""),
             )
             .await

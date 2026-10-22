@@ -6,7 +6,7 @@
 //! is the same call as queueing a library track; the daemon remembers the row
 //! so that key still resolves.
 
-use crate::library::TrackInfo;
+use crate::library::{AlbumInfo, TrackInfo};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CatalogItemKind {
@@ -169,6 +169,9 @@ pub struct CatalogDetail {
     pub release_kind: Option<ReleaseKind>,
     /// For an artist; `subtitle` carries its subscribers.
     pub monthly_listeners: Option<String>,
+    /// For an artist, `QueueContext::PlaylistRadio` ids of its Shuffle and Mix.
+    pub shuffle_radio: Option<String>,
+    pub mix_radio: Option<String>,
     pub owner: Option<String>,
     /// As the source wrote it ("6.9M views").
     pub plays: Option<String>,
@@ -185,4 +188,32 @@ pub enum ReleaseKind {
     Single,
     Ep,
     Audiobook,
+}
+
+/// The active source's "For you" mix: songs from radios seeded by a few of its liked tracks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForYou {
+    /// Shuffled, without repeats; the same until refreshed or the daemon restarts.
+    Mix(Vec<TrackInfo>),
+    /// There is nothing to mix from, so a frontend hides the row.
+    Unavailable(ForYouUnavailable),
+}
+
+/// The active source's Discover rows; a row the source cannot fill is empty.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiscoverRows {
+    /// The mixes the source made for this account, as playlist tiles.
+    pub mixes: Vec<CatalogItem>,
+    /// Albums with no play, offered only where [`crate::SourceCapabilities::complete_play_history`] holds.
+    pub never_played: Vec<AlbumInfo>,
+    /// Liked or much-played tracks not played for a while, likewise.
+    pub forgotten_favorites: Vec<TrackInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForYouUnavailable {
+    /// The source cannot start a radio from a track.
+    NoTrackRadio,
+    /// Nothing is liked on the source yet.
+    NoLikes,
 }

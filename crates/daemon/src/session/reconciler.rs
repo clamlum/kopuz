@@ -129,6 +129,7 @@ impl Session {
                 self.phase = ApiPhase::Playing;
                 self.maybe_record_recent();
                 let _ = self.arm_gapless_now();
+                self.prefetch_next();
                 self.publish(state_tx, false);
                 self.publish_position_anchor(state_tx, Some(token), None, true);
             }
@@ -207,11 +208,10 @@ impl Session {
         }
         // Handing a track to an integration stops the engine, so it waits for
         // the end of this one rather than cutting it short.
-        let skip = self.settings.playback.skip_explicit;
+        let gate = self.offline_gate();
+        let playable = super::playable(self.settings.playback.skip_explicit, gate.as_ref());
         if gapless
-            && let NextOutcome::Play(idx) = self
-                .model
-                .peek_next_where(|track| !(skip && track.explicit))
+            && let NextOutcome::Play(idx) = self.model.peek_next_where(playable)
             && self
                 .model
                 .track_at(idx)
@@ -233,11 +233,9 @@ impl Session {
     }
 
     pub(super) fn arm_transition(&mut self) {
-        let skip = self.settings.playback.skip_explicit;
-        let NextOutcome::Play(idx) = self
-            .model
-            .peek_next_where(|track| !(skip && track.explicit))
-        else {
+        let gate = self.offline_gate();
+        let playable = super::playable(self.settings.playback.skip_explicit, gate.as_ref());
+        let NextOutcome::Play(idx) = self.model.peek_next_where(playable) else {
             return;
         };
         self.start_load(idx, true);

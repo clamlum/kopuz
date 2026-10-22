@@ -311,7 +311,7 @@ pub fn use_tracks_by_keys(
     })
 }
 
-/// This source's tracks with a downloaded copy still on disk, by artist, asked for only while `enabled` says so.
+/// This source's tracks with a downloaded or cached copy, by artist, asked for only while `enabled` says so.
 pub fn use_downloaded_tracks(
     source: Memo<String>,
     enabled: impl Fn() -> bool + 'static,
@@ -332,7 +332,7 @@ pub fn use_downloaded_tracks(
                 return Ok(Vec::new());
             }
             let filter = TrackFilter {
-                downloaded: Some(true),
+                offline: Some(true),
                 sort: api::TrackSort::Artist,
                 ..Default::default()
             };

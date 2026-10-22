@@ -23,6 +23,8 @@ use crate::{
 #[derive(Debug, Default, Clone)]
 pub struct CoreArgs {
     pub db_path: Option<String>,
+    /// Start in offline mode, as `--offline` asks: listings and playback keep to downloads and cached songs.
+    pub offline: bool,
 }
 
 /// Everything a running daemon owns. The services are public because a host
@@ -114,7 +116,13 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
     let settings = crate::config_service::load_settings(&settings_path)?;
     let sources = Arc::new(crate::sources::load(&database).await?);
     let credentials = crate::CredentialStore::load(&database).await?;
-    let offline = crate::OfflineIndex::load(&database).await?;
+    let cache =
+        crate::OfflineCache::load(&database, crate::offline_cache::default_dir(), &settings)
+            .await?;
+    let cache_changed = cache.changed();
+    let offline = crate::OfflineIndex::load(&database)
+        .await?
+        .with_cache(cache);
     let downloads_pruned = offline.pruned();
     let (volume, muted) = database.playback_state().await?;
     let presence_pause = crate::integrations::PresencePause::load(&database).await?;
@@ -162,7 +170,10 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
         let session = session.clone();
         tokio::spawn(async move {
             loop {
-                downloads_pruned.notified().await;
+                tokio::select! {
+                    _ = downloads_pruned.notified() => {}
+                    _ = cache_changed.notified() => {}
+                }
                 session.invalidate(api::Table::Tracks);
                 session.invalidate(api::Table::Albums);
             }
@@ -274,6 +285,10 @@ pub async fn assemble(args: &CoreArgs) -> Result<Core, Box<dyn std::error::Error
     );
     sources.spawn_credential_upkeep();
     sources.watch_active(session.sources_watch());
+    sources.watch_network();
+    if args.offline {
+        sources.set_offline(true);
+    }
     crate::auto_sync::spawn(
         database.clone(),
         jobs.clone(),

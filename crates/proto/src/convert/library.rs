@@ -10,6 +10,7 @@ pub fn track_filter_to_proto(value: &api::TrackFilter) -> TrackFilter {
         sort: track_sort_to_proto(&value.sort) as i32,
         sort_fields: sort_criteria_to_proto(&value.sort),
         downloaded: value.downloaded,
+        offline: value.offline,
         year_from: value.year_from.map(u32::from),
         year_to: value.year_to.map(u32::from),
         reverse: value.reverse,
@@ -24,6 +25,7 @@ pub fn track_filter_from_proto(value: &TrackFilter) -> api::TrackFilter {
         favorite: value.favorite,
         sort: track_sort_from_proto(value.sort, &value.sort_fields),
         downloaded: value.downloaded,
+        offline: value.offline,
         year_from: value.year_from.map(year_from_proto),
         year_to: value.year_to.map(year_from_proto),
         reverse: value.reverse,
@@ -42,6 +44,7 @@ pub fn album_query_to_proto(value: &api::AlbumQuery) -> AlbumQuery {
         year_to: value.year_to.map(u32::from),
         artist_key: value.artist_key.clone(),
         downloaded: value.downloaded,
+        offline: value.offline,
         ids: value.ids.clone().map(|ids| AlbumIds { ids }),
         sort: value
             .sort
@@ -62,6 +65,7 @@ pub fn album_query_from_proto(value: &AlbumQuery) -> api::AlbumQuery {
         year_to: value.year_to.map(year_from_proto),
         artist_key: value.artist_key.clone(),
         downloaded: value.downloaded,
+        offline: value.offline,
         ids: value.ids.as_ref().map(|ids| ids.ids.clone()),
         sort: value
             .sort
@@ -89,6 +93,7 @@ pub fn artist_query_to_proto(value: &api::ArtistQuery) -> ArtistQuery {
     ArtistQuery {
         search: value.search.clone(),
         downloaded: value.downloaded,
+        offline: value.offline,
         sort: value
             .sort
             .iter()
@@ -104,6 +109,7 @@ pub fn artist_query_from_proto(value: &ArtistQuery) -> api::ArtistQuery {
     api::ArtistQuery {
         search: value.search.clone(),
         downloaded: value.downloaded,
+        offline: value.offline,
         sort: value
             .sort
             .iter()
@@ -161,6 +167,7 @@ pub fn track_info_to_proto(value: &api::TrackInfo) -> TrackInfo {
         kind: track_kind_to_proto(value.kind) as i32,
         seekable: value.seekable,
         offline: value.offline,
+        cached: value.cached,
         format: value.format.clone(),
         musicbrainz_release_id: value.musicbrainz_release_id.clone(),
         musicbrainz_recording_id: value.musicbrainz_recording_id.clone(),
@@ -196,6 +203,7 @@ pub fn track_info_from_proto(value: &TrackInfo) -> api::TrackInfo {
         kind: track_kind_from_proto(value.kind),
         seekable: value.seekable,
         offline: value.offline,
+        cached: value.cached,
         format: value.format.clone(),
         musicbrainz_release_id: value.musicbrainz_release_id.clone(),
         musicbrainz_recording_id: value.musicbrainz_recording_id.clone(),
@@ -620,6 +628,7 @@ mod tests {
             kind: api::TrackKind::Normal,
             seekable: true,
             offline: false,
+            cached: true,
             format: Some("FLAC".into()),
             musicbrainz_release_id: Some("mbr".into()),
             musicbrainz_recording_id: None,
@@ -701,6 +710,7 @@ mod tests {
                 ::config::SortDirection::Desc,
             )]),
             downloaded: Some(true),
+            offline: Some(false),
             year_from: Some(1990),
             year_to: Some(1999),
             reverse: true,
@@ -726,6 +736,7 @@ mod tests {
             year_to: Some(2005),
             artist_key: Some("ar-1".into()),
             downloaded: Some(true),
+            offline: Some(false),
             ids: Some(vec!["a1".into(), "a2".into()]),
             sort: vec![
                 ::config::SortCriterion::new(
@@ -773,6 +784,7 @@ mod tests {
         let query = api::ArtistQuery {
             search: Some("ada".into()),
             downloaded: Some(false),
+            offline: Some(true),
             sort: vec![
                 ::config::SortCriterion::new(
                     ::config::ArtistSortField::Albums,
