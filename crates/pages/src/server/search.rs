@@ -209,6 +209,7 @@ pub fn CatalogSearch(
                                     on_select_playlist,
                                     on_open_artist,
                                     show_all,
+                                    seed_radio: true,
                                 }
                             }
                         }

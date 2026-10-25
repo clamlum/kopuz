@@ -57,6 +57,17 @@ struct MprisState {
     volume: f64,
 }
 
+/// The MPRIS `Identity` and `DesktopEntry`: a spawning frontend's, else Kopuz's.
+static IDENTITY: OnceLock<(String, String)> = OnceLock::new();
+
+/// Shows the MPRIS entry as `name`, with the icon and launcher of the desktop
+/// file `desktop_entry`, so the shell's media controls name the app the user
+/// started rather than a daemon they never saw. Takes effect only before the
+/// first call.
+pub fn set_identity(name: String, desktop_entry: String) {
+    let _ = IDENTITY.set((name, desktop_entry));
+}
+
 static TX: OnceLock<UnboundedSender<SystemEvent>> = OnceLock::new();
 static RX: OnceLock<tokio::sync::Mutex<UnboundedReceiver<SystemEvent>>> = OnceLock::new();
 static STATE: OnceLock<Arc<Mutex<MprisState>>> = OnceLock::new();
@@ -120,10 +131,10 @@ impl RootInterface for P {
         Ok(false)
     }
     async fn identity(&self) -> fdo::Result<String> {
-        Ok("Kopuz".into())
+        Ok(IDENTITY.get().map_or("Kopuz", |(name, _)| name).into())
     }
     async fn desktop_entry(&self) -> fdo::Result<String> {
-        Ok("kopuz".into())
+        Ok(IDENTITY.get().map_or("kopuz", |(_, entry)| entry).into())
     }
     async fn supported_uri_schemes(&self) -> fdo::Result<Vec<String>> {
         Ok(vec![])

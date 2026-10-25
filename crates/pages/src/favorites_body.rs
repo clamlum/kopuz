@@ -94,10 +94,7 @@ pub fn FavoritesBody(
             .collect(),
     );
 
-    let currently_playing_path = {
-        let idx = *ctrl.current_queue_index.read();
-        ctrl.get_track_at(idx).map(|track| track.uid.clone())
-    };
+    let currently_playing_path = ctrl.current_uid();
 
     let displayed_tracks_for_selection = sorted_displayed_tracks.clone();
     let is_empty = displayed_tracks.is_empty();

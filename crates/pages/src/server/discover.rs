@@ -193,6 +193,10 @@ pub(crate) fn ShelfRow(
     /// Replaces opening the shelf's page, e.g. to switch a search to the shelf's filter.
     #[props(default)]
     show_all: Option<EventHandler<()>>,
+    /// Playing a song seeds a radio from it instead of queueing the shelf, as a
+    /// search result should.
+    #[props(default)]
+    seed_radio: bool,
 ) -> Element {
     let on_show_all = show_all.or_else(|| {
         shelf.more_ref.is_some().then(|| {
@@ -212,6 +216,7 @@ pub(crate) fn ShelfRow(
                 on_show_all,
                 on_more,
                 more_loading,
+                seed_radio,
             }
         },
         ShelfLayout::Grid => rsx! {
@@ -278,6 +283,7 @@ fn SongListShelf(
     on_show_all: Option<EventHandler<()>>,
     on_more: Option<EventHandler<()>>,
     more_loading: bool,
+    seed_radio: bool,
 ) -> Element {
     let mut ctrl = use_context::<hooks::use_player_controller::PlayerController>();
     let mut now_playing = use_context::<DiscoverNowPlaying>().0;
@@ -331,6 +337,9 @@ fn SongListShelf(
                             let key_for_play = key.clone();
                             let key_for_menu = key.clone();
                             let keys = keys.clone();
+                            let play_radio = (seed_radio && item.kind != CatalogItemKind::Episode)
+                                .then(|| components::radio_actions::search_play_radio_handler(key.clone()))
+                                .flatten();
                             let cover_url = hooks::artwork::url(info.artwork.as_ref(), hooks::artwork::Size::Thumb);
                             let is_current = current_playing_key.read().as_deref() == Some(key.as_str());
                             let is_menu_open = active_menu_key.read().as_deref() == Some(key.as_str());
@@ -356,11 +365,14 @@ fn SongListShelf(
                                         // tag so no album or playlist card claims
                                         // the pause overlay while one of these plays.
                                         now_playing.set(None);
-                                        ctrl.set_queue_keys(
-                                            keys.clone(),
-                                            api::QueueMode::Replace,
-                                            Some(position as u32),
-                                        );
+                                        match &play_radio {
+                                            Some(radio) => radio.call(()),
+                                            None => ctrl.set_queue_keys(
+                                                keys.clone(),
+                                                api::QueueMode::Replace,
+                                                Some(position as u32),
+                                            ),
+                                        }
                                     },
                                     on_click_menu: move |_| {
                                         if active_menu_key.read().as_deref() == Some(key_for_menu.as_str()) {

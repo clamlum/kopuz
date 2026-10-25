@@ -124,10 +124,7 @@ pub fn LibraryPage(
     // to the requested offset would shift those rows until the fetch completes.
     let (top_pad, bottom_pad) = window_padding(total_tracks, &window_rows);
     let all_selected = !is_empty && selected_tracks.read().len() >= total_tracks;
-    let current_uid = {
-        let current_index = *ctrl.current_queue_index.read();
-        ctrl.get_track_at(current_index).map(|t| t.uid)
-    };
+    let current_uid = ctrl.current_uid();
 
     let tracks_nodes = {
         let cap = caps();

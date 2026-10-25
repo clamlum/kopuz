@@ -209,7 +209,7 @@ fn log_dir() -> Option<PathBuf> {
 /// thread running a CFRunLoop, so there the async work moves to a worker and
 /// the main thread parks; elsewhere the runtime keeps the main thread.
 pub fn block_on_run(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     if let Some(identity) = &args.identity {
         identity.apply();
     }

@@ -1,5 +1,6 @@
-//! The AppUserModelID kopuzd runs under: Windows names the media flyout and
-//! notifications after it, so a spawning frontend passes its own.
+//! The app kopuzd plays for: Windows names the media flyout and notifications
+//! after its AppUserModelID, Linux shells name and badge the MPRIS entry after
+//! its desktop file, so a spawning frontend passes its own.
 
 use std::path::PathBuf;
 
@@ -42,6 +43,21 @@ impl AppIdentity {
             values.push(("IconUri", icon.display().to_string()));
         }
         values
+    }
+
+    /// The MPRIS `Identity` and `DesktopEntry`: on Linux the app id is the
+    /// frontend's desktop file name, which is where the shell finds its icon.
+    pub fn mpris_names(&self) -> (String, String) {
+        (
+            self.name.clone().unwrap_or_else(|| self.id.clone()),
+            self.id.clone(),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn apply(&self) {
+        let (name, desktop_entry) = self.mpris_names();
+        player::systemint::set_identity(name, desktop_entry);
     }
 
     /// Must run before the SMTC window exists: the shell reads the id when the session is created.
@@ -122,6 +138,24 @@ mod tests {
             identity.registry_values(),
             vec![("DisplayName", "Kopuz".to_string())]
         );
+    }
+
+    #[test]
+    fn mpris_names_fall_back_to_the_id() {
+        let mut identity = AppIdentity {
+            id: "dev.formalsnake.formalmusic".to_string(),
+            name: Some("FormalMusic".to_string()),
+            icon: None,
+        };
+        assert_eq!(
+            identity.mpris_names(),
+            (
+                "FormalMusic".to_string(),
+                "dev.formalsnake.formalmusic".to_string()
+            )
+        );
+        identity.name = None;
+        assert_eq!(identity.mpris_names().0, "dev.formalsnake.formalmusic");
     }
 
     #[test]

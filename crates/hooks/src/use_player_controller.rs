@@ -110,6 +110,14 @@ impl PlayerController {
         self.queue.peek().get(idx).cloned()
     }
 
+    /// The playing row's uid for a render to highlight. Reads the queue as
+    /// well as the index: the daemon moves the index before the new queue
+    /// lands, so a render that only follows the index keeps the old row.
+    pub fn current_uid(&self) -> Option<String> {
+        let idx = *self.current_queue_index.read();
+        self.queue.read().get(idx).map(|track| track.uid.clone())
+    }
+
     pub fn current_track(&self) -> Option<Track> {
         self.get_track_at(*self.current_queue_index.peek())
     }
@@ -136,9 +144,11 @@ impl PlayerController {
     pub fn play_track_no_history(&mut self, idx: usize) {
         let handle = self.handle();
         spawn(async move {
-            let _ = handle
-                .queue_edit(api::QueueEdit::Jump { index: idx as u32 })
-                .await;
+            let edit = api::QueueEdit::Jump { index: idx as u32 };
+            if let Err(error) = handle.queue_edit(edit).await {
+                tracing::warn!(%error, "queue jump failed");
+                crate::toast::toast_api_error(&error);
+            }
         });
     }
 
@@ -152,6 +162,7 @@ impl PlayerController {
             };
             if let Err(error) = handle.queue_edit(edit).await {
                 tracing::warn!(%error, "queue jump failed");
+                crate::toast::toast_api_error(&error);
             }
         });
     }
@@ -209,6 +220,7 @@ impl PlayerController {
             };
             if let Err(error) = handle.set_queue(request).await {
                 tracing::warn!(%error, "playing an album failed");
+                crate::toast::toast_api_error(&error);
             }
         });
     }
@@ -233,6 +245,7 @@ impl PlayerController {
             };
             if let Err(error) = handle.set_queue(request).await {
                 tracing::warn!(%error, "replacing the queue failed");
+                crate::toast::toast_api_error(&error);
             }
         });
     }
@@ -280,6 +293,7 @@ impl PlayerController {
             };
             if let Err(error) = handle.set_queue(request).await {
                 tracing::warn!(%error, "queueing by key failed");
+                crate::toast::toast_api_error(&error);
             }
         });
     }
@@ -461,6 +475,7 @@ impl PlayerController {
         spawn(async move {
             if let Err(error) = handle.set_queue(request).await {
                 tracing::warn!(%error, "radio start failed");
+                crate::toast::toast_api_error(&error);
             }
         });
     }

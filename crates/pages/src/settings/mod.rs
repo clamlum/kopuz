@@ -97,6 +97,21 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
     let draft_values = use_signal(Vec::<api::FieldValue>::new);
     let draft_secrets = use_signal(Vec::<api::FieldValue>::new);
     let draft_check = use_signal(|| Option::<api::DraftCheck>::None);
+
+    let chosen_service = use_memo(move || {
+        let svc = source_service();
+
+        if svc.is_empty() {
+            services()
+                .unwrap_or_default()
+                .first()
+                .map(|s| s.id.clone())
+                .unwrap_or_default()
+        } else {
+            svc
+        }
+    });
+
     let sessions_for = use_memo(move || {
         if !show_add_source() {
             return None;
@@ -251,7 +266,7 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
     use_effect(move || {
         let draft = crate::settings_actions::draft(
             source_name,
-            source_service,
+            chosen_service,
             draft_values,
             draft_secrets,
         );
@@ -262,7 +277,7 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
         crate::settings_actions::add_source(
             crate::settings_actions::draft(
                 source_name,
-                source_service,
+                chosen_service,
                 draft_values,
                 draft_secrets,
             ),
@@ -280,7 +295,7 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
         crate::settings_actions::add_source_from_session(
             crate::settings_actions::draft(
                 source_name,
-                source_service,
+                chosen_service,
                 draft_values,
                 draft_secrets,
             ),
@@ -839,25 +854,6 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
                                 }
                             }
                         }
-
-                        // Clears the sticky category tabs when Manage sources scrolls here.
-                        div { id: MEDIA_SERVERS_SECTION, style: "scroll-margin-top: 5rem;", onmounted: move |event| scroll_if_pending(MEDIA_SERVERS_SECTION, event.data()),
-                            SettingItem {
-                                title: i18n::t("sources").to_string(),
-                                stacked: true,
-                                control: rsx! {
-                                    SourceSettings {
-                                        sources: all_sources(),
-                                        on_add: move |_| show_add_source.set(true),
-                                        on_delete: handle_delete_saved,
-                                        on_switch: handle_switch_server,
-                                        on_login: move |_| sign_in_again(),
-                                        remote_folders: remote_folder_settings(active_server()),
-                                        host_access: host_access(),
-                                    }
-                                }
-                            }
-                        }
                     }
                     if active_category() == SettingsCategory::General {
                         SettingItem {
@@ -902,7 +898,24 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
                     {theme_editor_section(settings)}
                 }
                 if active_category() == SettingsCategory::Library {
+                    // Above the sources, whose list grows with every one added.
                     div { class: "mt-6", OfflineCacheSection { settings } }
+                    // Clears the sticky category tabs when Manage sources scrolls here.
+                    div { id: MEDIA_SERVERS_SECTION, class: "mt-6", style: "scroll-margin-top: 5rem;", onmounted: move |event| scroll_if_pending(MEDIA_SERVERS_SECTION, event.data()),
+                        SettingsSection { title: i18n::t("sources").to_string(),
+                            div { class: "px-5 py-4",
+                                SourceSettings {
+                                    sources: all_sources(),
+                                    on_add: move |_| show_add_source.set(true),
+                                    on_delete: handle_delete_saved,
+                                    on_switch: handle_switch_server,
+                                    on_login: move |_| sign_in_again(),
+                                    remote_folders: remote_folder_settings(active_server()),
+                                    host_access: host_access(),
+                                }
+                            }
+                        }
+                    }
                 }
                 if active_category() == SettingsCategory::Connectivity {
                     ConnectivitySection {}

@@ -1,7 +1,6 @@
 //! Whether the internet is down or only one server is, asked only after a source that needs the internet stops answering.
 
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -12,6 +11,8 @@ use tokio::time::Instant;
 
 /// A check started by a failure waits this long after the last one began; a check already running is joined instead.
 pub const CHECK_SPACING: Duration = Duration::from_secs(30);
+/// While the internet is down, someone using the app asks again at most this often.
+pub const NUDGE_SPACING: Duration = Duration::from_secs(5);
 /// How long one address may take to answer.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// While the internet is down, how long to wait before each recheck; the last one repeats.
@@ -53,9 +54,9 @@ pub fn answered(status: u16, body: &str) -> bool {
     status == 204 || (status == 200 && body.trim() == "success")
 }
 
-/// A client that neither follows a redirect nor waits long, since a portal answers with one and a dead link with silence.
+/// A client that neither follows a redirect nor waits long, since a portal answers with one and a dead link with silence; offline mode lets it through.
 pub fn check_client() -> Option<reqwest::Client> {
-    utils::http::builder()
+    utils::http::internet_builder()
         .timeout(CHECK_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -85,7 +86,7 @@ pub fn is_local(source: &config::Source, server_url: Option<&str>) -> bool {
         config::Source::LocalLibrary(_) => true,
         config::Source::Server(_) => server_url
             .and_then(|url| reqwest::Url::parse(url.trim()).ok())
-            .and_then(|url| url.host_str().map(local_host))
+            .and_then(|url| url.host_str().map(utils::http::local_host))
             .unwrap_or(false),
     }
 }
@@ -104,29 +105,6 @@ pub fn cacheable(sources: &server::sources::Sources) -> bool {
             service,
             Some(config::MusicService::Smb | config::MusicService::Spotify)
         )
-}
-
-fn local_host(host: &str) -> bool {
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => local_v4(ip),
-        Ok(IpAddr::V6(ip)) => local_v6(ip),
-        Err(_) => {
-            let name = host.trim_end_matches('.').to_ascii_lowercase();
-            name == "localhost" || name.ends_with(".local")
-        }
-    }
-}
-
-fn local_v4(ip: Ipv4Addr) -> bool {
-    ip.is_loopback() || ip.is_private() || ip.is_link_local()
-}
-
-fn local_v6(ip: Ipv6Addr) -> bool {
-    let first = ip.segments()[0];
-    let unique_local = first & 0xfe00 == 0xfc00;
-    let link_local = first & 0xffc0 == 0xfe80;
-    ip.is_loopback() || unique_local || link_local || ip.to_ipv4_mapped().is_some_and(local_v4)
 }
 
 /// Where to look when the internet is down, best first: the default folder library, the other folder libraries, then the servers on this network.
@@ -167,8 +145,8 @@ pub struct Checker {
 }
 
 impl Checker {
-    /// The verdict of the check running now, of one begun within [`CHECK_SPACING`] unless `fresh`, or of `start` run anew.
-    pub async fn run<F, Fut>(&self, fresh: bool, start: F) -> Verdict
+    /// The verdict of the check running now, of one begun within `spacing`, or of `start` run anew.
+    pub async fn run<F, Fut>(&self, spacing: Duration, start: F) -> Verdict
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Verdict>,
@@ -176,9 +154,7 @@ impl Checker {
         let running = {
             let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
             match &*last {
-                Some((began, running))
-                    if !running.initialized() || (!fresh && began.elapsed() < CHECK_SPACING) =>
-                {
+                Some((began, running)) if !running.initialized() || began.elapsed() < spacing => {
                     running.clone()
                 }
                 _ => {
@@ -325,12 +301,12 @@ mod tests {
 
     async fn counted(
         checker: &Checker,
-        fresh: bool,
+        spacing: Duration,
         runs: &AtomicUsize,
         verdict: Verdict,
     ) -> Verdict {
         checker
-            .run(fresh, || async {
+            .run(spacing, || async {
                 runs.fetch_add(1, Ordering::SeqCst);
                 tokio::task::yield_now().await;
                 verdict
@@ -343,32 +319,49 @@ mod tests {
         let checker = Checker::default();
         let runs = AtomicUsize::new(0);
 
+        let spaced = CHECK_SPACING;
         let (a, b) = tokio::join!(
-            counted(&checker, false, &runs, Verdict::Down),
-            counted(&checker, false, &runs, Verdict::Up)
+            counted(&checker, spaced, &runs, Verdict::Down),
+            counted(&checker, spaced, &runs, Verdict::Up)
         );
         assert_eq!((a, b), (Verdict::Down, Verdict::Down), "one shared check");
         assert_eq!(runs.load(Ordering::SeqCst), 1);
 
         tokio::time::advance(CHECK_SPACING - Duration::from_secs(1)).await;
         assert_eq!(
-            counted(&checker, false, &runs, Verdict::Up).await,
+            counted(&checker, spaced, &runs, Verdict::Up).await,
             Verdict::Down
         );
         assert_eq!(runs.load(Ordering::SeqCst), 1, "too soon for another");
 
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(
-            counted(&checker, false, &runs, Verdict::Up).await,
+            counted(&checker, spaced, &runs, Verdict::Up).await,
             Verdict::Up
         );
         assert_eq!(runs.load(Ordering::SeqCst), 2);
 
         assert_eq!(
-            counted(&checker, true, &runs, Verdict::Down).await,
+            counted(&checker, Duration::ZERO, &runs, Verdict::Down).await,
             Verdict::Down
         );
         assert_eq!(runs.load(Ordering::SeqCst), 3, "a recheck does not wait");
+
+        assert_eq!(
+            counted(&checker, NUDGE_SPACING, &runs, Verdict::Up).await,
+            Verdict::Down,
+            "someone acting right after a check joins it"
+        );
+        tokio::time::advance(NUDGE_SPACING).await;
+        assert_eq!(
+            counted(&checker, NUDGE_SPACING, &runs, Verdict::Up).await,
+            Verdict::Up
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            4,
+            "and asks again a few seconds on"
+        );
     }
 
     #[test]

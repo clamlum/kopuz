@@ -122,5 +122,10 @@ of it, an agent:
   screenshot or recording attached;
 - makes follow-up commits only when its human asks, and never replies to
   reviewers;
+- writes commit subjects in the scoped format from `CONTRIBUTING.md`
+  (`crate/module: description`, `various:` across crates), never the
+  conventional `fix(scope):` / `feat:` / `perf(scope):` form;
+- creates no new branch: it commits on the branch its human is on, or the
+  existing branch of the PR it is updating, and asks before starting one;
 - never adds an AI `Co-authored-by:` trailer or a "Generated with …" footer to
   a commit, issue or PR. The AI usage checkbox is the only disclosure.

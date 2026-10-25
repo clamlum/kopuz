@@ -69,10 +69,7 @@ pub fn ShowcaseNormal(props: ShowcaseProps) -> Element {
     let mut last_disc = None;
     let mut last_disc_size = 0;
 
-    let currently_playing_path = {
-        let idx = *ctrl.current_queue_index.read();
-        ctrl.get_track_at(idx).map(|track| track.uid.clone())
-    };
+    let currently_playing_path = ctrl.current_uid();
     let current_song_title = ctrl.current_song_title.read().clone();
     let current_song_artist = ctrl.current_song_artist.read().clone();
     let current_song_album = ctrl.current_song_album.read().clone();

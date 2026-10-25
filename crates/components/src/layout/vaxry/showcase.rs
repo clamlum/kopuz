@@ -43,10 +43,7 @@ pub fn ShowcaseVaxry(props: ShowcaseProps) -> Element {
         .collect::<HashSet<_>>()
         .len()
         > 1;
-    let currently_playing_path = {
-        let idx = *ctrl.current_queue_index.read();
-        ctrl.get_track_at(idx).map(|track| track.uid.clone())
-    };
+    let currently_playing_path = ctrl.current_uid();
 
     let current_song_title = ctrl.current_song_title.read().clone();
     let current_song_artist = ctrl.current_song_artist.read().clone();

@@ -621,13 +621,7 @@ fn RemoteAlbumDetail(
         }
     };
 
-    // Current track for the row highlight. Read `current_queue_index`
-    // *reactively* (`current_track()` peeks, so the page wouldn't re-render on a
-    // skip) so the highlighted row follows next/prev.
-    let current_id = {
-        let idx = *ctrl.current_queue_index.read();
-        ctrl.get_track_at(idx).map(|t| t.uid)
-    };
+    let current_id = ctrl.current_uid();
     // Catalog rows are not re-read when a download lands, so the stored list is what's current.
     let stored = downloads.read().clone();
 

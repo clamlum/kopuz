@@ -15,10 +15,12 @@ usage: kopuzd [options]
   --db-path <file>       library database to open
   --offline              start in offline mode: only downloads and cached
                          songs list and play, until a frontend leaves it
-  --app-id <id>          AppUserModelID the Windows media flyout and
-                         notifications show this process as; defaults to
-                         $KOPUZ_APP_ID, else none is set
-  --app-name <name>      display name registered for the app id (Windows)
+  --app-id <id>          the app this daemon plays for: the AppUserModelID
+                         the Windows media flyout and notifications show,
+                         the MPRIS desktop entry on Linux; defaults to
+                         $KOPUZ_APP_ID, else Kopuz's own
+  --app-name <name>      display name for the app id (Windows flyout,
+                         MPRIS identity)
   --app-icon <path>      .ico or .png registered for the app id (Windows)
   -h, --help             show this help";
 
