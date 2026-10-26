@@ -7,8 +7,6 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, SqliteConnection};
 
 fn unique_db() -> PathBuf {
-    // pid + counter, not just clock: macOS's µs clock let parallel tests
-    // collide on a nanos-only name and delete each other's live DB.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -94,9 +92,7 @@ async fn webview_upgrade_removes_registered_sessions_and_keeps_cookie_sessions()
 async fn webview_upgrade_after_server_split_keeps_current_credentials() {
     for browser_table_applied in [false, true] {
         let path = unique_db();
-        // A current master database has the split schema without the branch's
-        // migrations. Also cover a launch that already created browser_auth
-        // before failing at the old cleanup migration.
+
         let db = db::init(&path).await.unwrap();
         drop(db);
         let pool = sqlx::SqlitePool::connect_with(SqliteConnectOptions::new().filename(&path))
@@ -339,7 +335,6 @@ async fn a_save_writes_the_settings_file_and_a_hand_edit_wins_on_load() {
     let mut written: toml::Table = text.parse().unwrap();
     assert_eq!(written["theme"].as_str(), Some("midnight"));
 
-    // The file is where settings live, so a hand edit is what loads.
     written.insert("theme".into(), "nord".into());
     std::fs::write(&settings_path, written.to_string()).unwrap();
     assert_eq!(load(&db_path).ui.theme, "nord");
@@ -412,7 +407,6 @@ async fn layered_overrides_are_not_persisted_as_base_config() {
     let loaded = load(&db_path);
     assert_eq!(loaded.ui.theme, "nord", "the drop-in applies");
 
-    // Change something unrelated while the override is in force.
     let mut cfg = loaded;
     cfg.background.cover_art_darkening = 42;
     save(&db, &db_path, &cfg).await;
@@ -477,7 +471,6 @@ async fn hand_written_layers_apply_in_order_and_survive_bad_keys() {
     );
     assert_eq!(loaded.ui.ui_style, config::UiStyle::default());
 
-    // Saving on top of that doesn't corrupt the hand-written file: the pinned drop-in key keeps the file's own value.
     let mut cfg = loaded;
     cfg.ui.language = "de".into();
     save(&db, &db_path, &cfg).await;

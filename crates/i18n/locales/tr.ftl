@@ -1125,3 +1125,16 @@ discover_never_played = Hiç dinlenmedi
 discover_forgotten_favorites = Unutulan favoriler
 library_empty_offline = Henüz çevrimdışı kullanılabilen bir şey yok
 library_empty_offline_detail = Şarkıları indir ya da çevrimiçiyken çal, çevrimdışı dinlemek için saklansınlar.
+
+# Audio CDs
+cd_rip_flac = Rip to FLAC
+cd_rip_help = Save all tracks as lossless FLAC files. Playback stops while ripping. Existing files are kept. Requires ffmpeg.
+cd_output_directory = Output folder (absolute path on the computer running Kopuz)
+cd_rip_finished = Ripping finished. You can add the output folder to a local library.
+cd_rip_cancelled = Ripping cancelled. Completed tracks have been kept.
+
+removable_found = Removable media found
+removable_listen_help = Switch to this disc and start listening? It stays available while inserted. Removing it returns you to your previous source with playback stopped.
+removable_later = Not now
+removable_listen = Listen
+removable_temporary = Temporary — until ejected

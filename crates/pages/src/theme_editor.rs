@@ -151,11 +151,11 @@ pub fn ThemeEditorPage(settings: Signal<Settings>, #[props(default)] embedded: b
     };
 
     let editor = rsx! {
-        div { class: "flex gap-6",
-            // ── Left: saved themes list ──────────────────────────────
-            div { class: "w-52 shrink-0 flex flex-col gap-2",
+        div { class: "flex flex-wrap gap-6 min-w-0",
+
+            div { class: "w-52 shrink-0 flex flex-col gap-2 max-sm:w-full",
                 button {
-                    class: "app-button-tonal w-full px-3 py-2 bg-white/10 hover:bg-white/15 rounded text-sm text-white transition-colors text-left",
+                    class: "app-button-tonal w-full px-3 py-2 bg-white/10 hover:bg-white/20 active:bg-white/25 rounded text-sm text-white transition-colors text-left",
                     onclick: move |_| selected_id.set(None),
                     "+ {i18n::t(\"new_theme\")}"
                 }
@@ -169,7 +169,7 @@ pub fn ThemeEditorPage(settings: Signal<Settings>, #[props(default)] embedded: b
                                 button {
                                     key: "{id}",
                                     class: if is_active {
-                                        "w-full text-left px-3 py-2 rounded text-sm bg-white/15 text-white"
+                                        "w-full text-left px-3 py-2 rounded text-sm bg-white/15 text-white hover:bg-white/25 transition-colors"
                                     } else {
                                         "w-full text-left px-3 py-2 rounded text-sm text-slate-400 hover:bg-white/5 hover:text-white transition-colors"
                                     },
@@ -182,8 +182,7 @@ pub fn ThemeEditorPage(settings: Signal<Settings>, #[props(default)] embedded: b
                 }
             }
 
-            // ── Right: editor ────────────────────────────────────────
-            div { class: "flex-1 flex flex-col gap-5",
+            div { class: "flex-1 min-w-[min(100%,24rem)] flex flex-col gap-5",
                 div { class: "bg-white/5 rounded-xl p-5",
                     label { class: "block text-xs text-slate-400 mb-1", "{i18n::t(\"theme_name\")}" }
                     // Uncontrolled, since echoing `value` back over the bridge overwrote keys typed meanwhile; keyed to remount per theme.
@@ -200,7 +199,7 @@ pub fn ThemeEditorPage(settings: Signal<Settings>, #[props(default)] embedded: b
 
                 div { class: "bg-white/5 rounded-xl p-5",
                     p { class: "text-xs text-slate-400 mb-4", "{i18n::t(\"colors\")}" }
-                    div { class: "grid grid-cols-2 gap-x-10 gap-y-3",
+                    div { class: "grid grid-cols-[repeat(auto-fill,minmax(17rem,1fr))] gap-x-10 gap-y-3",
                         for key in VAR_LABELS {
                             {
                                 let key_str = key.to_string();
@@ -224,7 +223,7 @@ pub fn ThemeEditorPage(settings: Signal<Settings>, #[props(default)] embedded: b
                                 let blur_key = key_str.clone();
                                 rsx! {
                                     div { class: "flex items-center justify-between gap-4",
-                                        span { class: "text-sm text-white/70", "{label}" }
+                                        span { class: "min-w-0 truncate text-sm text-white/70", title: "{label}", "{label}" }
                                         div { class: "flex items-center gap-2 shrink-0",
                                             input {
                                                 r#type: "color",
@@ -332,7 +331,7 @@ pub fn ThemeEditorPage(settings: Signal<Settings>, #[props(default)] embedded: b
 
                 div { class: "flex gap-3",
                     button {
-                        class: "app-button-filled px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-sm text-white transition-colors",
+                        class: "app-button-filled accent-button px-4 py-2 rounded text-sm font-semibold transition-colors",
                         onclick: move |_| {
                             let name = editing_name.read().trim().to_string();
                             if name.is_empty() { return; }
@@ -363,7 +362,7 @@ pub fn ThemeEditorPage(settings: Signal<Settings>, #[props(default)] embedded: b
                     }
                     if selected_id.peek().is_some() {
                         button {
-                            class: "app-button-tonal app-button-danger px-4 py-2 bg-red-500/20 hover:bg-red-500/30 rounded text-sm text-red-400 transition-colors",
+                            class: "app-button-tonal app-button-danger px-4 py-2 bg-red-500/20 hover:bg-red-500/30 rounded text-sm font-semibold text-red-200 transition-colors",
                             onclick: move |_| {
                                 let Some(id) = selected_id.write().take() else {
                                     return;

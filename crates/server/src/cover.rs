@@ -122,7 +122,7 @@ pub fn resolve(server: Option<&MusicServer>, cover: CoverRef, max_width: u32) ->
         }
         CoverRef::None => return None,
     };
-    Some(utils::cover_url_from_string(url))
+    Some(CoverUrl::from(url))
 }
 
 /// Resolve a cover from a stored cover-path ref — album covers and artist-grid
@@ -214,8 +214,6 @@ mod tests {
 
     #[test]
     fn subsonic_track_without_cover_path_falls_back_to_getcoverart() {
-        // `cover == "none"` is the no-embedded-cover sentinel; the typed
-        // resolver falls back to a signed getCoverArt URL keyed by the track id.
         let track = subsonic_track("TR-42", Some("none"));
         let got =
             super::track(subsonic_config(true).as_ref(), &track, 800).expect("fallback cover url");
@@ -261,7 +259,6 @@ mod tests {
             .is_none()
         );
 
-        // A Jellyfin ref must never resolve against a Subsonic server.
         assert!(
             resolve(
                 subsonic_config(true).as_ref(),
@@ -291,10 +288,6 @@ mod tests {
 
     #[test]
     fn from_path_resolves_a_remote_ref_while_local_is_active() {
-        // The regression: one frame after switching away from YT, its album covers
-        // (`ytmusic:_:urlhex_<url>`) are still rendered. With Local active they must
-        // resolve to the embedded URL — NOT get fed to the local artwork:// path as
-        // a filename (the artwork server would open() it → ENAMETOOLONG).
         let url = "https://example.com/cover.jpg";
         let reff = format!("ytmusic:_:{}", CoverRef::encode_url(url));
         let got =

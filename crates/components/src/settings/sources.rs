@@ -65,8 +65,6 @@ fn AddFolderButton(on_add: EventHandler<std::path::PathBuf>, add_text: String) -
     }
 }
 
-// Android has no native folder dialog (rfd doesn't work), so request storage permission
-// and auto-detect the system Music directory via JNI, falling back to common paths.
 #[cfg(target_os = "android")]
 #[component]
 fn AddFolderButton(on_add: EventHandler<std::path::PathBuf>, add_text: String) -> Element {
@@ -132,7 +130,7 @@ pub fn SourceSettings(
                     let is_active = srv.active;
                     let id_switch = id.clone();
                     let id_delete = id.clone();
-                    // A server that browses a folder tree has its own picker for them.
+
                     let settings: Vec<api::FieldSpec> = srv
                         .settings
                         .iter()
@@ -145,7 +143,7 @@ pub fn SourceSettings(
                     let settings_id = srv.id.clone();
                     let service_name = crate::forms::text(&srv.service.name);
                     let url = srv.detail.clone().unwrap_or_default();
-                    // Folders are the whole library definition, so the picker sits on the card.
+
                     let picker = is_active.then(|| remote_folders.clone()).flatten();
                     let needs_host = srv.capabilities.browser_playback && !host_access;
                     rsx! {
@@ -197,7 +195,7 @@ pub fn SourceSettings(
                                         "{switch_text}"
                                     }
                                 }
-                                if !srv.permanent {
+                                if !srv.permanent && !srv.temporary {
                                     button {
                                         onclick: move |_| on_delete.call(id_delete.clone()),
                                         class: "app-button-text app-button-danger text-red-400 hover:text-red-300 text-sm px-2 py-1 transition-colors",

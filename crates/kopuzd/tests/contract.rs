@@ -26,9 +26,6 @@ struct StubLibrary;
 impl QueueMaterializer for StubLibrary {
     async fn materialize(&self, context: &QueueContext) -> Result<Vec<Track>, ApiError> {
         match context {
-            // Keys containing "nope" stay unresolved, standing in for a track
-            // that neither the DB, the transient cache, nor disk can produce;
-            // the favorites contract test uses one to assert NotFound mapping.
             QueueContext::Tracks { keys } => Ok(keys
                 .iter()
                 .filter(|key| !key.contains("nope"))
@@ -1124,8 +1121,6 @@ async fn subscribe_stream_delivers_typed_events() {
     let pair = spawn_pair().await;
     let mut events = pair.wire.events();
 
-    // The stream connects asynchronously and the first subscription starts
-    // at the current live position, so keep nudging until events flow.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut saw_queue_changed = false;
     let mut saw_player_state = false;
@@ -1995,8 +1990,6 @@ async fn a_missing_daemon_is_not_reported_as_a_dead_media_server() {
 async fn artwork_agrees_across_transports() {
     let pair = spawn_pair().await;
 
-    // The seeded rows have no cover on disk, so both sides have to agree on
-    // the failure -- that is the whole request/stream/error path.
     let missing = api::ArtworkRequest {
         target: api::ArtworkTarget::Track("/lib/seed-0.flac".into()),
         hq: false,
@@ -2209,8 +2202,6 @@ async fn library_reads_agree_across_transports() {
         pair.wire.album("no-such-album".into()).await.expect("wire"),
     );
 
-    // The seeded rows carry no album id, so the paging metadata is what this
-    // asserts: an empty page still reports the same totals on both sides.
     let local_tracks = pair
         .local
         .tracks_by_keys(vec![])
@@ -2535,7 +2526,6 @@ async fn playlists_round_trip_across_transports() {
         .await
         .expect("create over the wire");
 
-    // Both sides see the same catalog, and the wire's write is visible locally.
     let local = pair.local.playlists().await.expect("local catalog");
     let wire = pair.wire.playlists().await.expect("wire catalog");
     assert_eq!(local, wire);
@@ -2581,7 +2571,6 @@ async fn playlists_round_trip_across_transports() {
         "position-addressed removal took the first entry"
     );
 
-    // Folders are local organisation; a playlist moves in and back out.
     let folder = pair
         .wire
         .create_playlist_folder("Shelf".into())
@@ -2616,7 +2605,6 @@ async fn playlists_round_trip_across_transports() {
 async fn artwork_refs_agree_across_transports() {
     let pair = spawn_pair().await;
 
-    // The seeded tracks have no cover, so no row may claim one.
     let local = pair
         .local
         .tracks(TrackFilter::default(), Page::default())
@@ -2634,8 +2622,6 @@ async fn artwork_refs_agree_across_transports() {
         local.items
     );
 
-    // Asking anyway is the same not-found on both sides, which is what makes
-    // "absent means do not ask" safe rather than merely conventional.
     let request = api::ArtworkRequest {
         target: api::ArtworkTarget::Track("/lib/seed-0.flac".into()),
         hq: false,
@@ -2653,10 +2639,6 @@ async fn artwork_refs_agree_across_transports() {
             .map(|error| error.code),
     );
 
-    // A cover appears: the row starts advertising one, and its version is
-    // stable across reads and transports.
-    // Undecodable bytes on purpose: the service falls back to serving the
-    // file as-is, which is the path an unusual cover format takes anyway.
     let cover = pair._dir.path().join("cover.png");
     std::fs::write(&cover, b"\x89PNG\r\n\x1a\nnot-really-an-image").expect("write cover");
     let mut with_art = track("/lib/seed-0.flac");
@@ -2688,7 +2670,6 @@ async fn artwork_refs_agree_across_transports() {
     );
     assert_eq!(local.items, wire.items, "the version crosses the wire");
 
-    // And it now serves bytes, on both transports.
     let request = api::ArtworkRequest {
         target: art.target.clone(),
         hq: false,
@@ -2737,7 +2718,6 @@ async fn queue_snapshot_and_edits_agree_across_transports() {
         wire.items.iter().map(|item| &item.key).collect::<Vec<_>>(),
     );
 
-    // Insert lands where it was asked to, without disturbing what plays.
     pair.wire
         .queue_edit(QueueEdit::Insert {
             index: 1,
@@ -2756,7 +2736,6 @@ async fn queue_snapshot_and_edits_agree_across_transports() {
     );
     assert_eq!(snapshot.position, Some(0), "the playing track did not move");
 
-    // A physical jump names a position in the unshuffled queue.
     pair.wire
         .queue_edit(QueueEdit::JumpPhysical { index: 2 })
         .await
@@ -2764,7 +2743,6 @@ async fn queue_snapshot_and_edits_agree_across_transports() {
     let snapshot = pair.wire.queue_snapshot().await.expect("snapshot");
     assert_eq!(snapshot.position, Some(2));
 
-    // Out of range is an error, not a silent no-op, on both transports.
     let edit = QueueEdit::JumpPhysical { index: 99 };
     assert_eq!(
         pair.local
@@ -2914,8 +2892,6 @@ async fn catalog_and_radio_report_absence_identically() {
             .map(|e| e.code),
     );
 
-    // A URL that is not a registry is refused as bad input, not reported as a
-    // registry with no stations, and says so the same way on both transports.
     let url = "file:///nonexistent/registry.json".to_string();
     assert_eq!(
         pair.local
@@ -3252,9 +3228,6 @@ async fn search_filters_agree_across_transports() {
 async fn mutations_agree_across_transports() {
     let pair = spawn_pair().await;
 
-    // The seeded tracks name paths that do not exist and are outside any
-    // configured root, so a from-disk delete is refused rather than
-    // half-applied.
     let keys = vec!["/lib/seed-0.flac".to_string()];
     let local = pair.local.delete_tracks(keys.clone(), true).await;
     let wire = pair.wire.delete_tracks(keys.clone(), true).await;
@@ -3273,8 +3246,6 @@ async fn mutations_agree_across_transports() {
         "a refused delete changed nothing"
     );
 
-    // Tags are only editable on a local file that exists; the failure is the
-    // same either way.
     let patch = api::TrackMetadataPatch {
         key: "/lib/seed-0.flac".into(),
         title: Some("renamed".into()),
@@ -3293,7 +3264,6 @@ async fn mutations_agree_across_transports() {
             .map(|error| error.code),
     );
 
-    // Artwork has to decode before it is stored, on either transport.
     let upload = api::ArtworkUpload {
         target: api::ArtworkTarget::Album("album-1".into()),
         content_type: "image/png".into(),
@@ -3340,8 +3310,6 @@ async fn sources_agree_across_transports_and_carry_no_secret() {
         local[0].settings
     );
 
-    // Adding a server is visible to both, and provisioning a credential
-    // reports authentication without echoing the secret.
     let draft = api::SourceDraft {
         name: "Home".into(),
         service: "jellyfin".into(),
@@ -3380,7 +3348,6 @@ async fn sources_agree_across_transports_and_carry_no_secret() {
         "no response may carry the secret: {rendered}"
     );
 
-    // A bad draft is refused identically.
     let bad = api::SourceDraft {
         name: "No URL".into(),
         service: "jellyfin".into(),
@@ -3643,7 +3610,6 @@ async fn a_draft_is_checked_identically_across_transports() {
     );
     assert_eq!(check.sign_in, api::SignInKind::Password);
 
-    // A service this daemon does not have is invalid input, not a panic.
     let unknown = api::SourceDraft {
         name: "Home".into(),
         service: "not-a-service".into(),
@@ -3756,8 +3722,6 @@ async fn the_downloader_reports_its_preconditions_identically() {
         "a format the daemon does not offer is refused"
     );
 
-    // With a URL, the answer depends on whether the tools are installed --
-    // whatever it is, it must be the same on both sides.
     let local = pair
         .local
         .download_url("https://example.com/watch".into(), first.clone())
@@ -3938,9 +3902,6 @@ async fn download_statuses_agree_across_transports() {
         "an idle daemon reports the same empty list on both transports"
     );
 
-    // The seeded rows are local paths that do not exist, so every item fails --
-    // which is the interesting case: a failed item is still reported, and
-    // reported the same way on both sides.
     let keys = vec![
         "/lib/seed-0.flac".to_string(),
         "/lib/seed-1.flac".to_string(),

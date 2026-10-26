@@ -10,7 +10,7 @@ use crate::offline::OfflineIndex;
 pub(crate) fn track_info(track: &Track, offline: &OfflineIndex) -> TrackInfo {
     let key = track.id.key().to_string();
     let uid = track.id.uid();
-    let item_ref = PlaybackItemRef::parse(&uid);
+    let item_ref = PlaybackItemRef::from_id(&track.id);
     let radio = track.duration == u64::MAX;
     let cached = item_ref.is_server()
         && item_ref

@@ -152,7 +152,6 @@ impl MutationService {
             .map_err(|error| ApiError::internal(format!("tag writer task failed: {error}")))?
             .map_err(ApiError::internal)?;
 
-        // Read back as a scan would, so an edit files the same artists and album a rescan of the file does.
         let reader::ScannedTrack {
             track: mut scanned,
             album: mut scanned_album,
@@ -178,7 +177,7 @@ impl MutationService {
             .map_err(db_error)?;
         self.session.invalidate(Table::Tracks);
         self.session.invalidate(Table::Albums);
-        // Read back, so the row carries the artist rows its new credits were filed under.
+
         let stored = self.track(&patch.key).await?;
         Ok(crate::wire::track_info(&stored, self.session.offline()))
     }
@@ -192,8 +191,7 @@ impl MutationService {
                 .tracks_by_keys(&active, keys)
                 .await
                 .map_err(db_error)?;
-            // Every path is checked before any file is removed, so a refusal
-            // does not leave the deletion half-done.
+
             let mut paths = Vec::with_capacity(tracks.len());
             for track in &tracks {
                 paths.push(Self::editable_path(&config, &active, track)?);
@@ -256,9 +254,7 @@ impl MutationService {
             }
         };
         let previous = self.current_artwork_path(&upload.target).await?;
-        // Content-addressed, so re-uploading the same picture is idempotent
-        // and a different one lands at a different path -- which is what makes
-        // the artwork version, and the caches keyed by it, change.
+
         let mut name = String::with_capacity(72);
         for byte in Sha256::digest(&upload.bytes) {
             use std::fmt::Write as _;

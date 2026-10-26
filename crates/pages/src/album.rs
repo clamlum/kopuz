@@ -181,9 +181,7 @@ fn AlbumGrid(mut album_id: Signal<String>, mut open_album_menu: Signal<Option<St
                 p { class: "text-slate-500", "{i18n::t(\"no_albums_found\")}" }
             } else {
                 div {
-                    // Cards keep identical classes in both modes (`.vcard*` hooks are
-                    // restyled by the `.view-list` CSS), so toggling only patches this
-                    // container's class — no per-card re-render or cover refetch.
+
                     class: if *view_mode.read() == AlbumViewMode::List { "view-list" } else { "grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-6" },
                     for album in albums.iter().take(shown) {
                         AlbumCard {
@@ -302,10 +300,6 @@ fn AlbumDetail(
     let album_res = use_album(source, album_id_memo);
     let tracks_res = use_album_tracks(source, album_id_memo);
 
-    // Discover albums are opened by the source's own browse id and aren't in the
-    // library until saved. When the library has no row for the id, fetch the album
-    // straight from the catalog remote by that browse id so every searched /
-    // discovered album renders (header + full track list) instead of "not found".
     let direct_remote_res: Resource<Option<api::CatalogDetail>> = {
         let api = api.clone();
         // Peeked: going offline must not wipe an album that already loaded.
@@ -333,7 +327,6 @@ fn AlbumDetail(
     let album = match album_res.read().clone().flatten() {
         Some(a) => a,
         None => {
-            // Not saved yet — render the remote album directly if it resolved.
             if let Some(remote) = direct_remote_res.read().clone().flatten() {
                 let tracks = remote.tracks;
                 return rsx! {
@@ -355,7 +348,7 @@ fn AlbumDetail(
                     }
                 };
             }
-            // Still resolving (DB miss not yet confirmed, or remote in flight).
+
             if album_loading || direct_remote_res.read().is_none() {
                 return rsx! { div {} };
             }
@@ -416,8 +409,6 @@ fn AlbumDetail(
     let cap = caps();
     let aid = album.id.clone();
 
-    // The daemon removes the stored picture and forgets the file it saved,
-    // so this only has to say which album.
     let cover_reset_action = if cap.edit_tags && album.artwork.is_some() {
         let aid = aid.clone();
         Some(rsx! {
@@ -447,15 +438,10 @@ fn AlbumDetail(
             .iter()
             .any(|track| downloads.read().is_active(&track.key));
 
-    // Catalog-style album page: the whole catalog-remote side renders this,
-    // from the moment the page opens — header built from the library's album row so it
-    // shows instantly, track list filling from the already-saved subset until the
-    // remote album resolves the full listing. Other sources keep the
-    // standard TrackListView.
     let cover_url_remote = cover_url.clone();
     let remote_title = album.title.clone();
     let remote_artist = album.artist.clone();
-    // Prefer the remote album's year once resolved; fall back to the library row.
+
     let remote_album = remote_album_res.read().clone().flatten();
     let remote_year = remote_album
         .as_ref()
@@ -502,7 +488,7 @@ fn AlbumDetail(
                 enable_metadata: cap.edit_tags,
                 show_delete_in_selection: cap.delete_from_disk,
                 is_downloading_all,
-                // Picking the file is the UI's; storing it is not.
+
                 on_cover_click: cap.edit_tags.then(|| EventHandler::new(move |_| {
                     let aid = aid_cover.clone();
                     let _ = &aid;
@@ -526,7 +512,9 @@ fn AlbumDetail(
                         );
                     });
                 })),
-                actions: cover_reset_action,
+                actions: if cap.rip_audio {
+                    Some(rsx! { components::album::rip::RipAudio { keys: tracks().iter().map(|track| track.key.clone()).collect::<Vec<_>>() } })
+                } else { cover_reset_action },
                 on_delete_track: cap.delete_from_disk.then(|| EventHandler::new(move |idx: usize| {
                     if let Some(track) = tracks_delete.get(idx) {
                         hooks::library_actions::delete_tracks(
@@ -688,7 +676,7 @@ fn RemoteAlbumDetail(
                         }
                     }
                     div { class: "flex items-center gap-3 mt-1",
-                        // Download all / remove downloads, for a source that keeps files.
+
                         if cap().downloads {
                         button {
                             class: "w-11 h-11 rounded-full border border-white/15 flex items-center justify-center text-slate-300 hover:text-white hover:border-white/30 transition-colors disabled:opacity-40",
@@ -712,7 +700,7 @@ fn RemoteAlbumDetail(
                             i { class: if all_downloaded { "fa-solid fa-trash" } else { "fa-solid fa-download" } }
                         }
                         }
-                        // Go to artist, when the album names one to go to.
+
                         if names_artist {
                         button {
                             class: "w-11 h-11 rounded-full border border-white/15 flex items-center justify-center text-slate-300 hover:text-white hover:border-white/30 transition-colors",
@@ -721,7 +709,7 @@ fn RemoteAlbumDetail(
                             i { class: "fa-solid fa-user" }
                         }
                         }
-                        // Play (primary).
+
                         button {
                             class: "w-16 h-16 rounded-full bg-indigo-500 hover:bg-indigo-400 text-black flex items-center justify-center transition-transform hover:scale-105 shadow-lg shadow-black/30",
                             title: i18n::t("play").to_string(),
@@ -734,7 +722,7 @@ fn RemoteAlbumDetail(
                             },
                             i { class: "fa-solid fa-play text-2xl ml-1" }
                         }
-                        // Shuffle.
+
                         button {
                             class: format!("w-11 h-11 rounded-full border flex items-center justify-center transition-colors {}", if *ctrl.shuffle.read() { "text-indigo-500 bg-white/10 border-white/30" } else { "text-slate-300 border-white/15 hover:text-white hover:border-white/30" }),
                             title: i18n::t("shuffle").to_string(),
@@ -760,7 +748,6 @@ fn RemoteAlbumDetail(
                     }
                 }
 
-                // Track list.
                 div { class: "flex-1 min-h-0 overflow-y-auto pb-24",
                     for (idx, track) in tracks.iter().cloned().enumerate() {
                         {

@@ -172,8 +172,7 @@ where
         .into_iter()
         .peekable();
     let mut last_extract_err: Option<String> = None;
-    // Edge/Chrome sometimes spawn the UI detached and the launcher exits early;
-    // the store is still on disk, so keep polling regardless of exit.
+
     let mut child_exited_at: Option<Instant> = None;
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;

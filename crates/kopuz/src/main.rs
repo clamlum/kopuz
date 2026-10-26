@@ -1088,7 +1088,7 @@ fn App() -> Element {
                 if last.take().is_some() {
                     live_theme_css.set(String::new());
                 }
-                utils::sleep(std::time::Duration::from_millis(LIVE_THEME_IDLE_POLL_MS)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(LIVE_THEME_IDLE_POLL_MS)).await;
                 continue;
             }
             let path = utils::live_theme::resolve_path(&settings.peek().ui.live_theme_path);
@@ -1106,7 +1106,7 @@ fn App() -> Element {
                     .unwrap_or_default();
                 live_theme_css.set(css);
             }
-            utils::sleep(std::time::Duration::from_millis(LIVE_THEME_POLL_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(LIVE_THEME_POLL_MS)).await;
         }
     });
 
@@ -1362,6 +1362,7 @@ fn App() -> Element {
                     evt.prevent_default();
                 }
             },
+            components::RemovablePrompt {}
             if let Some(cover) = cover_background() {
                 CoverArtBackground { cover }
             }

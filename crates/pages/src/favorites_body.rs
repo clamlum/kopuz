@@ -1,7 +1,8 @@
+use components::header::Header;
 use components::metadata_modal::MetadataModal;
 use components::playlist_modal::PlaylistModal;
 use components::selection_bar::SelectionBar;
-use components::showcase::{self, SortField};
+use components::showcase;
 use components::track_row::TrackRow;
 use components::virtual_scroll::{VirtualScrollView, use_virtual_scroll};
 use config::{Settings, UiStyle};
@@ -204,6 +205,10 @@ pub fn FavoritesBody(
             }
         });
 
+    let all_favorites_selected = displayed_tracks
+        .iter()
+        .all(|(track, _)| selected_tracks.read().contains(&track.key));
+
     rsx! {
         div {
             class: "flex-1 min-h-0 flex flex-col",
@@ -403,14 +408,10 @@ pub fn FavoritesBody(
                     }
                 }
             } else if !is_empty {
-                div {
-                    class: "flex items-center gap-3 mb-4 px-2 text-sm font-medium text-slate-500",
+                div { class: "mb-4",
                     button {
-                        class: if displayed_tracks.iter().all(|(track, _)| selected_tracks.read().contains(&track.key)) {
-                            "w-4 h-4 rounded border border-indigo-400 bg-indigo-500 text-white flex items-center justify-center transition-colors"
-                        } else {
-                            "w-4 h-4 rounded border border-white/20 bg-white/5 hover:border-white/50 transition-colors"
-                        },
+                        r#type: "button",
+                        class: "group/all flex items-center gap-3 px-2 py-1.5 rounded-lg text-sm font-medium text-slate-500 hover:bg-white/5 hover:text-white active:bg-white/10 transition-colors",
                         aria_label: i18n::t("select_all_tracks"),
                         onclick: move |_| {
                             let all_selected = !displayed_tracks.is_empty() && displayed_tracks.iter().all(|(track, _)| selected_tracks.read().contains(&track.key));
@@ -422,50 +423,20 @@ pub fn FavoritesBody(
                                 is_selection_mode.set(true);
                             }
                         },
-                        if displayed_tracks.iter().all(|(track, _)| selected_tracks.read().contains(&track.key)) {
-                            i { class: "fa-solid fa-check", style: "font-size: 9px;" }
+                        span {
+                            class: if all_favorites_selected {
+                                "w-4 h-4 rounded border border-indigo-400 bg-indigo-500 text-white flex items-center justify-center transition-colors"
+                            } else {
+                                "w-4 h-4 rounded border border-white/20 bg-white/5 group-hover/all:border-white/50 transition-colors"
+                            },
+                            if all_favorites_selected {
+                                i { class: "fa-solid fa-check", style: "font-size: 9px;" }
+                            }
                         }
+                        span { "{i18n::t(\"select_all\")}" }
                     }
-                    span { "{i18n::t(\"select_all\")}" }
                 }
-                div {
-                    class: if is_vaxry {
-                        "grid px-3 py-2 text-[10px] font-bold border-b mb-1"
-                    } else {
-                        "grid gap-6 px-2 py-2 border-b border-white/5 text-sm font-medium text-slate-500 mb-2"
-                    },
-                    style: if is_vaxry {
-                        "grid-template-columns: 40px 1fr 180px 180px 56px 40px; color: rgba(255,255,255,0.25); border-color: rgba(255,255,255,0.06);"
-                    } else {
-                        "grid-template-columns: 40px minmax(0, 1fr) 200px 200px 64px 40px; align-items: center;"
-                    },
-                    div {}
-                    button {
-                        class: "flex items-center gap-1 text-left hover:text-white transition-colors",
-                        onclick: move |_| showcase::toggle_sort_state(sort_state, SortField::Title),
-                        "{i18n::t(\"title\")}"
-                        i { class: "{showcase::sort_icon(*sort_state.read(), SortField::Title)} text-[10px]" }
-                    }
-                    button {
-                        class: "flex items-center gap-1 text-left hover:text-white transition-colors",
-                        onclick: move |_| showcase::toggle_sort_state(sort_state, SortField::Artist),
-                        "{i18n::t(\"artist\")}"
-                        i { class: "{showcase::sort_icon(*sort_state.read(), SortField::Artist)} text-[10px]" }
-                    }
-                    button {
-                        class: "flex items-center gap-1 text-left hover:text-white transition-colors",
-                        onclick: move |_| showcase::toggle_sort_state(sort_state, SortField::Album),
-                        "{i18n::t(\"album\")}"
-                        i { class: "{showcase::sort_icon(*sort_state.read(), SortField::Album)} text-[10px]" }
-                    }
-                    button {
-                        class: "flex items-center justify-end gap-1 text-right hover:text-white transition-colors",
-                        onclick: move |_| showcase::toggle_sort_state(sort_state, SortField::Duration),
-                        i { class: "fa-regular fa-clock" }
-                        i { class: "{showcase::sort_icon(*sort_state.read(), SortField::Duration)} text-[10px]" }
-                    }
-                    div {}
-                }
+                Header { is_vaxry, is_album: false, sort_state: Some(sort_state) }
                 VirtualScrollView {
                     id: "favorites-scroll".to_string(),
                     class: if cfg!(target_os = "android") { "flex-1 overflow-y-auto overflow-x-hidden pb-20".to_string() } else { "flex-1 overflow-y-auto pb-20".to_string() },

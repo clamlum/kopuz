@@ -92,8 +92,7 @@ pub fn serve(uri: http::Uri, range: Option<String>, responder: RequestAsyncRespo
             .find_map(|part| part.strip_prefix("p="))
             .map(&decode)
             .unwrap_or_default();
-        // A library entity: the daemon resolves it, because a server cover
-        // is signed with credentials that never leave it.
+
         if let Some(request) = entity_request(&uri) {
             return match api::ArtworkApi::artwork(crate::backend::api().as_ref(), request).await {
                 Ok(data) => resp(
@@ -127,8 +126,6 @@ pub fn serve(uri: http::Uri, range: Option<String>, responder: RequestAsyncRespo
             None => file_path,
         };
 
-        // One file, served as it is: the background is painted full-bleed,
-        // so there is nothing to resize and nothing worth caching a copy of.
         match tokio::fs::read(&file_path).await {
             Ok(bytes) => resp(
                 200,

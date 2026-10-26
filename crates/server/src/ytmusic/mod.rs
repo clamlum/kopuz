@@ -451,15 +451,9 @@ impl YouTubeMusicClient {
         .await
     }
 
-    // Public surfaces — work anonymously. `cookies.as_deref().unwrap_or("")`
+    // Public surfaces work anonymously. `cookies.as_deref().unwrap_or("")`
     // hands an empty header to the parser, which the lower-level
-    // discover/mix `post` and innertube::browse now interpret as "skip
-    // SAPISID auth headers" (see browse_maybe_auth / discover::post).
-
-    pub async fn lyrics(&self, video_id: &str) -> Result<Option<lyrics::YtLyrics>, String> {
-        self.account(async { lyrics::fetch(video_id, self.cookies.as_deref()).await })
-            .await
-    }
+    // discover/mix `post` and innertube::browse interpret as unauthenticated.
 
     #[cfg(test)]
     pub(crate) async fn acting_as(&self) -> Option<String> {

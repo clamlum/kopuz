@@ -124,7 +124,7 @@ pub fn use_offline_mode(
             }
             Some(NetworkBanner::BackOnline) => {
                 spawn(async move {
-                    utils::sleep(std::time::Duration::from_secs(4)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
                     dropped.set(false);
                     if network_banner.peek().as_ref() == Some(&NetworkBanner::BackOnline) {
                         network_banner.set(None);

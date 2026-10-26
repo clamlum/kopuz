@@ -241,9 +241,8 @@ impl RangeStreamSource {
         self.total_size
     }
 
-    /// Ask for the last byte. googlevideo can serve the head of a stream and
-    /// answer 403 past it, so passing the head probe says nothing about deep
-    /// reads, and the first one is symphonia's own read of the webm tail.
+    /// Verify that the stream's last byte is accessible before enabling seeks.
+    /// A successful head request does not guarantee access to later ranges.
     pub fn check_tail(&self) -> IoResult<()> {
         let last = self.total_size.saturating_sub(1);
         let resp = send_range(&self.client, &self.url, &format!("bytes={last}-{last}"))?;
@@ -371,8 +370,7 @@ fn send_range(
     range: &str,
 ) -> IoResult<reqwest::blocking::Response> {
     let send = || client.get(url).header("Range", range).send();
-    // `without_url`: a stream URL can carry credentials in its userinfo, and a
-    // reqwest error prints the URL it failed on.
+
     match send() {
         Ok(response) => return Ok(response),
         Err(error) if error.is_request() || error.is_timeout() => {
@@ -477,8 +475,6 @@ impl Seek for RangeStreamSource {
 }
 
 fn parse_total_size(resp: &reqwest::blocking::Response) -> Option<u64> {
-    // Content-Range: "bytes 0-0/12345" — the part after '/' is the total.
-    // Content-Length on this 206 response is only the one-byte probe length.
     resp.headers()
         .get("content-range")
         .and_then(|value| value.to_str().ok())

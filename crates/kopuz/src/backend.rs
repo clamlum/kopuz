@@ -87,8 +87,7 @@ pub fn start(args: CoreArgs) -> Result<&'static Core, String> {
                 };
                 serve_socket(core).await;
             });
-            // The audio engine owns threads that never finish, so dropping the
-            // runtime here would block forever on teardown.
+
             runtime.shutdown_background();
         })
         .map_err(|error| format!("could not start the core thread: {error}"))?;

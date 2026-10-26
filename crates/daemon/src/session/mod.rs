@@ -70,8 +70,8 @@ pub trait QueueMaterializer: Send + Sync {
     fn register_restored(&self, _tracks: &[Track]) {}
 }
 
-/// Durable playback bookkeeping: recents on commit, listen counts when a
-/// track completes or crossfades out, credited to the source that was active
+/// Durable playback bookkeeping: recents on commit, listen counts once a
+/// track has played long enough to scrobble, credited to the source that was active
 /// when it played. Implemented over that source; tests inject a stub.
 #[async_trait::async_trait]
 pub trait PlaybackRecorder: Send + Sync {
@@ -266,6 +266,10 @@ enum SessionCmd {
     LoadPrepared(Box<Result<PreparedLoad, LoadFailure>>),
     LoadFinished(LoadFinished),
     BufferProgress(BufferProgressEvent),
+    TrackMetadata {
+        source: config::Source,
+        tracks: Vec<Track>,
+    },
     AlbumCovers {
         source: config::Source,
         covers: std::collections::HashMap<String, String>,
@@ -342,6 +346,7 @@ impl SessionHandle {
             next_token: 0,
             current_token: 0,
             pending_resume: None,
+            engine_released: false,
             pending_transition: None,
             armed_transition: None,
             load_task: None,
@@ -371,6 +376,7 @@ impl SessionHandle {
             remote_loaded: None,
             remote_writer,
             recorder: services.recorder,
+            published: None,
             scrobbler: services.scrobbler,
             last_recent_key: None,
             external: None,
@@ -539,6 +545,13 @@ impl SessionHandle {
     /// goes through here, so there is one place to look for who dirties what.
     pub fn invalidate(&self, table: api::Table) {
         self.emit_event(ApiEvent::LibraryInvalidated { table });
+    }
+
+    pub(crate) fn update_track_metadata(&self, source: &config::Source, tracks: Vec<Track>) {
+        let _ = self.cmd_tx.send(SessionCmd::TrackMetadata {
+            source: source.clone(),
+            tracks,
+        });
     }
 
     pub fn update_album_covers(&self, source: &config::Source, albums: &[reader::Album]) {
@@ -757,6 +770,9 @@ struct Session {
     next_token: u64,
     current_token: u64,
     pending_resume: Option<PendingResumeState>,
+    /// A paused version switch stopped the engine for good: whatever session
+    /// it still reports is the old cut, so resuming loads the swapped one.
+    engine_released: bool,
     pending_transition: Option<PendingTransition>,
     armed_transition: Option<u64>,
     load_task: Option<(u64, JoinHandle<()>)>,
@@ -792,6 +808,8 @@ struct Session {
     remote_loaded: Option<(RemoteQueueMark, u64)>,
     remote_writer: mpsc::UnboundedSender<RemoteQueueJob>,
     recorder: Option<Arc<dyn PlaybackRecorder>>,
+    /// What the session last published, for listen watchers that outlive a command.
+    published: Option<watch::Receiver<PlayerState>>,
     scrobbler: Option<Arc<crate::scrobbler::Scrobbler>>,
     last_recent_key: Option<String>,
     /// Set while an integration the engine cannot drive owns playback.
@@ -821,6 +839,7 @@ impl Session {
         mut engine_events: mpsc::UnboundedReceiver<EngineEvent>,
         state_tx: watch::Sender<PlayerState>,
     ) {
+        self.published = Some(state_tx.subscribe());
         let correction_start = tokio::time::Instant::now() + POSITION_CORRECTION_INTERVAL;
         let mut correction =
             tokio::time::interval_at(correction_start, POSITION_CORRECTION_INTERVAL);
@@ -988,6 +1007,34 @@ impl Session {
             SessionCmd::LoadPrepared(result) => self.handle_prepared_load(*result, state_tx),
             SessionCmd::LoadFinished(result) => self.handle_load_finished(result, state_tx),
             SessionCmd::BufferProgress(event) => self.handle_buffer_progress(event, state_tx),
+            SessionCmd::TrackMetadata { source, tracks } => {
+                if source == self.sources.active {
+                    for index in 0..self.model.len() {
+                        if let Some(queued) = self.model.track_at_mut(index)
+                            && let Some(updated) = tracks.iter().find(|track| track.id == queued.id)
+                        {
+                            *queued = updated.clone();
+                        }
+                    }
+                    let token = self.intent.token();
+                    if let Some(track) = self.model.current_track() {
+                        self.player.update_metadata(
+                            token,
+                            NowPlayingMeta {
+                                title: track.title.clone(),
+                                artist: track.artist.clone(),
+                                album: track.album.clone(),
+                                duration: Duration::from_secs(track.duration),
+                                artwork: load::now_playing_artwork(
+                                    self.sources.server.as_ref(),
+                                    track,
+                                ),
+                            },
+                        );
+                    }
+                    self.publish(state_tx, true);
+                }
+            }
             SessionCmd::AlbumCovers { source, covers } => {
                 self.apply_album_covers(source, covers, state_tx)
             }
@@ -1672,9 +1719,10 @@ impl Session {
     fn resume(&mut self, state_tx: &watch::Sender<PlayerState>) {
         let idx = self.model.current_position();
         let is_radio = self.current_track_is_radio();
-        if is_radio || !self.player.can_resume() {
+        if is_radio || !self.player.can_resume() || self.engine_released {
             if self.model.track_at(idx).is_some() {
-                if !is_radio {
+                // A released engine already left the swapped cut's place.
+                if !is_radio && !self.engine_released {
                     self.store_pending_resume();
                 }
                 self.start_load(idx, false);
@@ -1877,7 +1925,6 @@ impl Session {
             if let Some(external) = self.external.as_mut() {
                 external.completed_key = Some(track.id.uid());
             }
-            self.record_listen(track);
             // The queue is kopuz's, so its end-of-track is kopuz's too: the
             // next item may be another Spotify track or a local file, and
             // either way the load path decides who plays it.
@@ -1887,8 +1934,8 @@ impl Session {
         }
         self.push_external_now_playing();
         self.publish(state_tx, false);
-        if let (Some(scrobbler), Some((track, token))) = (self.scrobbler.clone(), committed) {
-            scrobbler.track_committed(track, token);
+        if let Some((track, token)) = committed {
+            self.track_committed(track, token);
         }
     }
 
@@ -2008,25 +2055,26 @@ impl Session {
         });
     }
 
-    /// Count a completed listen (auto-advance or crossfade arm), mirroring
-    /// the pump: bumped for the outgoing track, never for radio.
-    pub(super) fn record_listen_of_current(&mut self) {
-        let Some(track) = self.model.current_track() else {
-            return;
-        };
-        self.record_listen(track.clone());
-    }
-
-    pub(super) fn record_listen(&self, track: Track) {
-        let Some(recorder) = self.recorder.clone() else {
+    /// Count a listen once the committed track has played long enough, by the
+    /// scrobbler's rule, so a skip after most of a song still counts and a
+    /// skip after a few seconds does not. Never for radio.
+    fn count_listen_after_playtime(&self, track: Track, token: u64) {
+        let (Some(recorder), Some(published)) = (self.recorder.clone(), self.published.clone())
+        else {
             return;
         };
         if track.duration == u64::MAX {
             return;
         }
+        let threshold = crate::scrobbler::listen_threshold(track.duration);
         let events = self.events.clone();
         let source = self.active_source.clone();
         tokio::spawn(async move {
+            let state = || published.borrow().clone();
+            let uid = track.id.uid();
+            if !crate::scrobbler::accumulate_playtime(state, threshold, token, &uid).await {
+                return;
+            }
             recorder.bump_listen_count(source.as_ref(), &track).await;
             announce_history(&events);
         });
@@ -2248,11 +2296,7 @@ impl Session {
             return false;
         };
         let outgoing_token = pending.from_token;
-        let outgoing = self.model.current_track().cloned();
         self.armed_transition = Some(outgoing_token);
-        if let Some(track) = outgoing {
-            self.record_listen(track);
-        }
         if !self.commit_transition_model(token) {
             return false;
         }
@@ -2298,7 +2342,10 @@ impl Session {
         }
     }
 
-    pub(super) fn scrobble_committed(&self, track: Track, token: u64) {
+    /// A committed track is scrobbled and, once it has played long enough by
+    /// the same rule, counted as a listen for the source active now.
+    pub(super) fn track_committed(&self, track: Track, token: u64) {
+        self.count_listen_after_playtime(track.clone(), token);
         if let Some(scrobbler) = self.scrobbler.clone() {
             scrobbler.track_committed(track, token);
         }

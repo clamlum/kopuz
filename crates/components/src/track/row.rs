@@ -94,7 +94,7 @@ pub fn TrackRow(
         if let Some(handler) = on_long_press {
             let mut occurred = long_press_occurred;
             let task = spawn(async move {
-                utils::sleep(std::time::Duration::from_millis(600)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                 occurred.set(true);
                 handler.call(());
             });
@@ -113,8 +113,6 @@ pub fn TrackRow(
     let offline_mark = i18n::t("offline_mark");
     let cached_mark = i18n::t("cached_mark");
 
-    // The container a file is in, which the daemon works out: a row
-    // that came from a service names no file, so it has none.
     let file_type = track.format.clone();
 
     let columns_vaxry = if is_album {
@@ -123,15 +121,9 @@ pub fn TrackRow(
         COLUMNS_VAXRY
     };
 
-    // Phones get a two-line row instead of the desktop column grid: artwork,
-    // title, and one muted line of artist + duration. The album and file-type
-    // columns do not survive a 400px viewport, and neither skin's grid does.
     if cfg!(target_os = "android") {
         return rsx! {
             div {
-                // Fixed height, not padding: the virtual scroller lays its spacers
-                // out in multiples of one row, so this cannot vary with whether
-                // artwork is switched on.
                 class: "track-row flex items-center gap-3 px-2 h-14 rounded-lg active:bg-white/10 transition-colors select-none",
                 style: if is_currently_playing {
                     format!("background: color-mix(in oklab, var(--color-indigo-500) 12%, transparent); box-shadow: {selection_shadow};")
@@ -232,273 +224,238 @@ pub fn TrackRow(
 
     if is_vaxry {
         return rsx! {
-                div {
-                    class: "track-row track-row-draggable grid px-2 py-1.5 rounded-lg mx-1 group cursor-grab active:cursor-grabbing transition-colors hover:bg-white/5 select-none",
-                    style: if is_currently_playing {
-                        format!("grid-template-columns: {columns_vaxry}; background: color-mix(in oklab, var(--color-indigo-500) 12%, transparent); box-shadow: {selection_shadow};")
-                    } else {
-                        format!("grid-template-columns: {columns_vaxry}; box-shadow: {selection_shadow};")
-                    },
-                    onclick: move |evt| {
-                        evt.stop_propagation();
-                        if *long_press_occurred.read() {
-                            long_press_occurred.set(false);
-                            return;
-                        }
-                        if is_selection_mode {
-                            handle_select_click(is_selected, is_selection_mode, on_select);
-                        } else if cfg!(target_os = "android") {
-                            // Mobile: a single tap plays (no double-click).
-                            on_play.call(());
-                        }
-                    },
-                    draggable: "false",
-                    ondoubleclick: move |_| { if !is_selection_mode { on_play.call(()); } },
-                    onmousedown: move |evt| {
-                        if is_queue_drag_enabled() && (!is_selection_mode || is_selected) {
-                            let coords = evt.client_coordinates();
-                            pending_queue_drag.set(Some((coords.x, coords.y)));
-                        }
-                        start_long_press();
-                    },
-                    onmousemove: move |evt| {
-                        let drag_start = *pending_queue_drag.read();
-                        if let Some((start_x, start_y)) = drag_start {
-                            let coords = evt.client_coordinates();
-                            let dx = coords.x - start_x;
-                            let dy = coords.y - start_y;
-                            if dx.hypot(dy) >= QUEUE_DRAG_THRESHOLD_PX {
-                                pending_queue_drag.set(None);
-                                if is_selection_mode && !drag_selected_tracks_mouse.is_empty() {
-                                    set_dragged_queue_tracks(
-                                        drag_selected_tracks_mouse.clone(),
-                                        coords.x,
-                                        coords.y,
-                                    );
-                                } else {
-                                    set_dragged_queue_track(
-                                        drag_track_mouse.clone(),
-                                        drag_cover_url.clone(),
-                                        coords.x,
-                                        coords.y,
-                                    );
-                                }
-                            }
-                        }
-                    },
-                    onmouseup: move |_| {
-                        pending_queue_drag.set(None);
-                        cancel_long_press();
-                        clear_dragged_queue_track();
-                    },
-                    onmouseleave: move |_| cancel_long_press(),
-                    ontouchstart: move |_| start_long_press(),
-                    ontouchend: move |_| cancel_long_press(),
-                    oncontextmenu: move |evt| {
-                        evt.prevent_default();
-                        if !is_selection_mode {
-                            let point = evt.client_coordinates();
-                            context_menu_position.set(Some((point.x, point.y)));
-                            on_click_menu.call(());
-                        }
-                    },
-
-                    div { class: "flex items-center h-8",
-                        if is_currently_playing && !is_selection_mode {
-                            i {
-                                class: "fa-solid fa-volume-high text-xs",
-                                style: "color: var(--color-indigo-500);"
-                            }
-                        } else if on_select.is_some() && is_selection_mode {
-                            button {
-                                class: if is_selected {
-                                    "w-4 h-4 rounded border border-indigo-400 bg-indigo-500 text-white flex items-center justify-center transition-colors"
-                                } else {
-                                    "w-4 h-4 rounded border border-white/20 bg-white/5 hover:border-white/50 transition-colors"
-                                },
-                                onclick: move |evt| {
-                                    evt.stop_propagation();
-                                    handle_select_click(is_selected, is_selection_mode, on_select);
-                                },
-                                if is_selected { i { class: "fa-solid fa-check", style: "font-size: 9px;" } }
-                            }
-                        } else {
-                            if let Some(n) = row_num {
-                                span {
-                                    class: "text-xs group-hover:hidden text-white/25",
-                                    "{n}"
-
-                                }
-                            }
-                            button {
-                                class: if row_num.is_some() {
-                                    "hidden group-hover:flex items-center justify-center"
-                                } else {
-                                    "flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                                },
-                                onclick: move |_| on_play.call(()),
-                                i { class: "fa-solid fa-play text-xs text-white/80" }
+            div {
+                class: "track-row track-row-draggable grid px-2 py-1.5 rounded-lg mx-1 group cursor-grab active:cursor-grabbing transition-all hover:bg-white/10 hover:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] select-none",
+                style: if is_currently_playing {
+                    format!("grid-template-columns: {columns_vaxry}; background: color-mix(in oklab, var(--color-indigo-500) 12%, transparent); box-shadow: {selection_shadow};")
+                } else {
+                    format!("grid-template-columns: {columns_vaxry}; box-shadow: {selection_shadow};")
+                },
+                onclick: move |evt| {
+                    evt.stop_propagation();
+                    if *long_press_occurred.read() {
+                        long_press_occurred.set(false);
+                        return;
+                    }
+                    if is_selection_mode {
+                        handle_select_click(is_selected, is_selection_mode, on_select);
+                    } else if cfg!(target_os = "android") {
+                        on_play.call(());
+                    }
+                },
+                draggable: "false",
+                ondoubleclick: move |_| { if !is_selection_mode { on_play.call(()); } },
+                onmousedown: move |evt| {
+                    if is_queue_drag_enabled() && (!is_selection_mode || is_selected) {
+                        let coords = evt.client_coordinates();
+                        pending_queue_drag.set(Some((coords.x, coords.y)));
+                    }
+                    start_long_press();
+                },
+                onmousemove: move |evt| {
+                    let drag_start = *pending_queue_drag.read();
+                    if let Some((start_x, start_y)) = drag_start {
+                        let coords = evt.client_coordinates();
+                        let dx = coords.x - start_x;
+                        let dy = coords.y - start_y;
+                        if dx.hypot(dy) >= QUEUE_DRAG_THRESHOLD_PX {
+                            pending_queue_drag.set(None);
+                            if is_selection_mode && !drag_selected_tracks_mouse.is_empty() {
+                                set_dragged_queue_tracks(
+                                    drag_selected_tracks_mouse.clone(),
+                                    coords.x,
+                                    coords.y,
+                                );
+                            } else {
+                                set_dragged_queue_track(
+                                    drag_track_mouse.clone(),
+                                    drag_cover_url.clone(),
+                                    coords.x,
+                                    coords.y,
+                                );
                             }
                         }
                     }
+                },
+                onmouseup: move |_| {
+                    pending_queue_drag.set(None);
+                    cancel_long_press();
+                    clear_dragged_queue_track();
+                },
+                onmouseleave: move |_| cancel_long_press(),
+                ontouchstart: move |_| start_long_press(),
+                ontouchend: move |_| cancel_long_press(),
+                oncontextmenu: move |evt| {
+                    evt.prevent_default();
+                    if !is_selection_mode {
+                        let point = evt.client_coordinates();
+                        context_menu_position.set(Some((point.x, point.y)));
+                        on_click_menu.call(());
+                    }
+                },
 
-                    div { class: "flex items-center min-w-0 pr-3 gap-2",
-                        if !is_album && show_row_images {
-                            div {
-                                class: "w-8 h-8 rounded overflow-hidden shrink-0",
-                                style: format!("background: url('{}') center/cover no-repeat, rgba(255,255,255,0.05);", utils::DEFAULT_COVER_SVG),
-                                if let Some(ref url) = cover_url {
-                                    img {
-                                        src: "{url.as_ref()}",
-                                        class: "w-full h-full object-cover",
-                                        loading: "lazy",
-                                        decoding: "async",
-                                    }
+                TrackLeadCell {
+                    reach: "-my-1.5 -ms-2 min-h-8",
+                    number_class: "text-xs text-white/25",
+                    play_class: "text-xs text-white/80",
+                    row_num,
+                    is_selection_mode,
+                    is_selected,
+                    is_currently_playing,
+                    on_select,
+                    on_play,
+                }
+
+                div { class: "flex items-center min-w-0 pr-3 gap-2",
+                    if !is_album && show_row_images {
+                        div {
+                            class: "w-8 h-8 rounded overflow-hidden shrink-0",
+                            style: format!("background: url('{}') center/cover no-repeat, rgba(255,255,255,0.05);", utils::DEFAULT_COVER_SVG),
+                            if let Some(ref url) = cover_url {
+                                img {
+                                    src: "{url.as_ref()}",
+                                    class: "w-full h-full object-cover",
+                                    loading: "lazy",
+                                    decoding: "async",
                                 }
                             }
                         }
+                    }
+                    span {
+                        class: "text-sm font-medium truncate cursor-pointer hover:underline group-hover:text-white transition-colors",
+                        style: if is_currently_playing {
+                            "color: var(--color-indigo-500); font-weight: 600;"
+                        } else {
+                            "color: var(--color-white); opacity: 0.9;"
+                        },
+                        onclick: {
+                            let album_id = track.album_id.clone();
+                            let has_album = !track.album.trim().is_empty();
+                            move |evt: MouseEvent| {
+                                evt.stop_propagation();
+                                if !is_selection_mode {
+                                    if cfg!(target_os = "android") || !has_album {
+                                        on_play.call(());
+                                    } else {
+                                        nav_ctrl.navigate_to_album(album_id.clone());
+                                    }
+                                }
+                            }
+                        },
+                        ondoubleclick: move |evt| evt.stop_propagation(),
+                        "{track.title}"
+                    }
+                    if track.explicit {
+                        ExplicitBadge {}
+                    }
+                    if is_downloaded {
+                        i {
+                            class: "fa-solid fa-circle-arrow-down text-[9px] shrink-0",
+                            style: "color: var(--color-indigo-500); opacity: 0.7;",
+                            title: "{offline_mark}",
+                            aria_label: "{offline_mark}",
+                        }
+                    } else if is_cached {
+                        i {
+                            class: "fa-solid fa-hard-drive text-[9px] shrink-0",
+                            style: "color: var(--color-white); opacity: 0.45;",
+                            title: "{cached_mark}",
+                            aria_label: "{cached_mark}",
+                        }
+                    }
+                    if let Some(ref ft) = file_type {
                         span {
-                            class: "text-sm font-medium truncate cursor-pointer hover:underline",
-                            style: if is_currently_playing {
-                                "color: var(--color-indigo-500); font-weight: 600;"
+                            class: "shrink-0 text-[9px] font-semibold uppercase px-1 py-0.5 rounded leading-none tracking-wide",
+                            style: "background: rgba(255,255,255,0.08); color: var(--color-white); opacity: 0.5;",
+                            "{ft}"
+                        }
+                    }
+                }
+
+                div { class: "flex items-center min-w-0 pr-3",
+                    span {
+                        class: "text-sm truncate cursor-pointer hover:underline group-hover:text-white/70 transition-colors",
+                        style: "color: var(--color-white); opacity: 0.45;",
+                        onclick: {
+                            let artist = billed_artist(&track);
+                            move |evt: MouseEvent| {
+                                evt.stop_propagation();
+                                if is_selection_mode {
+                                    return;
+                                }
+                                if let Some(artist) = artist.clone() {
+                                    nav_ctrl.open_artist(artist);
+                                }
+                            }
+                        },
+                        ondoubleclick: move |evt| evt.stop_propagation(),
+                        "{track.artist}"
+                    }
+                }
+
+                if !is_album {
+                    div { class: "flex items-center min-w-0 pr-3",
+                        span {
+                            class: if track.album.trim().is_empty() {
+                                "text-sm truncate"
                             } else {
-                                "color: var(--color-white); opacity: 0.9;"
+                                "text-sm truncate cursor-pointer hover:underline group-hover:text-white/60 transition-colors"
                             },
+                            style: "color: var(--color-white); opacity: 0.35;",
                             onclick: {
                                 let album_id = track.album_id.clone();
                                 let has_album = !track.album.trim().is_empty();
                                 move |evt: MouseEvent| {
                                     evt.stop_propagation();
-                                    if !is_selection_mode {
-                                        // Mobile always plays. Desktop drills into the
-                                        // album — but only if the track actually has one.
-                                        // Albumless tracks (uploads, videos, catalog
-        // singles, Unknown Album from a folder scan) just play
-                                        // on title click; otherwise we'd be navigating
-                                        // into a meaningless "Singles" / "Unknown Album"
-                                        // bucket.
-                                        if cfg!(target_os = "android") || !has_album {
-                                            on_play.call(());
-                                        } else {
-                                            nav_ctrl.navigate_to_album(album_id.clone());
-                                        }
+                                    if !is_selection_mode && has_album {
+                                        nav_ctrl.navigate_to_album(album_id.clone());
                                     }
                                 }
                             },
                             ondoubleclick: move |evt| evt.stop_propagation(),
-                            "{track.title}"
-                        }
-                        if track.explicit {
-                            ExplicitBadge {}
-                        }
-                        if is_downloaded {
-                            i {
-                                class: "fa-solid fa-circle-arrow-down text-[9px] shrink-0",
-                                style: "color: var(--color-indigo-500); opacity: 0.7;",
-                                title: "{offline_mark}",
-                                aria_label: "{offline_mark}",
-                            }
-                        } else if is_cached {
-                            i {
-                                class: "fa-solid fa-hard-drive text-[9px] shrink-0",
-                                style: "color: var(--color-white); opacity: 0.45;",
-                                title: "{cached_mark}",
-                                aria_label: "{cached_mark}",
-                            }
-                        }
-                        if let Some(ref ft) = file_type {
-                            span {
-                                class: "shrink-0 text-[9px] font-semibold uppercase px-1 py-0.5 rounded leading-none tracking-wide",
-                                style: "background: rgba(255,255,255,0.08); color: var(--color-white); opacity: 0.5;",
-                                "{ft}"
-                            }
-                        }
-                    }
-
-                    div { class: "flex items-center min-w-0 pr-3",
-                        span {
-                            class: "text-sm truncate cursor-pointer hover:underline",
-                            style: "color: var(--color-white); opacity: 0.45;",
-                            onclick: {
-                                let artist = billed_artist(&track);
-                                move |evt: MouseEvent| {
-                                    evt.stop_propagation();
-                                    if is_selection_mode {
-                                        return;
-                                    }
-                                    if let Some(artist) = artist.clone() {
-                                        nav_ctrl.open_artist(artist);
-                                    }
-                                }
-                            },
-                            ondoubleclick: move |evt| evt.stop_propagation(),
-                            "{track.artist}"
-                        }
-                    }
-
-                    if !is_album {
-                        div { class: "flex items-center min-w-0 pr-3",
-                            span {
-                                class: if track.album.trim().is_empty() {
-                                    "text-sm truncate"
-                                } else {
-                                    "text-sm truncate cursor-pointer hover:underline"
-                                },
-                                style: "color: var(--color-white); opacity: 0.35;",
-                                onclick: {
-                                    let album_id = track.album_id.clone();
-                                    let has_album = !track.album.trim().is_empty();
-                                    move |evt: MouseEvent| {
-                                        evt.stop_propagation();
-                                        if !is_selection_mode && has_album {
-                                            nav_ctrl.navigate_to_album(album_id.clone());
-                                        }
-                                    }
-                                },
-                                ondoubleclick: move |evt| evt.stop_propagation(),
-                                "{track.album}"
-                            }
-                        }
-                    }
-
-                    div { class: "flex items-center justify-end",
-                        span {
-                            class: "text-xs font-mono",
-                            style: "color: var(--color-white); opacity: 0.3;",
-                            "{duration_str}"
-                        }
-                    }
-
-                    div { class: "flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity",
-                        if !is_selection_mode {
-                            crate::track_actions::TrackActionsMenu {
-                                track: menu_track.clone(),
-                                catalog_actions: catalog_actions.clone(),
-                                on_catalog_actions,
-                                is_open: Some(is_menu_open),
-                                position: *context_menu_position.read(),
-                                on_open: Some(EventHandler::new(move |_| {
-                                    context_menu_position.set(None);
-                                    on_click_menu.call(());
-                                })),
-                                on_close: Some(EventHandler::new(move |_| {
-                                    context_menu_position.set(None);
-                                    on_close_menu.call(());
-                                })),
-                                button_class: "active:scale-95".to_string(),
-                                anchor: "right".to_string(),
-                                on_add_to_playlist: Some(on_add_to_playlist),
-                                on_remove_from_playlist,
-                                on_download,
-                                on_view_metadata,
-                                on_delete: (!hide_delete).then_some(on_delete),
-                                is_downloaded,
-                                is_downloading,
-                            }
+                            "{track.album}"
                         }
                     }
                 }
-            };
+
+                div { class: "flex items-center justify-end",
+                    span {
+                        class: "text-xs font-mono",
+                        style: "color: var(--color-white); opacity: 0.3;",
+                        "{duration_str}"
+                    }
+                }
+
+                div { class: "flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity",
+                    if !is_selection_mode {
+                        crate::track_actions::TrackActionsMenu {
+                            track: menu_track.clone(),
+                            catalog_actions: catalog_actions.clone(),
+                            on_catalog_actions,
+                            is_open: Some(is_menu_open),
+                            position: *context_menu_position.read(),
+                            on_open: Some(EventHandler::new(move |_| {
+                                context_menu_position.set(None);
+                                on_click_menu.call(());
+                            })),
+                            on_close: Some(EventHandler::new(move |_| {
+                                context_menu_position.set(None);
+                                on_close_menu.call(());
+                            })),
+                            button_class: "active:scale-95".to_string(),
+                            anchor: "right".to_string(),
+                            on_add_to_playlist: Some(on_add_to_playlist),
+                            on_remove_from_playlist,
+                            on_download,
+                            on_view_metadata,
+                            on_delete: (!hide_delete).then_some(on_delete),
+                            is_downloaded,
+                            is_downloading,
+                        }
+                    }
+                }
+            }
+        };
     }
 
     let columns_normal = if is_album {
@@ -506,13 +463,18 @@ pub fn TrackRow(
     } else {
         COLUMNS_NORMAL
     };
+    // Swallows the whole column gap up to a cover, half of it before bare text.
+    let normal_lead_reach = if !is_album && show_row_images {
+        "-my-2 -ms-2 -me-6"
+    } else {
+        "-my-2 -ms-2 -me-3"
+    };
     let column_gap = if cfg!(target_os = "android") {
         "0.5rem"
     } else {
         "1.5rem"
     };
 
-    // normal UI
     return rsx! {
         div {
             class: "track-row track-row-draggable grid items-center h-14 p-2 rounded-lg hover:bg-white/5 group transition-colors relative select-none cursor-grab active:cursor-grabbing",
@@ -529,7 +491,6 @@ pub fn TrackRow(
                     return;
                 }
                 if !is_selection_mode && cfg!(target_os = "android") {
-                    // Mobile: a single tap plays (no double-click).
                     on_play.call(());
                 } else {
                     handle_select_click(is_selected, is_selection_mode, on_select);
@@ -590,40 +551,16 @@ pub fn TrackRow(
                 }
             },
 
-            div { class: "flex justify-center items-center shrink-0",
-                if on_select.is_some() && is_selection_mode {
-                    button {
-                        class: if is_selected {
-                            "w-4 h-4 rounded border border-indigo-400 bg-indigo-500 text-white flex items-center justify-center transition-colors"
-                        } else {
-                            "w-4 h-4 rounded border border-white/20 bg-white/5 hover:border-white/50 transition-colors"
-                        },
-                        aria_label: if is_selected { "Deselect track" } else { "Select track" },
-                        onclick: move |evt| {
-                            evt.stop_propagation();
-                            handle_select_click(is_selected, is_selection_mode, on_select);
-                        },
-                        if is_selected {
-                            i { class: "fa-solid fa-check", style: "font-size: 9px;" }
-                        }
-                    }
-                } else if is_currently_playing {
-                    i { class: "fa-solid fa-volume-high text-xs", style: "color: var(--color-indigo-500);" }
-                } else if let Some(n) = row_num {
-                    span {
-                        class: "text-xs group-hover:hidden text-white/60",
-                        "{n}"
-                    }
-                    button {
-                        class: if row_num.is_some() {
-                            "hidden group-hover:flex items-center justify-center"
-                        } else {
-                            "flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        },
-                        onclick: move |_| on_play.call(()),
-                        i { class: "fa-solid fa-play text-m text-white/60" }
-                    }
-                }
+            TrackLeadCell {
+                reach: normal_lead_reach,
+                number_class: "text-xs text-white/60",
+                play_class: "text-sm text-white/60",
+                row_num,
+                is_selection_mode,
+                is_selected,
+                is_currently_playing,
+                on_select,
+                on_play,
             }
 
             div { class: "flex items-center min-w-0",
@@ -662,8 +599,6 @@ pub fn TrackRow(
                         move |evt: MouseEvent| {
                             evt.stop_propagation();
                             if !is_selection_mode {
-                                // Mobile: tapping the title plays the track instead of
-                                // navigating to the album.
                                 if cfg!(target_os = "android") {
                                     on_play.call(());
                                 } else {
@@ -774,6 +709,71 @@ pub fn TrackRow(
             }
         }
     };
+}
+
+/// The cell left of the cover. It reaches from the row's edge to the cover at
+/// the row's full height, so a click anywhere there plays the track (or toggles
+/// it in selection mode) instead of only one on the small icon.
+#[component]
+pub fn TrackLeadCell(
+    /// Margins that pull the cell out over the row's padding and column gap.
+    reach: &'static str,
+    number_class: &'static str,
+    play_class: &'static str,
+    row_num: Option<usize>,
+    is_selection_mode: bool,
+    is_selected: bool,
+    is_currently_playing: bool,
+    on_select: Option<EventHandler<bool>>,
+    on_play: EventHandler<()>,
+) -> Element {
+    let selectable = is_selection_mode && on_select.is_some();
+    let label = if selectable {
+        if is_selected {
+            "Deselect track"
+        } else {
+            "Select track"
+        }
+    } else {
+        "Play"
+    };
+    rsx! {
+        button {
+            r#type: "button",
+            class: "self-stretch flex items-center justify-center rounded-s-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer {reach}",
+            aria_label: label,
+            onmousedown: move |evt| evt.stop_propagation(),
+            onclick: move |evt| {
+                evt.stop_propagation();
+                if is_selection_mode {
+                    handle_select_click(is_selected, is_selection_mode, on_select);
+                } else {
+                    on_play.call(());
+                }
+            },
+            ondoubleclick: move |evt| evt.stop_propagation(),
+            if selectable {
+                span {
+                    class: if is_selected {
+                        "w-4 h-4 rounded border border-indigo-400 bg-indigo-500 text-white flex items-center justify-center transition-colors"
+                    } else {
+                        "w-4 h-4 rounded border border-white/20 bg-white/5 group-hover:border-white/50 transition-colors"
+                    },
+                    if is_selected {
+                        i { class: "fa-solid fa-check", style: "font-size: 9px;" }
+                    }
+                }
+            } else if is_currently_playing {
+                i { class: "fa-solid fa-volume-high text-xs", style: "color: var(--color-indigo-500);" }
+            } else if let Some(n) = row_num {
+                span { class: "group-hover:hidden {number_class}", "{n}" }
+                // Font Awesome's unlayered `display` would beat `hidden` on the icon itself.
+                span { class: "hidden group-hover:inline-flex", i { class: "fa-solid fa-play {play_class}" } }
+            } else {
+                span { class: "flex opacity-0 group-hover:opacity-100 transition-opacity", i { class: "fa-solid fa-play {play_class}" } }
+            }
+        }
+    }
 }
 
 /// Re-exported from [`crate::radio_actions`], where track and playlist radio

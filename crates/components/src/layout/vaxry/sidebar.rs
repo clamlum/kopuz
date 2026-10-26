@@ -168,9 +168,6 @@ pub fn SidebarVaxry(props: SidebarProps) -> Element {
             "width: {current_width}px; background: rgba(0, 0, 0, 0.4); --vaxry-sidebar-fg: #fff;"
         )
     } else {
-        // Theme-following surface (not a fixed black overlay) so the Vaxry chrome
-        // harmonises with the active palette and the switcher text stays readable
-        // on light themes.
         format!(
             "width: {current_width}px; background: var(--color-neutral-900); --vaxry-sidebar-fg: var(--color-white);"
         )
@@ -245,8 +242,6 @@ pub fn SidebarVaxry(props: SidebarProps) -> Element {
                                 span {
                                     class: if is_android { "text-[10px] font-bold uppercase tracking-wider" } else { "text-[10px] font-bold" },
                                     style: "color: color-mix(in oklab, var(--vaxry-sidebar-fg) 25%, transparent);",
-                                    // The tab bar takes Home and Search, which leaves
-                                    // Discover as the only item of a "Discover" section.
                                     if is_android && *section_key == "discover" {
                                         "{i18n::t(\"browse\")}"
                                     } else {
@@ -295,8 +290,9 @@ pub fn SidebarVaxry(props: SidebarProps) -> Element {
                 DrawerNowPlaying {}
             } else {
                 div {
-                    class: "absolute top-0 right-0 w-2 h-full cursor-col-resize z-50",
+                    class: "absolute top-0 right-0 w-2 h-full cursor-col-resize group/handle z-50",
                     onmousedown: move |_| is_resizing.set(true),
+                    div { class: "absolute inset-y-0 right-0 w-px bg-white/0 group-hover/handle:bg-white/10 transition-colors" }
                 }
             }
         }
@@ -313,7 +309,11 @@ fn VaxryNavItem(
     let phone = cfg!(target_os = "android");
     rsx! {
         a {
-            class: if phone { "flex items-center gap-4 cursor-pointer transition-colors relative mx-2 rounded-lg" } else { "flex items-center gap-3 cursor-pointer transition-colors relative mx-1 rounded-lg" },
+            class: if phone {
+                "flex items-center gap-4 cursor-pointer transition-all hover:bg-white/10 active:bg-white/15 relative mx-2 rounded-lg"
+            } else {
+                "flex items-center gap-3 cursor-pointer transition-all hover:bg-white/10 active:bg-white/15 relative mx-1 rounded-lg"
+            },
             style: match (active, phone) {
                 (true, true) => "min-height: 48px; padding: 0 16px; background: color-mix(in oklab, var(--color-indigo-500) 15%, transparent); box-shadow: inset 3px 0 var(--color-indigo-500);",
                 (true, false) => "padding: 6px 10px; background: color-mix(in oklab, var(--color-indigo-500) 15%, transparent);",

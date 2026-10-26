@@ -126,8 +126,7 @@ impl MediaSource for AppleMusicSource {
             .get_library_playlist_tracks(playlist_ref)
             .await
             .map_err(SourceError::Backend)?;
-        // The library row id, not the catalog id: the seeds name rows of *this*
-        // playlist, which is what ties them to the container.
+
         let seeds: Vec<String> = tracks.iter().take(SEEDS).map(|t| t.id.clone()).collect();
         if seeds.is_empty() {
             return Err(SourceError::InvalidInput(
@@ -180,7 +179,7 @@ impl MediaSource for AppleMusicSource {
         let token = self.client.media_user_token().unwrap_or("");
         let encoded_token =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, token.as_bytes());
-        // Parsed by `ResolvedStreamRef::apple_music_parts` on the hooks side.
+
         Ok(StreamInfo {
             url: format!(
                 "__AM_FMP4:{_item_id}:{}:{}:{encoded_token}",
@@ -310,9 +309,6 @@ impl MediaSource for AppleMusicSource {
     }
 
     async fn push_favorite(&self, item_id: &str, on: bool) -> Result<(), SourceError> {
-        // The heart, not the library. `fetch_favorites` reads the Favorite Songs
-        // playlist, which is what this endpoint feeds; adding to the library
-        // instead left the two halves describing different sets.
         self.client
             .set_favorite(item_id, on)
             .await
@@ -381,8 +377,6 @@ impl MediaSource for AppleMusicSource {
         track: &reader::Track,
         position: usize,
     ) -> Result<(), SourceError> {
-        // The playlist row's own id, not the catalog id — see
-        // `track_from_playlist_entry`.
         let entry_id = track
             .playlist_item_id
             .as_deref()

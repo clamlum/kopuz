@@ -443,8 +443,7 @@ pub fn ThemeSelector(current_theme: String, on_change: EventHandler<String>) -> 
         ("one-light".into(), i18n::t("one_light")),
         ("gruvbox-light".into(), i18n::t("gruvbox_light_soft")),
     ];
-    // Android has no palette control, since choosing one opens a native file
-    // dialog, so don't offer a theme it can't point at anything.
+
     if cfg!(target_os = "android") {
         options.retain(|(id, _)| id != utils::live_theme::THEME_ID);
     }
@@ -475,13 +474,13 @@ pub fn ToggleSetting(enabled: bool, on_change: EventHandler<bool>) -> Element {
     let enable_class = if enabled {
         "text-white"
     } else {
-        "text-slate-500 hover:text-slate-300"
+        "text-slate-500 hover:text-white hover:bg-white/5"
     };
 
     let disable_class = if !enabled {
         "text-white"
     } else {
-        "text-slate-500 hover:text-slate-300"
+        "text-slate-500 hover:text-white hover:bg-white/5"
     };
 
     rsx! {
@@ -492,13 +491,13 @@ pub fn ToggleSetting(enabled: bool, on_change: EventHandler<bool>) -> Element {
                 style: "{slider_style}"
             }
             button {
-                class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {enable_class}",
+                class: "flex-1 h-8 rounded-lg text-[11px] font-bold z-10 transition-colors cursor-pointer {enable_class}",
                 onclick: move |_| on_change.call(true),
                 aria_pressed: enabled,
                 "{i18n::t(\"enabled\")}"
             }
             button {
-                class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {disable_class}",
+                class: "flex-1 h-8 rounded-lg text-[11px] font-bold z-10 transition-colors cursor-pointer {disable_class}",
                 onclick: move |_| on_change.call(false),
                 aria_pressed: !enabled,
                 "{i18n::t(\"disabled\")}"
@@ -527,13 +526,13 @@ pub fn BackBehaviorSelector(
     let rewind_class = if is_rewind {
         "text-white"
     } else {
-        "text-slate-500 hover:text-slate-300"
+        "text-slate-500 hover:text-white hover:bg-white/5"
     };
 
     let always_class = if !is_rewind {
         "text-white"
     } else {
-        "text-slate-500 hover:text-slate-300"
+        "text-slate-500 hover:text-white hover:bg-white/5"
     };
 
     rsx! {
@@ -544,14 +543,14 @@ pub fn BackBehaviorSelector(
                 style: "{slider_style}"
             }
             button {
-                class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {rewind_class}",
+                class: "flex-1 h-8 rounded-lg text-[11px] font-bold z-10 transition-colors cursor-pointer {rewind_class}",
                 title: "{i18n::t(\"back_behavior_rewind\")}",
                 onclick: move |_| on_change.call(BackBehavior::RewindThenPrev),
                 aria_pressed: is_rewind,
                 "{i18n::t(\"back_behavior_rewind\")}"
             }
             button {
-                class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {always_class}",
+                class: "flex-1 h-8 rounded-lg text-[11px] font-bold z-10 transition-colors cursor-pointer {always_class}",
                 title: "{i18n::t(\"back_behavior_always_prev\")}",
                 onclick: move |_| on_change.call(BackBehavior::AlwaysPrev),
                 aria_pressed: !is_rewind,
@@ -768,7 +767,7 @@ pub fn RadioRegistryDropdown(
                 }
                 i { class: if is_open { "fa-solid fa-chevron-up text-[10px] text-white/40" } else { "fa-solid fa-chevron-down text-[10px] text-white/40" } }
             }
-            // Expandable panel
+
             if is_open {
                 div { class: "flex flex-col gap-2 pb-3",
                     if registries.is_empty() {

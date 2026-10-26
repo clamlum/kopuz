@@ -8,6 +8,15 @@ use kopuz_route::Route;
 use std::collections::HashMap;
 use utils::CoverUrl;
 
+// Shared by the column header and the rows so the two cannot drift apart.
+const COL_INDEX: &str = "w-12 shrink-0";
+const COL_TITLE: &str = "flex-1 min-w-0 pr-4";
+const COL_ALBUM: &str = "w-48 lg:w-64 shrink-0 hidden md:block pr-4 truncate";
+const COL_GENRE: &str = "w-24 shrink-0 hidden lg:block pr-4 truncate";
+const COL_TIME: &str = "w-24 shrink-0 text-right";
+const COL_PLAYS: &str = "w-24 shrink-0 text-right";
+const COL_MENU: &str = "w-10 shrink-0";
+
 fn format_duration(seconds: u64) -> String {
     let minutes = seconds / 60;
     let seconds = seconds % 60;
@@ -27,8 +36,6 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
     let albums_res = use_albums(source, albums_query);
     let counts_res = use_listen_counts(source);
     let filter = use_memo(move || {
-        // The source is the daemon's; naming it here only keeps the memo
-        // re-running across a switch.
         let _ = source();
         TrackFilter {
             sort: TrackSort::PlayCount,
@@ -36,7 +43,6 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
         }
     });
 
-    // album_id → genre (covers resolve via the source seam off the track itself).
     let album_map = use_memo(move || {
         albums_res
             .read()
@@ -61,7 +67,6 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
     const ITEM_HEIGHT: f64 = 60.0;
 
     let mut total_rows = use_signal(|| 0_usize);
-    // One open menu at a time: rows are a loop, so per-row hooks are not an option.
     let mut active_menu_track = use_signal(|| None::<String>);
     let page = use_memo(move || {
         let info = components::virtual_scroll::use_virtual_scroll(
@@ -84,17 +89,12 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
     });
 
     let track_data_len = total_rows();
-    let scroll_info = components::virtual_scroll::use_virtual_scroll(
-        *scroll_stat.read(),
-        *container_height.read(),
-        track_data_len,
-        ITEM_HEIGHT,
-    );
+    let window_rows = window.rows.read().clone().unwrap_or_default();
+    let (top_pad, bottom_pad) = crate::library::window_padding(track_data_len, &window_rows);
 
     let visible_tracks: Vec<(usize, Track, u64, String, Option<CoverUrl>)> = {
         let counts = counts_res.read().clone().unwrap_or_default();
         let albums = album_map.read();
-        let window_rows = window.rows.read().clone().unwrap_or_default();
         let row_offset = window_rows.offset as usize;
         window_rows
             .rows
@@ -138,28 +138,33 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
                             }
                         }
                     }
-            }
 
-                div { class: "flex items-center px-4 py-3 mb-2 text-xs font-semibold text-slate-400 border-b border-white/10",
-                    div { class: "w-12 shrink-0 text-center", "#" }
-                    div { class: "flex-1 min-w-0 pr-4", "{i18n::t(\"title\")}" }
-                    div { class: "w-48 lg:w-64 shrink-0 hidden md:block pr-4", "{i18n::t(\"album\")}" }
-                    div { class: "w-24 shrink-0 hidden lg:block pr-4", "{i18n::t(\"genre\")}" }
-                    div { class: "w-24 shrink-0 text-right", "{i18n::t(\"time\")}" }
-                    div { class: "w-24 shrink-0 text-right", "{i18n::t(\"plays\")}" }
+                    // Same column classes and scrollbar gutter as the rows below, inside
+                    // the same width cap, so every heading sits over its column.
+                    div {
+                        class: "flex items-center px-4 py-3 mb-2 text-xs font-semibold text-slate-400 border-b border-white/10 overflow-hidden",
+                        style: "scrollbar-gutter: stable;",
+                        div { class: "{COL_INDEX} text-center", "#" }
+                        div { class: "{COL_TITLE}", "{i18n::t(\"title\")}" }
+                        div { class: "{COL_ALBUM}", "{i18n::t(\"album\")}" }
+                        div { class: "{COL_GENRE}", "{i18n::t(\"genre\")}" }
+                        div { class: "{COL_TIME}", "{i18n::t(\"time\")}" }
+                        div { class: "{COL_PLAYS}", "{i18n::t(\"plays\")}" }
+                        div { class: "{COL_MENU}" }
+                    }
                 }
             }
 
             div { class: "max-w-[1600px] mx-auto w-full flex-1 min-h-0 flex flex-col",
                 components::virtual_scroll::VirtualScrollView {
                     id: "activity-scroll".to_string(),
-                    class: "flex-1 min-h-0 overflow-y-auto pb-32".to_string(),
+                    class: "flex-1 min-h-0 overflow-y-auto pb-32 [scrollbar-gutter:stable]".to_string(),
                     scroll_stat,
                     container_height,
                     item_height: ITEM_HEIGHT,
                     saved_scroll,
-                    top_pad: scroll_info.top_pad,
-                    bottom_pad: scroll_info.bottom_pad,
+                    top_pad,
+                    bottom_pad,
                     onscroll: move |scroll| {
                         scroll_positions.write().insert(Route::Activity, scroll);
                     },
@@ -203,12 +208,12 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
                                                     ctrl.play_queue_at(all, idx);
                                                 });
                                             },
-                                            div { class: "w-12 shrink-0 flex items-center justify-center tabular-nums text-white/50 font-medium group-hover:text-white transition-colors relative",
+                                            div { class: "{COL_INDEX} flex items-center justify-center tabular-nums text-white/50 font-medium group-hover:text-white transition-colors relative",
                                                 span { class: "group-hover:opacity-0 transition-opacity", "{idx + 1}" }
                                                 i { class: "fa-solid fa-play absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity" }
                                             }
 
-                                            div { class: "flex-1 min-w-0 pr-4 flex items-center",
+                                            div { class: "{COL_TITLE} flex items-center",
                                                 div {
                                                     class: if is_vaxry { "w-8 h-8 bg-white/5 rounded-md flex items-center justify-center mr-4 shrink-0 text-slate-500 group-hover:text-slate-300 transition-colors overflow-hidden" } else { "w-10 h-10 bg-white/5 rounded-md flex items-center justify-center mr-4 shrink-0 text-slate-500 group-hover:text-slate-300 transition-colors overflow-hidden" },
                                                     if let Some(url) = cover_url {
@@ -229,11 +234,11 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
                                                 }
                                             }
 
-                                            div { class: "w-48 lg:w-64 shrink-0 hidden md:block text-slate-400 text-sm truncate pr-4 group-hover:text-slate-300 transition-colors",
+                                            div { class: "{COL_ALBUM} text-slate-400 text-sm group-hover:text-slate-300 transition-colors",
                                                 "{track.album}"
                                             }
 
-                                            div { class: "w-24 shrink-0 hidden lg:block text-slate-400 text-sm truncate pr-4 group-hover:text-slate-300 transition-colors",
+                                            div { class: "{COL_GENRE} text-slate-400 text-sm group-hover:text-slate-300 transition-colors",
                                                 if genre.is_empty() {
                                                     "-"
                                                 } else {
@@ -241,11 +246,11 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
                                                 }
                                             }
 
-                                            div { class: if cfg!(target_os = "android") { "hidden" } else { "w-24 shrink-0 text-right text-slate-400 text-sm tabular-nums group-hover:text-slate-300 transition-colors" },
+                                            div { class: if cfg!(target_os = "android") { "hidden" } else { "{COL_TIME} text-slate-400 text-sm tabular-nums group-hover:text-slate-300 transition-colors" },
                                                 "{track.duration_secs().filter(|secs| *secs > 0).map(format_duration).unwrap_or_default()}"
                                             }
 
-                                            div { class: if cfg!(target_os = "android") { "w-14 shrink-0 text-right text-slate-400 text-sm tabular-nums flex items-center justify-end gap-2" } else { "w-24 shrink-0 text-right text-slate-400 text-sm tabular-nums group-hover:text-slate-300 transition-colors flex items-center justify-end gap-2" },
+                                            div { class: if cfg!(target_os = "android") { "w-14 shrink-0 text-right text-slate-400 text-sm tabular-nums flex items-center justify-end gap-2" } else { "{COL_PLAYS} text-slate-400 text-sm tabular-nums group-hover:text-slate-300 transition-colors flex items-center justify-end gap-2" },
                                                 if plays > 0 {
                                                     i { class: "fa-solid fa-fire text-orange-500/80 text-[10px]" }
                                                 }
@@ -253,7 +258,7 @@ pub fn Activity(settings: Signal<Settings>) -> Element {
                                             }
 
                                             div {
-                                                class: "w-10 shrink-0 flex items-center justify-end",
+                                                class: "{COL_MENU} flex items-center justify-end",
                                                 onclick: move |evt| evt.stop_propagation(),
                                                 components::track_actions::TrackActionsMenu {
                                                     track: menu_track.clone(),

@@ -118,13 +118,13 @@ pub fn EqualizerPanel(
     let enable_class = if enabled {
         "text-white"
     } else {
-        "text-slate-500 hover:text-slate-300"
+        "text-slate-500 hover:text-white hover:bg-white/5"
     };
 
     let disable_class = if !enabled {
         "text-white"
     } else {
-        "text-slate-500 hover:text-slate-300"
+        "text-slate-500 hover:text-white hover:bg-white/5"
     };
     let active_drag_band = *dragging_band.read();
     let active_hover_band = *hovered_band.read();
@@ -209,7 +209,7 @@ pub fn EqualizerPanel(
                         style: "{slider_style}"
                     }
                     button {
-                        class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {enable_class}",
+                        class: "flex-1 self-stretch rounded-lg text-[11px] font-bold z-10 transition-colors cursor-pointer {enable_class}",
                         aria_pressed: enabled,
                         onclick: move |_| {
                             let mut next = draft.peek().clone();
@@ -221,7 +221,7 @@ pub fn EqualizerPanel(
                         "{i18n::t(\"enabled\")}"
                     }
                     button {
-                        class: "flex-1 text-[11px] font-bold z-10 transition-colors duration-300 cursor-pointer {disable_class}",
+                        class: "flex-1 self-stretch rounded-lg text-[11px] font-bold z-10 transition-colors cursor-pointer {disable_class}",
                         aria_pressed: !enabled,
                         onclick: move |_| {
                             let mut next = draft.peek().clone();
@@ -269,7 +269,7 @@ pub fn EqualizerPanel(
                                             progress,
                                         ));
                                         if step < STEPS {
-                                            utils::sleep(std::time::Duration::from_millis(FRAME_MS)).await;
+                                            tokio::time::sleep(std::time::Duration::from_millis(FRAME_MS)).await;
                                         }
                                     }
                                 });

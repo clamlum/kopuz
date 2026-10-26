@@ -183,8 +183,6 @@ impl JobRunner {
             });
         }
 
-        // Announce the job before it produces anything, or a page that just
-        // asked for one sits blank until the first line of real progress.
         self.session
             .emit_event(ApiEvent::JobProgress(api::JobProgress {
                 id: id.clone(),

@@ -33,8 +33,6 @@ fn volume_scroll_step_edit(value: &str) -> Option<SettingsEdit> {
 
 #[component]
 pub(super) fn ConnectivitySection() -> Element {
-    // What is offered, and whether each is connected, is the daemon's answer;
-    // this counter is what asks it again after a change.
     let changed = use_signal(|| 0u64);
     let mut integrations = hooks::integrations::use_integrations();
     use_effect(move || {
@@ -499,7 +497,6 @@ pub(super) fn PlayerSection(settings: Signal<Settings>) -> Element {
                     }
                 }
             }
-            // Mouse wheel only.
             if !cfg!(target_os = "android") {
                 SettingItem {
                     title: i18n::t("volume_scroll_step").to_string(),

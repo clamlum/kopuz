@@ -48,6 +48,7 @@ impl Native {
         };
         let settings_path = config::store::settings_path_for(db_dir);
         migrations::apply(&pool, Some(&settings_path), &pending).await?;
+        cfg_store::purge_removable(&pool).await?;
         Ok(Self {
             pool: ArcSwap::from_pointee(pool),
             settings_path,
@@ -325,6 +326,14 @@ impl ReadStore for Native {
         limit: u32,
     ) -> Result<Vec<reader::Album>, DbError> {
         queries::albums_recently_added(&self.pool(), source, limit).await
+    }
+
+    async fn albums_recently_added_page(
+        &self,
+        source: &crate::Source,
+        page: crate::Page,
+    ) -> Result<(u32, Vec<reader::Album>), DbError> {
+        queries::albums_recently_added_page(&self.pool(), source, page).await
     }
 
     async fn load_queue(&self, source: &crate::Source) -> Result<crate::QueueSnapshot, DbError> {

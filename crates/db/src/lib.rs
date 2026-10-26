@@ -1,13 +1,4 @@
-//! Kopuz persistence layer (issue #347).
-//!
-//! Owns the SQLite schema and all persistence behind a single async [`Storage`]
-//! trait. Native targets implement it with sqlx; wasm (not a shipped target)
-//! gets a thin in-memory stub so the build stays green. Everything above this
-//! crate (reactive hooks, UI) is driver-agnostic.
-//!
-//! Dependency direction: `db` sits ABOVE `config`/`reader` (it persists their
-//! types), so those crates stay pure model definitions and all save/load lives
-//! here.
+//! SQLite persistence for configuration and library models through [`Storage`].
 
 use std::sync::Arc;
 
@@ -28,9 +19,6 @@ pub struct ImportReport {
     pub servers: usize,
 }
 
-// `Source` is defined in `config` (the active source lives there) and is the
-// single type-safe representation of "which source"; re-exported here since the
-// DB layer is its main consumer (`WHERE source = ?`).
 pub use config::Source;
 
 /// The `kv` kind a remembered "this artist has no photo" is filed under, named by [`artist_miss_name`].
@@ -420,6 +408,13 @@ pub trait ReadStore: Send + Sync {
         limit: u32,
     ) -> Result<Vec<reader::Album>, DbError>;
 
+    /// Recently added albums and the total match count, independent of the requested page.
+    async fn albums_recently_added_page(
+        &self,
+        source: &Source,
+        page: Page,
+    ) -> Result<(u32, Vec<reader::Album>), DbError>;
+
     /// The queue `source` was left with, its library rows refreshed from what a sync since wrote.
     async fn load_queue(&self, source: &Source) -> Result<QueueSnapshot, DbError>;
 
@@ -781,8 +776,6 @@ pub trait Storage: ReadStore {
     /// Generic metadata-cache write (upsert of `payload` for `(cache_key, kind)`).
     async fn meta_put(&self, cache_key: &str, kind: &str, payload: &str) -> Result<(), DbError>;
 
-    // --- Debug-panel operations (dev tooling; no-ops on the wasm stub) -----
-
     /// Delete the database files at `db_path`, re-init an empty schema there,
     /// and hot-swap the live pool onto it.
     async fn debug_reset(&self, db_path: &std::path::Path) -> Result<(), DbError>;
@@ -951,8 +944,7 @@ fn android_files_dir() -> Option<std::path::PathBuf> {
     use jni::objects::{JObject, JString};
 
     let ctx = ndk_context::android_context();
-    // SAFETY: the pointers come from ndk_context, which wry/tao populate from
-    // the Activity before `main` runs, and are valid for the process lifetime.
+
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
     let context = unsafe { JObject::from_raw(ctx.context().cast()) };
     let mut env = vm.attach_current_thread().ok()?;

@@ -13,7 +13,7 @@ use server::stream::stream_buffer::{Captured, CompleteSink};
 /// the blocking decode I/O is intentional.
 pub(crate) fn network_factory(
     stream_url: String,
-    yt_format: Option<(server::ytmusic::player::AudioFormat, bool)>,
+    yt_format: Option<(server::stream::AudioFormat, bool)>,
     yt_user_agent: Option<String>,
     is_radio: bool,
     icy_tx: Option<tokio::sync::watch::Sender<server::stream::icy::IcyMeta>>,
@@ -95,8 +95,6 @@ pub(crate) fn network_factory(
             } else if let ResolvedStreamRef::SoundCloudHls(hls_url) =
                 ResolvedStreamRef::parse(&stream_url)
             {
-                // SoundCloud Go+ AAC: assemble the HLS playlist's fMP4 segments
-                // into one in-memory buffer Symphonia can decode.
                 let bytes =
                     server::stream::hls_source::assemble(hls_url, yt_user_agent.as_deref())?;
                 if let Some(sink) = complete.take() {
@@ -113,8 +111,6 @@ pub(crate) fn network_factory(
             } else if let ResolvedStreamRef::AppleMusicFmp4(payload) =
                 ResolvedStreamRef::parse(&stream_url)
             {
-                // The key exchange has panicked on malformed CDM responses, so
-                // contain it rather than taking the decode worker down.
                 let (adam_id, storefront, language, token_b64) =
                     ResolvedStreamRef::apple_music_parts(payload).ok_or_else(|| {
                         std::io::Error::new(
@@ -164,14 +160,12 @@ pub(crate) fn network_factory(
                     Err(format!("Apple Music decrypt panicked: {msg}"))
                 })
                 .map_err(std::io::Error::other)?;
-                // Samples decrypt on demand, so the source remains seekable.
+
                 let len = Some(track.total_size());
                 let (source, mut hint) = decoder::from_stream_with_len(track, len);
                 hint.with_extension("m4a");
                 Ok((source, hint))
             } else {
-                // Jellyfin and Subsonic normally support ranges. Fall back to
-                // a progressive stream when the endpoint does not.
                 match server::stream::range_source::RangeStreamSource::new_with_progress(
                     stream_url.clone(),
                     yt_user_agent.clone(),

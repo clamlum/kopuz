@@ -31,6 +31,28 @@ use hooks::use_player_controller::PlayerController;
 /// The sources section, which Manage sources opens Settings at.
 const MEDIA_SERVERS_SECTION: &str = "settings-media-servers";
 
+/// Brings a category's top back into view after a tab switch, but only when it
+/// is hidden under the sticky title or tab bar. Scrolling unconditionally
+/// moved the whole page, sticky bar included, on every click.
+const SCROLL_BELOW_STICKY: &str = r#"((target) => requestAnimationFrame(() => {
+    const el = document.getElementById(target);
+    const page = el?.closest('.settings-page');
+    if (!page) {
+        el?.scrollIntoView({ block: 'start' });
+        return;
+    }
+    const topBar = page.classList.contains('settings-layout-topbar')
+        || matchMedia('(max-width: 900px), (max-height: 540px)').matches;
+    const bar = page.querySelector(topBar ? '.settings-fan' : ':scope > h1');
+    const offset = el.getBoundingClientRect().top - (bar?.getBoundingClientRect().bottom ?? 0);
+    if (offset >= 0) return;
+    let scroller = el.parentElement;
+    while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) {
+        scroller = scroller.parentElement;
+    }
+    (scroller ?? document.scrollingElement).scrollBy({ top: offset - 16 });
+}))"#;
+
 /// The category Settings shows, held at the app root so the remount a language change does keeps it.
 #[derive(Clone, Copy)]
 pub struct OpenCategory(pub Signal<SettingsCategory>);
@@ -160,10 +182,14 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
         }
         match section {
             Some(section) if !shown => pending_section.set(Some(section)),
-            _ => {
-                let target = section.unwrap_or("settings-category-content");
+            Some(section) => {
                 let _ = document::eval(&format!(
-                    "requestAnimationFrame(() => document.getElementById('{target}')?.scrollIntoView({{ block: 'start' }}))"
+                    "requestAnimationFrame(() => document.getElementById('{section}')?.scrollIntoView({{ block: 'start' }}))"
+                ));
+            }
+            None => {
+                let _ = document::eval(&format!(
+                    "{SCROLL_BELOW_STICKY}('settings-category-content')"
                 ));
             }
         }
@@ -226,8 +252,6 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
         );
     };
 
-    // Signing in again on an active server: which flow it is belongs to the
-    // service, and the daemon runs it.
     let mut sign_in_again = move || match active_server() {
         Some(server) if server.reauth == api::SignInKind::Browser => {
             let mut reauth_error = reauth_error;
@@ -899,9 +923,9 @@ pub fn Settings(settings: Signal<config::Settings>) -> Element {
                 }
                 if active_category() == SettingsCategory::Library {
                     // Above the sources, whose list grows with every one added.
-                    div { class: "mt-6", OfflineCacheSection { settings } }
-                    // Clears the sticky category tabs when Manage sources scrolls here.
-                    div { id: MEDIA_SERVERS_SECTION, class: "mt-6", style: "scroll-margin-top: 5rem;", onmounted: move |event| scroll_if_pending(MEDIA_SERVERS_SECTION, event.data()),
+                    div { OfflineCacheSection { settings } }
+                    // Clears the sticky title and category tabs when Manage sources scrolls here.
+                    div { id: MEDIA_SERVERS_SECTION, style: "scroll-margin-top: 7.5rem;", onmounted: move |event| scroll_if_pending(MEDIA_SERVERS_SECTION, event.data()),
                         SettingsSection { title: i18n::t("sources").to_string(),
                             div { class: "px-5 py-4",
                                 SourceSettings {

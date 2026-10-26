@@ -51,6 +51,15 @@ pub fn QueueRow(
     } else {
         base_class.to_string()
     };
+    // The end margin swallows the row gap only when a cover follows, so the
+    // title never butts against the cell.
+    let show_row_images = settings.read().ui.show_row_images;
+    let play_cell_class = match (layout, show_row_images) {
+        (LayoutMode::Fullscreen, true) => "w-14 -ms-4 -me-4 -my-2",
+        (LayoutMode::Fullscreen, false) => "w-14 -ms-4 -my-2",
+        (LayoutMode::Rightbar, true) => "w-11 -ms-2 -me-3 -my-1.5",
+        (LayoutMode::Rightbar, false) => "w-11 -ms-2 -my-1.5",
+    };
     let row_icon_class = if is_active {
         "fa-solid fa-volume-high text-xs"
     } else {
@@ -63,11 +72,6 @@ pub fn QueueRow(
             class: "{row_class}",
             style: match layout {
                 LayoutMode::Fullscreen => "",
-                // content-visibility applies paint containment, which makes the
-                // row a containing block for the menu's fixed-position panel and
-                // clips it to a 52px box, so the menu opens invisibly. Drop the
-                // containment for as long as the menu is up, as the album and
-                // artist cards do.
                 LayoutMode::Rightbar if menu_open() => "content-visibility: visible; contain: none;",
                 LayoutMode::Rightbar => "content-visibility: auto; contain-intrinsic-size: 0 52px;",
             },
@@ -80,18 +84,25 @@ pub fn QueueRow(
                 menu_open.set(true);
             },
 
-            div { class: "w-4 flex justify-center items-end shrink-0",
+            // Spans from the row's edge to the cover at full row height, so the
+            // icon sits centred and a click anywhere left of the cover plays.
+            div {
+                class: "{play_cell_class} self-stretch flex justify-center items-center shrink-0 rounded-s-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer",
+                onclick: move |evt| {
+                    evt.stop_propagation();
+                    on_play.call(());
+                },
 
                 span { class: "queue-item-number text-xs group-hover:hidden text-white/60",
                     "{queue_idx + 1}"
                 }
 
-                div { class: "queue-item-icon hidden group-hover:flex items-center justify-center",
+                div { class: "queue-item-icon hidden group-hover:flex w-full h-full items-center justify-center",
                     i { class: "{row_icon_class}" }
                 }
             }
 
-            if settings.read().ui.show_row_images {
+            if show_row_images {
                 div {
                     class: "rounded-md overflow-hidden flex-shrink-0 shadow-sm",
                     style: {
@@ -138,9 +149,9 @@ pub fn QueueRow(
                 }
             }
 
-            div { onmousedown: move |evt| evt.stop_propagation(),
+            div { class: "flex self-stretch", onmousedown: move |evt| evt.stop_propagation(),
                 ReorderButtons {
-                    class: "flex flex-col pr-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity",
+                    class: "pr-1 opacity-0 group-hover:opacity-100 transition-opacity",
                     can_move_up,
                     can_move_down,
                     on_move_up,
@@ -155,8 +166,6 @@ pub fn QueueRow(
                     is_open: Some(menu_open()),
                     on_open: Some(EventHandler::new(move |_| menu_open.set(true))),
                     on_close: Some(EventHandler::new(move |_| menu_open.set(false))),
-                    // Queueing a track that is already in the queue would just
-                    // duplicate it; reordering is what this surface offers.
                     show_queue_actions: false,
                     on_remove_from_queue: (!is_active).then(|| EventHandler::new(move |_| {
                         ctrl.remove_queue_item(queue_idx);
@@ -180,8 +189,6 @@ pub fn QueueSummary(
 ) -> Element {
     let ctrl = use_context::<PlayerController>();
     let is_radio = if let Some(track) = ctrl.get_track_at(*current_queue_index.read()) {
-        // As of today, radio tracks have a duration of u64::MAX, if this
-        // invariant ever changes, this logic must be updated as well
         track.is_radio()
     } else {
         false
@@ -304,7 +311,6 @@ pub fn QueueListView(
         });
     });
 
-    // Clear functions when the component is dropped
     use_drop(move || {
         let _cleanup = eval(&format!(
             "window.__{layout}_queueScrollDispose?.(); delete window.__{layout}_queueScrollDispose; delete window.__{layout}_queueJump;"
@@ -314,9 +320,6 @@ pub fn QueueListView(
     let mut auto_sync = use_signal(|| true);
 
     use_hook(move || {
-        // The queue is virtualized, so the playing row usually isn't in the
-        // DOM — jumping goes through scrollTop math on the row index instead
-        // of scrollIntoView. Far jumps snap instantly; near ones glide.
         let _jump_func = eval(&format!(
             r#"
                 window.__{layout}_queueJump = (index) => {{
@@ -336,11 +339,6 @@ pub fn QueueListView(
         ));
     });
 
-    // Hand scroll control back to the user the moment they scroll the queue
-    // themselves; the sync button re-arms auto-follow. Watching input events
-    // (wheel / touch / scrollbar grab) instead of `scroll` keeps our own
-    // smooth jumps — whose end time the browser doesn't expose — from
-    // disarming auto-follow.
     use_future(move || async move {
         let mut listener = eval(&format!(
             r#"
@@ -389,8 +387,6 @@ pub fn QueueListView(
     };
 
     let get_track_cover = |track: &api::TrackInfo| -> Option<utils::CoverUrl> {
-        // The row carries its own reference; the width only says whether
-        // this surface wants the large one.
         hooks::artwork::for_track(track, hooks::artwork::size_for(cover_max_width))
     };
 

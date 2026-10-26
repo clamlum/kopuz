@@ -643,9 +643,13 @@ impl MediaSource for YtSource {
         quality: config::StreamQuality,
     ) -> Result<StreamInfo, SourceError> {
         let info = self.client.get_stream(item_id, quality).await?;
+        let format = match info.format {
+            player::AudioFormat::Webm => crate::stream::AudioFormat::Webm,
+            player::AudioFormat::M4a => crate::stream::AudioFormat::M4a,
+        };
         Ok(StreamInfo {
             url: info.url,
-            format: Some((info.format, info.range_safe)),
+            format: Some((format, info.range_safe)),
             user_agent: Some(info.user_agent),
             duration_secs: info.duration_secs,
             bitrate: info.bitrate,

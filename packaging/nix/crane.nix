@@ -12,6 +12,8 @@
   dioxus-cli,
   # Runtime deps
   ffmpeg,
+  libcdio,
+  libcdio-paranoia,
   # Linux Deps
   wrapGAppsHook3,
   webkitgtk_4_1,
@@ -29,7 +31,7 @@
 }:
 let
   pname = "kopuz";
-  version = "0.22.0";
+  version = "0.67.0";
 
   # `deno_core` pulls in the `v8` crate, whose build script fetches a prebuilt
   # librusty_v8 archive — impossible in the network-less Nix sandbox. Fetch it as
@@ -60,6 +62,8 @@ let
   ++ lib.optionals stdenv.hostPlatform.isLinux [ wrapGAppsHook3 ];
 
   buildInputs = [
+    libcdio
+    libcdio-paranoia
     libopus
   ]
   ++ lib.optionals stdenv.hostPlatform.isLinux [
@@ -195,10 +199,22 @@ craneLib.mkCargoDerivation (
         "''${gappsWrapperArgs[@]}" \
         --chdir $out/bin \
         --prefix PATH : ${lib.makeBinPath [ ffmpeg ]} \
-        --prefix LD_LIBRARY_PATH : ${libayatana-appindicator}/lib
+        --prefix LD_LIBRARY_PATH : ${
+          lib.makeLibraryPath [
+            libayatana-appindicator
+            libcdio
+            libcdio-paranoia
+          ]
+        }
       wrapProgram $out/bin/kopuzd \
         --prefix PATH : ${lib.makeBinPath [ ffmpeg ]} \
-        --prefix LD_LIBRARY_PATH : ${libayatana-appindicator}/lib
+        --prefix LD_LIBRARY_PATH : ${
+          lib.makeLibraryPath [
+            libayatana-appindicator
+            libcdio
+            libcdio-paranoia
+          ]
+        }
     '';
 
     meta = {

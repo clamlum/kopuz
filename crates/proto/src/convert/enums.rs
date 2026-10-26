@@ -119,6 +119,7 @@ pub fn job_kind_to_proto(value: api::JobKind) -> JobKind {
         api::JobKind::PlaylistSync => JobKind::PlaylistSync,
         api::JobKind::Download => JobKind::Download,
         api::JobKind::UrlDownload => JobKind::UrlDownload,
+        api::JobKind::AudioRip => JobKind::AudioRip,
         api::JobKind::Unknown => JobKind::Unspecified,
     }
 }
@@ -131,6 +132,7 @@ pub fn job_kind_from_proto(value: i32) -> api::JobKind {
         JobKind::PlaylistSync => api::JobKind::PlaylistSync,
         JobKind::Download => api::JobKind::Download,
         JobKind::UrlDownload => api::JobKind::UrlDownload,
+        JobKind::AudioRip => api::JobKind::AudioRip,
         JobKind::Unspecified => api::JobKind::Unknown,
     }
 }
@@ -279,7 +281,7 @@ pub fn track_sort_to_proto(value: &api::TrackSort) -> TrackSort {
         api::TrackSort::Album => TrackSort::Album,
         api::TrackSort::DateAdded => TrackSort::DateAdded,
         api::TrackSort::PlayCount => TrackSort::PlayCount,
-        // The criteria themselves ride TrackFilter.sort_fields.
+
         api::TrackSort::Fields(_) => TrackSort::Fields,
     }
 }
@@ -342,6 +344,7 @@ mod tests {
             api::JobKind::PlaylistSync,
             api::JobKind::Download,
             api::JobKind::UrlDownload,
+            api::JobKind::AudioRip,
             api::JobKind::Unknown,
         ] {
             assert_eq!(kind, job_kind_from_proto(job_kind_to_proto(kind) as i32));

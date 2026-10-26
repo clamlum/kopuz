@@ -89,8 +89,7 @@ fn apply_state(ctrl: &mut PlayerController, state: PlayerState) -> DaemonClock {
                 message: crate::toast::describe(&error.into()),
             }),
     );
-    // Which device an integration is playing on, so a picker can mark it and
-    // the bottombar can say playback is somewhere else.
+
     set_if_changed(
         &mut ctrl.external_device,
         state
@@ -122,8 +121,7 @@ fn apply_state(ctrl: &mut PlayerController, state: PlayerState) -> DaemonClock {
                 &mut ctrl.current_song_duration,
                 now.duration_ms.map(|ms| ms / 1000).unwrap_or(u64::MAX),
             );
-            // The picture comes with the row rather than being derived from
-            // it, so a cover only the daemon can fetch still resolves.
+
             set_if_changed(&mut ctrl.current_artwork, now.artwork.clone());
             set_if_changed(&mut ctrl.current_track_snapshot, Some(now.clone()));
         }
@@ -227,8 +225,8 @@ pub(crate) fn use_session_projector(ctrl: PlayerController) {
                             _ => {}
                         }
                     }
-                    // The daemon went away: nothing more will arrive, and the
-                    // app reports that elsewhere.
+
+
                     None => break,
                 },
                 _ = tick.tick(), if ticking => {

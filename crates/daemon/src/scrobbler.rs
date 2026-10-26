@@ -1,8 +1,6 @@
-//! Scrobbling, ported from `hooks/src/scrobble_scheduler.rs`: on each track
-//! commit, announce now-playing, wait for the Last.fm threshold (240 s or
-//! half the track) while the same session keeps playing, then submit to the
-//! native source, Last.fm, Libre.fm, and ListenBrainz, with the transient
-//! failure queue and its drain-on-success behavior intact.
+//! Announce now-playing on track commit and scrobble after 240 seconds or half
+//! the track's duration, provided the same session keeps playing. Transient
+//! failures are queued and retried after a successful submission.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -17,6 +15,57 @@ use crate::session::SessionHandle;
 
 const NOW_PLAYING_INTERVAL_SECS: u64 = 30;
 const NOW_PLAYING_MAX_IDLE_SECS: u64 = 600;
+
+/// How long a track has to actually play before it counts as listened: four
+/// minutes or half the track, whichever comes first. Scrobbles and the
+/// library's own play counts both go by this, so the two agree. A track that
+/// reports no duration has to play 30 seconds rather than counting at once.
+pub(crate) fn listen_threshold(duration_secs: u64) -> Duration {
+    if duration_secs == 0 {
+        return Duration::from_secs(30);
+    }
+    Duration::from_secs(duration_secs.div_ceil(2).min(240))
+}
+
+/// Accumulate playing time until `threshold`, or give up once the track is no
+/// longer the one being heard. Paused stretches do not count.
+///
+/// A gapless preload or a crossfade publishes the next track's token while
+/// this one is still playing, so the track also stays live as long as the
+/// queue sits at the position it was heard at with the same track there.
+pub(crate) async fn accumulate_playtime(
+    state: impl Fn() -> api::PlayerState,
+    threshold: Duration,
+    token: u64,
+    uid: &str,
+) -> bool {
+    let tick = Duration::from_secs(1);
+    let mut played = Duration::ZERO;
+    let mut heard_at = None;
+    while played < threshold {
+        tokio::time::sleep(tick).await;
+        let state = state();
+        let current = matches!(
+            state.intent,
+            Intent::Committed { token: current } | Intent::Loading { token: current, .. }
+                if current == token
+        );
+        let same_track = state.track.as_ref().is_some_and(|track| track.uid == uid);
+        // A preload can land before the first check, so the first sighting of the
+        // track itself also marks where it is heard.
+        if current || (heard_at.is_none() && same_track) {
+            heard_at = state.queue.index;
+        }
+        let still_heard = heard_at.is_some() && state.queue.index == heard_at && same_track;
+        if !current && !still_heard {
+            return false;
+        }
+        if state.phase == Phase::Playing {
+            played += tick;
+        }
+    }
+    true
+}
 
 pub struct Scrobbler {
     db: db::Db,
@@ -85,21 +134,13 @@ impl Scrobbler {
         session.state().phase == Phase::Playing
     }
 
-    /// Wall-clock accumulation of playing time, aborted when the session
-    /// moves on, mirroring the hooks `wait_for_playtime`.
-    async fn wait_for_playtime(session: &SessionHandle, threshold: Duration, token: u64) -> bool {
-        let tick = Duration::from_secs(1);
-        let mut played = Duration::ZERO;
-        while played < threshold {
-            tokio::time::sleep(tick).await;
-            if !Self::token_live(session, token) {
-                return false;
-            }
-            if Self::playing(session) {
-                played += tick;
-            }
-        }
-        true
+    async fn wait_for_playtime(
+        session: &SessionHandle,
+        threshold: Duration,
+        token: u64,
+        uid: &str,
+    ) -> bool {
+        accumulate_playtime(|| session.state(), threshold, token, uid).await
     }
 
     /// Called by the session on every committed track.
@@ -109,7 +150,7 @@ impl Scrobbler {
         };
         let credentials = self.credentials.snapshot();
         let uid = track.id.uid();
-        let item_ref = PlaybackItemRef::parse(&uid);
+        let item_ref = PlaybackItemRef::from_id(&track.id);
         if item_ref.is_radio() {
             return;
         }
@@ -156,7 +197,7 @@ impl Scrobbler {
         source: Option<Box<dyn server::source::MediaSource>>,
     ) {
         let duration_secs = track.duration;
-        let threshold_secs = std::cmp::min(240, duration_secs / 2);
+        let threshold = listen_threshold(duration_secs);
         let started_at = scrobble::musicbrainz::now_unix();
 
         if duration_secs < 30 {
@@ -217,9 +258,10 @@ impl Scrobbler {
             }
         }
 
-        if !Self::wait_for_playtime(&session, Duration::from_secs(threshold_secs), token).await {
+        if !Self::wait_for_playtime(&session, threshold, token, &track.id.uid()).await {
             tracing::info!(
-                "scrobble skipped: track changed before {threshold_secs}s: {} - {}",
+                "scrobble skipped: track changed before {}s: {} - {}",
+                threshold.as_secs(),
                 track.artist,
                 track.title
             );
@@ -324,10 +366,10 @@ impl Scrobbler {
             match scrobble::musicbrainz::submit_listens(&token_mb, vec![listen], "single").await {
                 Ok(_) => {
                     scrobble_ok = true;
-                    tracing::info!("MusicBrainz scrobbled: {} - {}", track.artist, track.title);
+                    tracing::info!("ListenBrainz scrobbled: {} - {}", track.artist, track.title);
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "MusicBrainz scrobble failed");
+                    tracing::warn!(%error, "ListenBrainz scrobble failed");
                     if scrobble::queue::is_transient(&error) {
                         scrobble::queue::enqueue(
                             &self.db,

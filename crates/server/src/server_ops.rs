@@ -21,7 +21,9 @@ impl ServerConn {
     /// The active server's connection params, or `None` without a token (anonymous YouTube Music runs on none and ignores a leftover one), or without a `user_id` for a service that signs requests with one.
     pub fn resolve(sources: &crate::sources::Sources) -> Option<Self> {
         let server = sources.server.as_ref()?;
-        let token = if server.service == MusicService::YtMusic && server.yt_anonymous {
+        let token = if server.service == MusicService::AudioCd
+            || (server.service == MusicService::YtMusic && server.yt_anonymous)
+        {
             String::new()
         } else {
             server.access_token.clone()?
@@ -30,6 +32,7 @@ impl ServerConn {
             MusicService::YtMusic
             | MusicService::AppleMusic
             | MusicService::Spotify
+            | MusicService::AudioCd
             | MusicService::Clippsly => server.user_id.clone().unwrap_or_default(),
             _ => server.user_id.clone()?,
         };
@@ -81,6 +84,13 @@ mod tests {
     }
 
     #[test]
+    fn audio_cd_needs_no_credentials() {
+        let connection = ServerConn::resolve(&cfg("AudioCd", None, None)).unwrap();
+        assert_eq!(connection.service, MusicService::AudioCd);
+        assert!(connection.token.is_empty());
+    }
+
+    #[test]
     fn parse_item_id_cases() {
         assert_eq!(parse_item_id("jellyfin:abc"), Some("abc"));
         assert_eq!(parse_item_id("x:abc:def"), Some("abc"));
@@ -99,17 +109,14 @@ mod tests {
 
     #[test]
     fn resolve_requires_user_id_except_ytmusic() {
-        // Jellyfin/Subsonic/Custom need a user_id — missing → None.
         assert!(ServerConn::resolve(&cfg("Jellyfin", Some("t"), None)).is_none());
         assert!(ServerConn::resolve(&cfg("Subsonic", Some("t"), None)).is_none());
         assert!(ServerConn::resolve(&cfg("Custom", Some("t"), None)).is_none());
 
-        // …present → resolves with the id carried through.
         let c = ServerConn::resolve(&cfg("Jellyfin", Some("t"), Some("u"))).unwrap();
         assert_eq!(c.user_id, "u");
         assert_eq!(c.token, "t");
 
-        // YtMusic authenticates by cookie — user_id optional, still resolves.
         let yt = ServerConn::resolve(&cfg("YtMusic", Some("cookie"), None)).unwrap();
         assert_eq!(yt.token, "cookie");
         assert!(yt.user_id.is_empty());

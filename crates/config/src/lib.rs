@@ -368,9 +368,6 @@ where
     let mut out = [0.0_f32; 10];
 
     if values.len() == LEGACY_EQ_BAND_SLOTS.len() {
-        // Migrate a saved 5-band custom preset onto the nearest 10-band slots so
-        // existing boosts keep their original frequencies instead of shifting
-        // down (e.g. a 1 kHz boost must not be reinterpreted as a 125 Hz boost).
         for (&slot, value) in LEGACY_EQ_BAND_SLOTS.iter().zip(values.iter().copied()) {
             out[slot] = value;
         }
@@ -1562,7 +1559,6 @@ mod tests {
 
     #[test]
     fn legacy_five_band_custom_eq_migrates_to_nearest_slots() {
-        // A custom preset saved by the old 5-band UI: boosts at 60/250/1k/4k/12k Hz.
         let json = r#"{
             "enabled": true,
             "preset": "Custom",
@@ -1572,8 +1568,6 @@ mod tests {
 
         let eq: EqualizerSettings = serde_json::from_str(json).unwrap();
 
-        // Each legacy value lands on the nearest 10-band slot (64/250/1k/4k/16k Hz),
-        // not the first five slots (which are now 32/64/125/250/500 Hz).
         assert_eq!(
             eq.bands,
             [0.0, 3.0, 0.0, 0.0, 0.0, 5.0, 0.0, -2.0, 0.0, 4.0]

@@ -228,8 +228,7 @@ fn parse_card_shelf(card: &Value) -> Option<ParsedRow> {
         .get("videoId")
         .and_then(|v| v.as_str())?
         .to_string();
-    // Validate it's a music card (skip non-music results) — the value itself is
-    // no longer needed now that fields are slotted by link.
+
     endpoint
         .pointer("/watchEndpointMusicSupportedConfigs/watchEndpointMusicConfig/musicVideoType")
         .and_then(|v| v.as_str())
@@ -241,9 +240,6 @@ fn parse_card_shelf(card: &Value) -> Option<ParsedRow> {
         .unwrap_or("")
         .to_string();
 
-    // Subtitle is "Kind • Artist • [Album|Views|Year] • [...]". Slot it by link
-    // (artist → UC, album → MPRE) instead of position: the kind label and an
-    // absent album otherwise shift "Views"/"Year" into the album field.
     let subtitle = runs_with_browse(card.pointer("/subtitle/runs"));
     let (album, album_browse_id) = subtitle
         .iter()
@@ -256,7 +252,6 @@ fn parse_card_shelf(card: &Value) -> Option<ParsedRow> {
             Some(id) if id.starts_with("UC") => Some(ArtistCredit::linked(t, id)),
             _ => None,
         })
-        // No channel link: skip the leading kind label, take the next token.
         .or_else(|| subtitle.get(1).map(|(t, _)| ArtistCredit::unlinked(t)))
         .filter(|credit| !credit.name.is_empty());
     let duration = subtitle
@@ -299,10 +294,6 @@ fn parse_row(item: &Value) -> Option<ParsedRow> {
     let thumbnail_url = best_thumbnail(row);
     let title = pick_run(row, 0, 0);
 
-    // Playlist-track rows ship the duration in a separate `fixedColumns`
-    // cell. Search-result rows pack everything into flex[1] separated by
-    // " • " runs. The shapes are visually distinct in the JSON so we
-    // dispatch on presence, not on guesswork.
     if row.get("fixedColumns").is_some() {
         Some(parse_playlist_track(
             row,
@@ -323,7 +314,6 @@ fn parse_playlist_track(
     mvt: MusicVideoType,
     thumbnail_url: Option<String>,
 ) -> ParsedRow {
-    // The row the library sync stores, so it decides whether an artist has an id.
     let mut artists: Vec<ArtistCredit> = pick_runs_with_browse(row, 1)
         .into_iter()
         .filter_map(|(text, browse)| match browse.as_deref() {
@@ -378,14 +368,6 @@ fn parse_search_row(
     title: String,
     thumbnail_url: Option<String>,
 ) -> ParsedRow {
-    // flex[1] packs "artist[s] • [album|view-count] • duration" but the slots
-    // are NOT positionally stable: some rows omit the album, some shelves (the
-    // unfiltered "top" results) append a trailing run, and `mvt.has_album()`
-    // lies for album-typed tracks that carry no album. Positional popping
-    // therefore mis-slotted fields (duration landing in album, duration 0).
-    //
-    // Classify by each run's link instead: an album run links to an `MPRE…`
-    // browse id, an artist run to a `UC…` channel. Duration is the m:ss run.
     let runs = pick_runs_with_browse(row, 1);
     let duration = runs
         .iter()
@@ -405,7 +387,6 @@ fn parse_search_row(
         })
         .collect();
     if artists.is_empty() {
-        // No run links a channel: the artist is the leading segment exactly as written, never split.
         let name = leading_text(row, 1);
         if !name.is_empty() && !looks_like_duration(&name) && album.as_deref() != Some(&name) {
             artists.push(ArtistCredit::unlinked(name));
@@ -675,11 +656,6 @@ fn best_thumbnail(row: &Value) -> Option<String> {
 }
 
 fn normalize_yt_thumbnail(url: &str) -> String {
-    // Only rewrite photo-CDN URLs whose existing size suffix is
-    // `=wNNN-hNNN…`. Other shapes (mixart token URLs, query-string
-    // CDN URLs) get the suffix glued on incorrectly and 404. Match
-    // discover.rs's guarded version: require `=w` immediately
-    // followed by a digit.
     if let Some(idx) = url.rfind("=w")
         && url[idx + 2..]
             .chars()

@@ -24,8 +24,13 @@ pub fn BottombarVaxry(
     is_devices_open: Signal<bool>,
 ) -> Element {
     let mut ctrl = use_context::<PlayerController>();
+    let is_playing = ctrl.is_playing;
+    let current_song_duration = ctrl.current_song_duration;
+    let current_song_progress = ctrl.current_song_progress;
+    let current_song_title = ctrl.current_song_title;
+    let current_song_artist = ctrl.current_song_artist;
+    let volume = ctrl.volume;
     let mut track_menu_open = use_signal(|| false);
-    // A menu left open across a track change would act on the new track.
     let menu_track_key = use_memo(move || {
         ctrl.current_track_snapshot
             .read()
@@ -41,7 +46,6 @@ pub fn BottombarVaxry(
     let is_fav = hooks::use_db_queries::use_track_is_favorite(fav_track);
     let crate::CompactMode(mut compact_mode) = use_context::<crate::CompactMode>();
 
-    // Declared outside the `cfg!` branch below so hook order never depends on the target.
     let mut bar_swipe = crate::gestures::use_swipe();
     let on_bar_swipe = move |evt: TouchEvent| {
         use crate::gestures::SwipeDirection;
@@ -139,8 +143,6 @@ pub fn BottombarVaxry(
         PlayerBarPosition::Top => "border-b border-white/5",
     };
 
-    // The bar sits against one edge of the window, so the menu has to open
-    // away from it.
     let menu_placement = match position {
         PlayerBarPosition::Bottom => "top",
         PlayerBarPosition::Top => "bottom",

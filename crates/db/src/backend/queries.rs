@@ -986,6 +986,39 @@ pub async fn albums_recently_added(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
+pub async fn albums_recently_added_page(
+    pool: &SqlitePool,
+    source: &Source,
+    page: Page,
+) -> Result<(u32, Vec<Album>), DbError> {
+    let mut transaction = pool.begin().await?;
+    let total = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM albums a WHERE a.source = ?1 AND EXISTS \
+         (SELECT 1 FROM tracks t WHERE t.source = a.source AND t.source_album_id = a.source_album_id)",
+    )
+    .bind(source.as_str())
+    .fetch_one(&mut *transaction)
+    .await?;
+    let rows = sqlx::query_as::<_, AlbumRow>(
+        "SELECT al.source_album_id, al.title, al.artist, al.genre, al.year, al.cover_path, al.manual_cover, \
+         ar.key AS artist_key, ar.source_artist_id AS artist_source_id \
+         FROM albums al LEFT JOIN artists ar ON ar.id = al.artist_pk \
+         JOIN tracks t ON t.source = al.source AND t.source_album_id = al.source_album_id \
+         WHERE al.source = ?1 GROUP BY al.rowid_pk \
+         ORDER BY MAX(t.added_at) DESC, MAX(t.rowid_pk) DESC LIMIT ?2 OFFSET ?3",
+    )
+    .bind(source.as_str())
+    .bind(i64::from(page.limit))
+    .bind(i64::from(page.offset))
+    .fetch_all(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok((
+        total.max(0) as u32,
+        rows.into_iter().map(Into::into).collect(),
+    ))
+}
+
 pub async fn favorites(pool: &SqlitePool, server_id: &str) -> Result<Vec<String>, DbError> {
     Ok(sqlx::query_scalar!(
         "SELECT ref FROM favorites WHERE server_id = ?1 AND dirty != 2 \

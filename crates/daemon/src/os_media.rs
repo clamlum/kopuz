@@ -63,12 +63,12 @@ pub fn spawn(session: &SessionHandle) {
         let mut last_volume: Option<f32> = None;
         loop {
             tokio::select! {
-                // Cancel-safe: if the state branch wins, the dropped recv
-                // leaves the event queued for the next turn of the loop.
+
+
                 event = player::systemint::wait_event() => {
-                    // Unreachable while the sender lives in a static; if it
-                    // ever fires, say so, because a silent exit here is what
-                    // made dead media keys look like a healthy interface.
+
+
+
                     let Some(event) = event else {
                         tracing::warn!("media key channel closed; media keys are off for this process");
                         return;

@@ -129,6 +129,7 @@ impl Session {
             self.cancel_load_task();
             self.player.stop_for_transition();
             self.set_intent(PlaybackIntent::Stopped);
+            self.engine_released = true;
             self.phase = ApiPhase::Idle;
             self.buffered.clear();
             self.publish_position_anchor(

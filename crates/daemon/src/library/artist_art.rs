@@ -139,7 +139,7 @@ impl LibraryService {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        // The same lookup names a linked artist, so one wearing a credit's text is looked up though it has a photo.
+
         let unnamed = self
             .db
             .artist_keys_unnamed_by_source(source.source())
@@ -248,7 +248,7 @@ async fn resolve_one(source: &ActiveSource, artist: &reader::ArtistCredit) -> bo
     };
     let found = match source.fetch_artist_image(artist).await {
         Ok(found) => found,
-        // A transient error isn't remembered, since a miss would hide the artist for a whole day over a blip.
+
         Err(error) => {
             tracing::debug!(%error, artist = %artist.name, "artist photo lookup failed");
             return false;

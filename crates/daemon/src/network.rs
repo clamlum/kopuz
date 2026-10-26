@@ -93,6 +93,9 @@ pub fn is_local(source: &config::Source, server_url: Option<&str>) -> bool {
 
 /// Whether the active source is across the internet, so offline mode keeps its listings and playback to the copies here.
 pub fn needs_internet(sources: &server::sources::Sources) -> bool {
+    if sources.active_service() == Some(config::MusicService::AudioCd) {
+        return false;
+    }
     let url = sources.server.as_ref().map(|server| server.url.as_str());
     !is_local(&sources.active, url)
 }

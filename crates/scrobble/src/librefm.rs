@@ -1,75 +1,16 @@
-use md5;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use crate::audioscrobbler::{
+    AuthTokenResponse, NowPlaying, Scrobble, SessionResponse, TrackMetadata, make_api_sig,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const API_URL: &str = "https://libre.fm/2.0/";
 
-/// Libre.fm (GNU FM) does not require per-app registration the way Last.fm does;
-/// it accepts an arbitrary API key/secret. We ship a fixed client identifier so
-/// users only have to authorize in the browser — no manual key entry needed.
+/// Libre.fm accepts a fixed client identifier without per-app registration.
 pub const API_KEY: &str = "kopuz";
 pub const API_SECRET: &str = "kopuz";
 
-#[derive(Serialize)]
-pub struct TrackMetadata<'a> {
-    artist_name: &'a str,
-    track_name: &'a str,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    release_name: Option<&'a str>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    additional_info: Option<HashMap<&'a str, &'a str>>,
-}
-
-#[derive(Serialize)]
-pub struct Scrobble<'a> {
-    timestamp: i64,
-    track_metadata: TrackMetadata<'a>,
-}
-
-#[derive(Serialize)]
-pub struct NowPlaying<'a> {
-    track_metadata: TrackMetadata<'a>,
-}
-
-#[derive(Deserialize)]
-struct AuthTokenResponse {
-    token: String,
-}
-
-#[derive(Deserialize)]
-struct SessionResponse {
-    session: Session,
-}
-
-#[derive(Deserialize)]
-struct Session {
-    key: String,
-}
-
 pub fn auth_url(api_key: &str, token: &str) -> String {
-    format!(
-        "https://libre.fm/api/auth/?api_key={}&token={}",
-        api_key, token
-    )
-}
-
-fn make_api_sig(params: &[(&str, &str)], api_secret: &str) -> String {
-    let mut sorted = params.to_vec();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
-
-    let mut sig = String::new();
-
-    for (key, value) in sorted {
-        sig.push_str(key);
-        sig.push_str(value);
-    }
-
-    sig.push_str(api_secret);
-
-    format!("{:x}", md5::compute(sig))
+    format!("https://libre.fm/api/auth/?api_key={api_key}&token={token}")
 }
 
 pub async fn get_auth_token(api_key: &str) -> Result<String, reqwest::Error> {

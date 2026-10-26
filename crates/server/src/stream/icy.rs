@@ -159,13 +159,12 @@ mod tests {
         stream.extend_from_slice(b"AAAAAAAA");
         stream.extend_from_slice(&meta_block("StreamTitle='Artist - Song';"));
         stream.extend_from_slice(b"BBBBBBBB");
-        stream.push(0); // empty metadata block
+        stream.push(0);
         stream.extend_from_slice(b"CCCCCCCC");
 
         let mut parser = IcyDeinterleaver::new(metaint);
         let mut audio = Vec::new();
 
-        // Feed one byte at a time to exercise every split point.
         let mut titles = Vec::new();
         for b in &stream {
             if let Some(m) = parser.push(std::slice::from_ref(b), &mut audio) {
@@ -193,7 +192,7 @@ mod tests {
         let meta = parser.push(&stream, &mut audio);
 
         assert_eq!(audio, b"1234567890ab");
-        // Whole stream in one chunk: only the last update is notable.
+
         assert_eq!(meta.map(|m| m.title), Some("Two".to_string()));
     }
 
@@ -206,7 +205,7 @@ mod tests {
                 cover_url: None,
             })
         );
-        // Apostrophe inside the title.
+
         assert_eq!(
             parse_stream_meta(b"StreamTitle='It's Raining';\0").map(|m| m.title),
             Some("It's Raining".to_string())
@@ -235,7 +234,6 @@ mod tests {
             Some("https://somafm.com/logos/512/groovesalad512.jpg")
         );
 
-        // Homepage links and plain-http images are rejected.
         let homepage = parse_stream_meta(b"StreamTitle='X';StreamUrl='https://somafm.com/';");
         assert_eq!(homepage.unwrap().cover_url, None);
         let http = parse_stream_meta(b"StreamTitle='X';StreamUrl='http://x.example/a.jpg';");

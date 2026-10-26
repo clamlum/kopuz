@@ -1,28 +1,8 @@
-//! The unified media-source facade (issue #347, Phase 2).
+//! Media backends and source-scoped cache operations.
 //!
-//! [`MediaSource`] is the SINGLE per-source backend: one impl per source kind
-//! (`LocalSource`, the per-remote `JellyfinSource`/`SubsonicSource`/`YtSource`,
-//! and a creds-less `OfflineServerSource`). There is no separate remote-client
-//! trait — a per-remote impl wraps its raw HTTP client directly, so dispatch
-//! happens once in [`resolve`] and adding a service is one new impl.
-//!
-//! The method split is three-way:
-//! * Uniform source-scoped DB ops (favorites, the cache mutators) are default
-//!   methods keyed on [`source`](MediaSource::source) — written once, inherited.
-//! * The ops every source implements but differently (`add_to_playlist`,
-//!   `create_playlist`, `remove_from_playlist`, `resolve_stream`, `validate`,
-//!   `fetch_favorites`, `push_favorite`) are required.
-//! * Optional, capability-gated ops (`reorder_playlist`, and future
-//!   radio/discover/download) default to [`SourceError::Unsupported`]; only a
-//!   source that declares the matching [`Capabilities`] flag overrides them, and
-//!   the UI gates the affordance on that flag so the default is never reached.
-//!
-//! Each impl declares its own [`capabilities`](MediaSource::capabilities) — the
-//! UI reads them off the resolved source instead of branching on `is_server()`
-//! or `match service`. Adding a backend is one impl + its caps literal.
-//!
-//! Reactivity stays out (this crate is Dioxus-free): callers bump generations /
-//! nudge the sync task after a successful op.
+//! [`MediaSource`] implementations handle remote requests and declare supported
+//! operations through [`Capabilities`]. Default cache methods use the backend's
+//! source partition. [`resolve`] constructs the backend for a source.
 
 use async_trait::async_trait;
 
@@ -33,7 +13,7 @@ use crate::server_ops::ServerConn;
 use crate::sources::Sources;
 
 mod apple_music;
-pub mod capabilities;
+mod audio_cd;
 mod clippsly;
 mod jellyfin;
 mod local;
@@ -76,6 +56,11 @@ pub trait MediaSource: Send + Sync {
 
     /// What this source supports — gated on by the UI (no `is_server()` split).
     fn capabilities(&self) -> Capabilities;
+
+    /// Extract physical audio tracks to permanent files.
+    fn rip_audio(&self) -> bool {
+        false
+    }
 
     // --- remote-reaching ops (required) -------------------------------------
 
@@ -168,8 +153,6 @@ pub trait MediaSource: Send + Sync {
     /// Push one favorite to the remote (the reconciler's flush). A no-op for
     /// local (its favorites are already the DB rows).
     async fn push_favorite(&self, item_id: &str, on: bool) -> Result<(), SourceError>;
-
-    // --- capability-gated ops (default = unsupported) -----------------------
 
     /// Persist a playlist reorder: `ordered` is the full new membership, entry ids kept;
     /// `moved`/`new_index` identify the one entry that changed position. Only
@@ -439,8 +422,6 @@ pub trait MediaSource: Send + Sync {
         Err(SourceError::unsupported("artist profile"))
     }
 
-    // --- remote reads (default = nothing; servers override) ----------------
-
     /// Pull the source's entire remote library (albums, tracks, artist images),
     /// transformed into model types. Default empty — only library remotes
     /// (Jellyfin/Subsonic) override; the caller persists + prunes the result.
@@ -528,8 +509,6 @@ pub trait MediaSource: Send + Sync {
         })
     }
 
-    // --- uniform ops (default): a plain source-scoped DB read/write ---------
-
     async fn album_tracks(&self, album_id: &str) -> Result<Vec<reader::Track>, SourceError> {
         let cached = self
             .db()
@@ -587,7 +566,7 @@ pub trait MediaSource: Send + Sync {
         if key.trim().is_empty() {
             return Ok(());
         }
-        // Cache the track so the favorites view can resolve the ref.
+
         if on {
             let _ = self.upsert_tracks(std::slice::from_ref(track)).await;
         }
@@ -990,8 +969,6 @@ fn remote_source(db: Db, source: Source, conn: &ServerConn) -> Box<dyn MediaSour
         MusicService::YtMusic => Box::new(YtSource::new(db, source, conn)),
         MusicService::SoundCloud => Box::new(SoundcloudSource::new(db, source, conn)),
         MusicService::AppleMusic => {
-            // Apple Music is configured, so the Widevine CDM will be wanted.
-            // Start fetching now rather than when a track is already waiting.
             crate::applemusic::widevine::fetch::prefetch();
             Box::new(AppleMusicSource::new(
                 db,
@@ -1007,13 +984,11 @@ fn remote_source(db: Db, source: Source, conn: &ServerConn) -> Box<dyn MediaSour
         MusicService::Nextcloud => Box::new(NextcloudSource::new(db, source, conn)),
         MusicService::Clippsly => Box::new(ClippslySource::new(db, source, conn)),
         MusicService::Smb => Box::new(SmbSource::new(db, source, conn)),
+        MusicService::AudioCd => Box::new(audio_cd::AudioCdSource::new(db, source, &conn.url)),
     }
 }
 
-/// The active [`MediaSource`], shared and reference-counted. Held once in a
-/// `Signal<ActiveSource>` (context) and swapped only on a source-switch or cred
-/// rotation, so call sites read the cached handle instead of rebuilding — and
-/// for a server, re-standing-up an HTTP client — on every operation.
+/// Shared backend handle. Reuse it across operations to retain the HTTP client.
 pub type ActiveSource = std::sync::Arc<dyn MediaSource>;
 
 /// The configured server's [`MediaSource`], or `None` when no usable creds
@@ -1047,4 +1022,9 @@ pub fn resolve(db: Db, sources: &Sources, source: &Source) -> Box<dyn MediaSourc
 /// The [`MediaSource`] for the app's active source.
 pub fn active(db: Db, sources: &Sources) -> Box<dyn MediaSource> {
     resolve(db, sources, &sources.active)
+}
+
+/// Rows for an inserted disc, without another drive read.
+pub fn audio_cd_snapshot(disc: crate::audio_cd::Disc) -> LibrarySnapshot {
+    audio_cd::snapshot(disc)
 }

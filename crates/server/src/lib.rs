@@ -3,6 +3,8 @@
 //! stream sources and lyric providers they are read through.
 
 pub mod applemusic;
+pub mod audio_cd;
+pub mod catalog;
 pub mod clippsly;
 pub mod cookies;
 pub mod cover;

@@ -32,11 +32,6 @@ pub fn ShowcaseNormal(props: ShowcaseProps) -> Element {
 
     let sort_state = use_signal(|| None);
 
-    // The body re-renders on every scroll tick (it reads `scroll_stat`), but
-    // the clone + sort below depends only on the tracks and sort order.
-    // Memoize on `(tracks, sort)` so scrolling doesn't re-clone and re-sort
-    // the whole library. Borrowed deps keep the per-render change-check from
-    // cloning `tracks` itself.
     let sort = *sort_state.read();
     let derived = use_memo(use_reactive(
         (&props.tracks, &sort),

@@ -1,6 +1,4 @@
-//! sqlx `FromRow` → model mappers (issue #347, step 6). The reverse of the
-//! importer's column writes: rebuild the typed `TrackId`/cover from `source` +
-//! `track_key` + `service` + `cover_path`.
+//! Convert SQLite rows into domain models, reconstructing typed ids and cover refs.
 
 use std::path::PathBuf;
 
@@ -224,6 +222,7 @@ pub fn parse_service(s: &str) -> config::MusicService {
         "Nextcloud" => config::MusicService::Nextcloud,
         "Clippsly" => config::MusicService::Clippsly,
         "Smb" => config::MusicService::Smb,
+        "AudioCd" => config::MusicService::AudioCd,
         _ => config::MusicService::Jellyfin,
     }
 }
@@ -238,7 +237,7 @@ mod tests {
 
         for service in [
             Jellyfin, Subsonic, Custom, YtMusic, AppleMusic, SoundCloud, Spotify, Nextcloud,
-            Clippsly, Smb,
+            Clippsly, Smb, AudioCd,
         ] {
             let stored = crate::backend::writes::service_str(service);
             assert_eq!(parse_service(stored), service, "{stored} did not survive");

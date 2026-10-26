@@ -91,7 +91,7 @@ pub fn FolderPickerModal(playlist_id: String, on_close: EventHandler<()>) -> Ele
                         }
                         button {
                             disabled: *is_submitting.read(),
-                            class: "px-3 py-2 bg-indigo-500 hover:bg-indigo-400 text-white rounded-lg text-sm transition-colors",
+                            class: "accent-button px-3 py-2 rounded-lg text-sm transition-colors",
                             onclick: {
                                 let pid4 = pid_btn.clone();
                                 move |_| {

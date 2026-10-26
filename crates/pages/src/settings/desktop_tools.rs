@@ -10,7 +10,7 @@ use crate::theme_editor::ThemeEditorPage;
 pub(super) fn theme_editor_section(settings: Signal<Settings>) -> Element {
     rsx! {
         SettingsSection { title: i18n::t("theme_editor").to_string(),
-            div { class: "py-2",
+            div { class: "px-5 py-4",
                 ThemeEditorPage { settings, embedded: true }
             }
         }

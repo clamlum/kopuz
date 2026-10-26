@@ -426,8 +426,7 @@ impl LibraryService {
             .next()
         {
             Some(track) => track,
-            // A row played straight from a browse listing has no database
-            // entry, and is exactly the one someone wants the words to.
+
             None => self
                 .transient_track(key)
                 .ok_or_else(|| ApiError::not_found("unknown track key"))?,
@@ -451,8 +450,7 @@ impl LibraryService {
                 server.access_token.as_deref(),
                 server.user_id.as_deref(),
             );
-            // Apple Music's own words need the account's token and a bearer
-            // fetched for the session -- both credentials, so both are here.
+
             if server.service == config::MusicService::AppleMusic
                 && !self.offline().offline_mode()
                 && let Some(token) = server.access_token.clone()
@@ -474,9 +472,6 @@ impl LibraryService {
             }
         }
 
-        // Three layers, cheapest first: this process's cache, the library's
-        // stored answer, then the providers -- whose answer is stored so the
-        // next open, in any frontend, skips the network.
         let cache_key = request.cache_key();
         let lyrics = match server::lyrics::cached_lyrics_for_request(&request) {
             Some(cached) => cached,
@@ -609,8 +604,7 @@ impl QueueMaterializer for LibraryService {
                     .into_iter()
                     .map(|track| (track.id.key().to_string(), track))
                     .collect();
-                // A key the database does not hold is either a row from a
-                // live listing this session saw, or a file on disk.
+
                 let missing: Vec<String> = keys
                     .iter()
                     .filter(|key| !by_key.contains_key(*key))
@@ -712,8 +706,6 @@ impl QueueMaterializer for LibraryService {
                 station_id,
                 stream_id,
             } => {
-                // A station that came from the public directory gets its play
-                // reported back to it, which is how that directory ranks.
                 if stream_id == radio::browser::BROWSER_STREAM_ID {
                     radio::browser::count_click(station_id);
                 }

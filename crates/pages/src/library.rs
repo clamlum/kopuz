@@ -8,6 +8,7 @@ use components::header::Header;
 use components::metadata_modal::MetadataModal;
 use components::playlist_modal::PlaylistModal;
 use components::selection_bar::SelectionBar;
+use components::showcase;
 use components::sort_control::SortControl;
 use components::stat_card::StatCard;
 use components::track_row::TrackRow;
@@ -24,7 +25,10 @@ use std::collections::HashSet;
 
 const ITEM_HEIGHT: f64 = 60.0;
 
-fn window_padding(total_tracks: usize, window: &WindowRows) -> (f64, f64) {
+/// Pads around the window that is loaded, not the one being asked for, so rows
+/// stay at their absolute positions while the next page is in flight. Shared
+/// with Activity, whose rows are the same height.
+pub(crate) fn window_padding(total_tracks: usize, window: &WindowRows) -> (f64, f64) {
     let offset = window.offset as usize;
     (
         offset as f64 * ITEM_HEIGHT,
@@ -50,7 +54,33 @@ pub fn LibraryPage(
     let downloads = hooks::downloads::use_downloads();
 
     let mut prefs = hooks::ui_prefs::use_ui_prefs();
-    let library_sort = use_signal(|| prefs.peek().library_sort.clone());
+    let mut library_sort = use_signal(|| prefs.peek().library_sort.clone());
+    // The column headers drive the same sort as the Sort by control: a header
+    // click replaces the criteria with that one column, and the control's
+    // leading criterion is what the header marks.
+    let mut header_sort = use_signal(|| header_state(&library_sort.peek()));
+    use_effect(move || {
+        let shown = header_state(&library_sort.read());
+        if *header_sort.peek() != shown {
+            header_sort.set(shown);
+        }
+    });
+    use_effect(move || {
+        let picked = *header_sort.read();
+        if picked == header_state(&library_sort.peek()) {
+            return;
+        }
+        library_sort.set(match picked {
+            Some((field, direction)) => vec![config::SortCriterion::new(
+                track_sort_field(field),
+                match direction {
+                    showcase::SortDirection::Asc => config::SortDirection::Asc,
+                    showcase::SortDirection::Desc => config::SortDirection::Desc,
+                },
+            )],
+            None => config::UiPrefs::default().library_sort,
+        });
+    });
     let filter = use_memo(move || {
         // The source is the daemon's; naming it here only keeps the memo
         // re-running across a switch.
@@ -384,33 +414,36 @@ pub fn LibraryPage(
 
             div {
                 class: "flex items-center justify-between mb-4",
-                div { class: "flex items-center gap-3",
-                    button {
+                // The heading belongs to the select-all target, not just the 16px box.
+                button {
+                    r#type: "button",
+                    class: "group/all flex items-center gap-3 -ms-2 px-2 py-1.5 rounded-lg hover:bg-white/5 active:bg-white/10 transition-colors disabled:cursor-default",
+                    aria_label: "Select all tracks",
+                    disabled: is_empty,
+                    onclick: move |_| {
+                        if all_selected {
+                            selected_tracks.write().clear();
+                            is_selection_mode.set(false);
+                        } else {
+                            let api = hooks::consume_api();
+                            let f = filter();
+                            spawn(async move {
+                                let tracks = api
+                                    .tracks(f, hooks::use_db_queries::all())
+                                    .await
+                                    .map(|page| page.items)
+                                    .unwrap_or_default();
+                                selected_tracks
+                                    .set(tracks.into_iter().map(|track| track.key).collect());
+                                is_selection_mode.set(true);
+                            });
+                        }
+                        },
+                    span {
                         class: if all_selected {
                             "w-4 h-4 rounded border border-indigo-400 bg-indigo-500 text-white flex items-center justify-center transition-colors"
                         } else {
-                            "w-4 h-4 rounded border border-white/20 bg-white/5 hover:border-white/50 transition-colors"
-                        },
-                        aria_label: "Select all tracks",
-                        disabled: is_empty,
-                        onclick: move |_| {
-                            if all_selected {
-                                selected_tracks.write().clear();
-                                is_selection_mode.set(false);
-                            } else {
-                                let api = hooks::consume_api();
-                                let f = filter();
-                                spawn(async move {
-                                    let tracks = api
-                                        .tracks(f, hooks::use_db_queries::all())
-                                        .await
-                                        .map(|page| page.items)
-                                        .unwrap_or_default();
-                                    selected_tracks
-                                        .set(tracks.into_iter().map(|track| track.key).collect());
-                                    is_selection_mode.set(true);
-                                });
-                            }
+                            "w-4 h-4 rounded border border-white/20 bg-white/5 group-hover/all:border-white/50 transition-colors"
                         },
                         if all_selected {
                             i { class: "fa-solid fa-check", style: "font-size: 9px;" }
@@ -429,7 +462,7 @@ pub fn LibraryPage(
                     ],
                 }
             }
-            Header { is_vaxry: is_vaxry, is_album: false }
+            Header { is_vaxry: is_vaxry, is_album: false, sort_state: Some(header_sort) }
             VirtualScrollView {
                 id: "library-scroll".to_string(),
                 class: if cfg!(target_os = "android") { "flex-1 overflow-y-auto overflow-x-hidden pb-20".to_string() } else { "flex-1 overflow-y-auto pb-20".to_string() },
@@ -461,6 +494,32 @@ pub fn LibraryPage(
             }
         }
     }
+}
+
+fn track_sort_field(field: showcase::SortField) -> TrackSortField {
+    match field {
+        showcase::SortField::Title => TrackSortField::Title,
+        showcase::SortField::Artist => TrackSortField::Artist,
+        showcase::SortField::Album => TrackSortField::Album,
+        showcase::SortField::Duration => TrackSortField::Duration,
+    }
+}
+
+/// The leading criterion as a header column, if it is one the header shows.
+fn header_state(criteria: &[config::SortCriterion<TrackSortField>]) -> showcase::SortState {
+    let first = criteria.first()?;
+    let field = match first.field {
+        TrackSortField::Title => showcase::SortField::Title,
+        TrackSortField::Artist => showcase::SortField::Artist,
+        TrackSortField::Album => showcase::SortField::Album,
+        TrackSortField::Duration => showcase::SortField::Duration,
+        TrackSortField::DateAdded => return None,
+    };
+    let direction = match first.direction {
+        config::SortDirection::Asc => showcase::SortDirection::Asc,
+        config::SortDirection::Desc => showcase::SortDirection::Desc,
+    };
+    Some((field, direction))
 }
 
 #[cfg(test)]

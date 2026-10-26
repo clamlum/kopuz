@@ -45,7 +45,7 @@ pub fn RemoteFolderPicker(settings: RemoteFolderSettings) -> Element {
         let id = source_id.clone();
         let at = path();
         let open = browsing();
-        // Closed means nothing to list, not an empty server.
+
         async move {
             if !open {
                 return Ok(Vec::new());
@@ -119,7 +119,7 @@ pub fn RemoteFolderPicker(settings: RemoteFolderSettings) -> Element {
                                 on_add.call(path());
                                 browsing.set(false);
                             },
-                            class: "app-button-filled text-xs bg-indigo-500/70 hover:bg-indigo-500 px-2 py-1 rounded text-white transition-colors",
+                            class: "app-button-filled accent-button text-xs px-2 py-1 rounded transition-colors",
                             "{i18n::t(\"use_this_folder\")}"
                         }
                         button {

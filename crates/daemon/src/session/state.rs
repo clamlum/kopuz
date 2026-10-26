@@ -14,7 +14,6 @@ impl Session {
         if queue_changed {
             self.queue_rev = self.rev;
             self.refresh_album_context();
-            // Only a queue with something in it replaces one that could not be read; a shuffle toggle on nothing does not.
             if !self.model.items().is_empty() {
                 self.queue_unread = false;
             }
@@ -116,7 +115,9 @@ impl Session {
     }
 
     pub(super) fn should_crossfade(&self) -> bool {
-        self.settings.playback.crossfade_seconds > 0
+        // A drive has one optical head; overlapping tracks cause competing seeks.
+        self.sources.active_service() != Some(config::MusicService::AudioCd)
+            && self.settings.playback.crossfade_seconds > 0
             && self.phase == ApiPhase::Playing
             && self.player.can_resume()
     }
@@ -132,8 +133,6 @@ impl Session {
     }
 
     pub(super) fn build_state(&self) -> PlayerState {
-        // While an integration owns playback the queue still holds whatever
-        // the engine had; the reported track is what is actually audible.
         let shown = match self.external.as_ref() {
             Some(external) => external.track.as_ref(),
             None => self.model.current_track(),

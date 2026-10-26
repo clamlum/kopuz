@@ -1,9 +1,5 @@
-//! Playback integrations ported from the event pump: the Jellyfin session
-//! reporter and the Discord presence projector, plus the source-backed
-//! [`PlaybackRecorder`].
-//!
-//! Both tasks are event-driven off the session's state stream with their
-//! timers gated on activity, so an idle daemon takes no wakeups from them.
+//! Jellyfin session reporting, Discord presence, and source-backed playback records.
+//! Reporters follow session events and run timers only while active.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -312,9 +308,8 @@ impl Drop for DiscordState {
     }
 }
 
-/// Discord presence projection, ported from the pump: now-playing on play,
-/// paused card when enabled, cleared when disabled, with async cover-art
-/// resolution keyed by song so a late result never stamps the wrong track.
+/// Update Discord presence from playback state and preferences. Cover results
+/// are keyed by track so late responses cannot overwrite the current picture.
 pub fn spawn_discord_presence(
     session: &SessionHandle,
     mut config: watch::Receiver<config::Settings>,
@@ -734,7 +729,7 @@ fn librefm(credentials: &Credentials) -> IntegrationInfo {
         icon: Icon::Class("fa-brands fa-lastfm".into()),
         configured: !credentials.librefm_session_key.trim().is_empty(),
         connect: ConnectKind::WebSignIn,
-        // Its api key and secret are compiled in, so there is nothing to fill in.
+
         fields: Vec::new(),
     }
 }
@@ -742,7 +737,7 @@ fn librefm(credentials: &Credentials) -> IntegrationInfo {
 /// What this build publishes, in the order a settings page lists it.
 fn all(config: &config::Settings, credentials: &Credentials, paused: bool) -> Vec<IntegrationInfo> {
     let mut published = Vec::new();
-    // Android has no Discord client to talk to, so the row is not offered there.
+
     if !cfg!(target_os = "android") {
         published.push(discord(config, paused));
     }

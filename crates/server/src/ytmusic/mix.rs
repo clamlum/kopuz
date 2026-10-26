@@ -41,10 +41,6 @@ impl<'a> MixSeed<'a> {
     fn mix_playlist_id(&self) -> String {
         match self {
             Self::Video(id) => format!("RDAMVM{id}"),
-            // Playlist ids are stored bare, but the `VL`-prefixed browse form
-            // leaks in from some InnerTube responses (see `playlists.rs`) and
-            // `RDAMPL` wants the bare one. Normalizing here rather than at
-            // construction means no caller can skip it.
             Self::Playlist(id) => format!("RDAMPL{}", id.strip_prefix("VL").unwrap_or(id)),
             Self::Issued(id) => id.to_string(),
         }
@@ -141,10 +137,6 @@ async fn post_next(body: &Value, cookies: &str) -> Result<Value, String> {
     let mut req = super::innertube::http_client()
         .clone()
         .post(format!("{ORIGIN}/youtubei/v1/next?prettyPrint=false"))
-        // The same header set every other InnerTube call sends. This one was
-        // missing the User-Agent and the API format version, which is what
-        // YouTube started answering with a bare 403 -- browse and player, which
-        // send them, kept working from the same session and cookies.
         .header("User-Agent", client.user_agent)
         .header("Content-Type", "application/json")
         .header("X-Goog-Api-Format-Version", "1")
@@ -238,8 +230,6 @@ fn walk_panel(panel: &Value) -> MixPage {
                 .collect()
         })
         .unwrap_or_default();
-    // `nextRadioContinuationData` for a mix, `nextContinuationData` for a
-    // long playlist queue; the key is the only difference.
     let continuation = panel
         .get("continuations")
         .and_then(|v| v.as_array())
@@ -463,9 +453,6 @@ fn parse_queue_row(row: &Value) -> Option<Track> {
 }
 
 fn normalize_yt_thumbnail(url: &str) -> String {
-    // See discover.rs for the rationale: only rewrite when the URL
-    // already carries a `=wNNN` size suffix; otherwise the suffix
-    // glues onto mixart / query-style URLs and 404s.
     if let Some(idx) = url.rfind("=w")
         && url[idx + 2..]
             .chars()

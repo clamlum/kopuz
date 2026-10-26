@@ -379,9 +379,9 @@ fn SidebarLink(
         "justify-start px-3"
     };
     let indicator_base = if is_rtl {
-        "absolute right-0 w-0.5 rounded-l-full transition-all duration-300"
+        "absolute right-0 w-0.5 rounded-l-full transition-all"
     } else {
-        "absolute left-0 w-0.5 rounded-r-full transition-all duration-300"
+        "absolute left-0 w-0.5 rounded-r-full transition-all"
     };
 
     let active_class = if active {
@@ -400,7 +400,7 @@ fn SidebarLink(
         div { class: "flex items-center group",
             button {
                 r#type: "button",
-                class: "app-sidebar-link flex flex-1 items-center {alignment_class} relative p-3 rounded-lg transition-all duration-200 cursor-pointer {active_class}",
+                class: "app-sidebar-link flex flex-1 items-center {alignment_class} relative p-3 rounded-lg transition-colors cursor-pointer {active_class}",
                 aria_label: i18n::t(item.key),
                 aria_current: if active { "page" } else { "false" },
                 title: if is_collapsed { i18n::t(item.key) } else { String::new() },
@@ -428,31 +428,12 @@ fn SidebarLink(
             }
 
             if !is_collapsed && (can_move_up || can_move_down) {
-                div { class: "flex flex-col opacity-0 group-hover:opacity-100 transition-opacity pr-1",
-                    button {
-                        class: if can_move_up {
-                            "text-slate-500 hover:text-white hover:bg-white/10 rounded-full transition-colors active:scale-95 leading-none px-1"
-                        } else {
-                            "text-slate-700 cursor-default leading-none px-1"
-                        },
-                        onclick: move |evt| {
-                            evt.stop_propagation();
-                            if can_move_up { on_move_up.call(()); }
-                        },
-                        i { class: "fa-solid fa-chevron-up text-[9px]" }
-                    }
-                    button {
-                        class: if can_move_down {
-                            "text-slate-500 hover:text-white hover:bg-white/10 rounded-full transition-colors active:scale-95 leading-none px-1"
-                        } else {
-                            "text-slate-700 cursor-default leading-none px-1"
-                        },
-                        onclick: move |evt| {
-                            evt.stop_propagation();
-                            if can_move_down { on_move_down.call(()); }
-                        },
-                        i { class: "fa-solid fa-chevron-down text-[9px]" }
-                    }
+                crate::reorder_buttons::ReorderButtons {
+                    class: "ps-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity",
+                    can_move_up,
+                    can_move_down,
+                    on_move_up: move |_| on_move_up.call(()),
+                    on_move_down: move |_| on_move_down.call(()),
                 }
             }
         }

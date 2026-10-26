@@ -100,8 +100,7 @@ Run clippy (debug + release), fmt, and the tests covering your change before eac
   artwork, sources).
 - `crates/pages`, `crates/components`, `crates/kopuz_route` — UI + routing.
 - `crates/player` audio · `crates/radio` · `crates/scrobble` · `crates/discord-presence`
-  · `crates/i18n` · `crates/utils` (`CoverUrl`, image-URL builders; its cover
-  cache is behind the `db-cache` feature, so a frontend never links SQLite).
+  · `crates/i18n` · `crates/utils` (`CoverUrl`, image-URL builders; frontend utilities do not link SQLite).
 - `android-src/` — Kotlin media-session classes patched in by `build.rs`.
 - `packaging/` (flatpak / AUR / nix) · `scripts/` (codegen + vendor helpers).
 

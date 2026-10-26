@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use api::schema::{ChoiceOption, FieldKind, FieldSpec, FieldValue, Text, toggle_of, value_of};
 use api::{ApiError, DownloadCandidate, DownloadHistoryEntry, DownloadState, JobKind, JobRef};
+use server::stream::AudioFormat as StreamFormat;
 use server::youtube_download::{self, Link, YoutubeDownloader};
 use server::ytmusic::YtStreamInfo;
-use server::ytmusic::player::AudioFormat as StreamFormat;
 
 use crate::config_service::ConfigService;
 use crate::jobs::{JobCtx, JobRunner};
@@ -191,7 +191,7 @@ fn search_dirs() -> &'static [PathBuf] {
     })
 }
 
-fn find_binary(name: &str) -> Option<String> {
+pub(crate) fn find_binary(name: &str) -> Option<String> {
     let exe = if cfg!(target_os = "windows") {
         format!("{name}.exe")
     } else {
@@ -645,9 +645,13 @@ impl UrlDownloadService {
     ) -> Result<PathBuf, String> {
         let video_id = track.id.key();
         let stream = request.downloader.stream(&video_id).await?;
+        let source_format = match stream.format {
+            server::ytmusic::player::AudioFormat::Webm => StreamFormat::Webm,
+            server::ytmusic::player::AudioFormat::M4a => StreamFormat::M4a,
+        };
         let target = request
             .format
-            .target(stream.format, request.ffmpeg.is_some());
+            .target(source_format, request.ffmpeg.is_some());
 
         let folder = match request.options.organize_by_album && !track.album.trim().is_empty() {
             true => request.output_dir.join(sanitize_component(&track.album)),

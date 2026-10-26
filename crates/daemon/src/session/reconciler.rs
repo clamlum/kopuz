@@ -83,7 +83,6 @@ impl Session {
                 }) {
                     let (next_token, idx) = (pending.to_token, pending.to_position);
                     // A slow preload can finish as an ordinary load without restarting its I/O.
-                    self.record_listen_of_current();
                     self.commit_transition_model(next_token);
                     self.set_intent(PlaybackIntent::Loading {
                         token: next_token,
@@ -107,7 +106,6 @@ impl Session {
                     let _ = self.revert_transition();
                 }
                 self.phase = ApiPhase::Ended;
-                self.record_listen_of_current();
                 let _ = self.play_next(false, state_tx);
                 self.publish(state_tx, false);
             }
@@ -124,7 +122,7 @@ impl Session {
                 let committed = self.commit_transition(token);
                 debug_assert!(committed);
                 if gapless && let Some(track) = self.model.current_track().cloned() {
-                    self.scrobble_committed(track, token);
+                    self.track_committed(track, token);
                 }
                 self.phase = ApiPhase::Playing;
                 self.maybe_record_recent();

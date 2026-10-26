@@ -9,6 +9,12 @@
 @source "./crates/utils/**/*.rs";
 @source "./crates/config/**/*.rs";
 @source "./crates/kopuz_route/**/*.rs";
+
+/* Hover and press feedback should feel immediate; 150ms reads as lag. */
+@theme {
+  --default-transition-duration: 100ms;
+}
+
 /* Invisible range inputs overlaid on custom seek/volume tracks. The native
    thumb (~17px) makes the browser inset its click-to-value mapping by half a
    thumb on each side, so clicks land offset from the cursor. A zero-width

@@ -1,23 +1,23 @@
 use dioxus::prelude::*;
 
+/// Up/down arrows that split the row's full height between them, so each
+/// half of the strip is a target rather than just the chevron.
 #[component]
 pub fn ReorderButtons(
     can_move_up: bool,
     can_move_down: bool,
     on_move_up: EventHandler<MouseEvent>,
     on_move_down: EventHandler<MouseEvent>,
-    #[props(default = "flex flex-col pr-2 shrink-0".to_string())] class: String,
+    #[props(default = "pr-2".to_string())] class: String,
     #[props(default = "text-[9px]".to_string())] icon_class: String,
 ) -> Element {
+    let enabled = "w-7 flex-1 min-h-0 flex items-center justify-center rounded-md text-slate-500 hover:bg-white/10 hover:text-white active:bg-white/15 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500";
+    let disabled = "w-7 flex-1 min-h-0 flex items-center justify-center rounded-md text-slate-700 cursor-default";
     rsx! {
-        div { class: "{class}",
+        div { class: "flex flex-col self-stretch shrink-0 {class}",
             button {
                 disabled: !can_move_up,
-                class: if can_move_up {
-                    "p-0.5 text-slate-500 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2"
-                } else {
-                    "p-0.5 text-slate-700 cursor-default"
-                },
+                class: if can_move_up { enabled } else { disabled },
                 onclick: move |evt| {
                     evt.stop_propagation();
                     if can_move_up {
@@ -29,11 +29,7 @@ pub fn ReorderButtons(
             }
             button {
                 disabled: !can_move_down,
-                class: if can_move_down {
-                    "p-0.5 text-slate-500 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2"
-                } else {
-                    "p-0.5 text-slate-700 cursor-default"
-                },
+                class: if can_move_down { enabled } else { disabled },
                 onclick: move |evt| {
                     evt.stop_propagation();
                     if can_move_down {

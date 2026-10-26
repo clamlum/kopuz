@@ -1,8 +1,4 @@
-//! The `MediaSource` facade (issue #347, Phase 2) over a real temp DB. Exercises
-//! the local impl end-to-end through the public trait — `create_playlist` /
-//! `add_to_playlist` / `set_favorite` route to the DB and read back — so the
-//! facade's wiring is covered without a GUI. The remote impl needs a live
-//! server and is verified against real accounts instead.
+//! Local media-source operations tested through the public trait against SQLite.
 
 use std::path::PathBuf;
 
@@ -37,8 +33,6 @@ fn track(id: TrackId) -> Track {
 }
 
 fn unique_db() -> PathBuf {
-    // pid + counter, not just clock: macOS's µs clock let parallel tests
-    // collide on a nanos-only name and delete each other's live DB.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -61,7 +55,6 @@ async fn local_create_then_add_playlist_round_trips() {
         .await
         .unwrap();
 
-    // The created playlist is readable with its seed track.
     let store = db.load_playlists(&Source::default()).await.unwrap();
     let pl = store
         .playlists
@@ -71,7 +64,6 @@ async fn local_create_then_add_playlist_round_trips() {
     assert_eq!(pl.name, "Road Trip");
     assert_eq!(pl.tracks, vec!["/music/a.flac".to_string()]);
 
-    // Appending dedups and preserves order.
     let landed = src
         .add_to_playlist(&id, &["/music/b.flac".into(), "/music/a.flac".into()])
         .await
@@ -113,8 +105,6 @@ async fn record_favorite_writes_a_clean_local_row_and_reverts() {
     let src = source::local(db.clone(), Source::default());
     let t = track(TrackId::Local("/music/x.flac".into()));
 
-    // record_favorite writes the local state as a CLEAN row (no dirty/pending) —
-    // the optimistic half of a toggle.
     src.record_favorite(&t, true).await.unwrap();
     assert!(
         db.favorites("local")
@@ -124,10 +114,52 @@ async fn record_favorite_writes_a_clean_local_row_and_reverts() {
     );
     assert!(db.dirty_favorites("local").await.unwrap().is_empty());
 
-    // Calling it with the opposite `on` reverts cleanly (the revert-on-push-fail
-    // path) — no favorite, no lingering row.
     src.record_favorite(&t, false).await.unwrap();
     assert!(!src.is_favorite("/music/x.flac").await);
     assert!(db.dirty_favorites("local").await.unwrap().is_empty());
     assert!(db.dirty_unlikes("local").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn audio_cd_source_and_track_identity_round_trip_without_credentials() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = db::init(&directory.path().join("test.db")).await.unwrap();
+    let mut server = config::MusicServer::new_with_service(
+        "CD drive".into(),
+        "/dev/sr0".into(),
+        config::MusicService::AudioCd,
+    );
+    server.id = Some("cd-drive".into());
+    let config = server::sources::Sources {
+        active: Source::Server("cd-drive".into()),
+        server: Some(server),
+        ..Default::default()
+    };
+    let source = source::active(db.clone(), &config);
+    assert_eq!(source.rip_audio(), server::audio_cd::supported());
+    assert!(!source.capabilities().sync);
+    assert!(!source.capabilities().downloads);
+    assert!(!source.capabilities().delete_from_disk);
+    let expected = track(TrackId::Server {
+        service: config::MusicService::AudioCd,
+        item_id: format!("{}-01", "a".repeat(64)),
+    });
+    source
+        .upsert_tracks(std::slice::from_ref(&expected))
+        .await
+        .unwrap();
+    let tracks = db
+        .tracks_by_keys(&config.active, &[expected.id.key().into_owned()])
+        .await
+        .unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].id, expected.id);
+    assert_eq!(
+        reader::TrackId::from_legacy_path(&tracks[0].id.uid()),
+        expected.id
+    );
+    assert!(matches!(
+        server::playback_ref::PlaybackItemRef::parse(&tracks[0].id.uid()),
+        server::playback_ref::PlaybackItemRef::Server { item_id } if item_id == expected.id.key()
+    ));
 }

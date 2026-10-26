@@ -11,6 +11,7 @@
     --color-indigo-400: #e8a866;
     --color-indigo-500: #d9842f;
     --color-indigo-600: #b86a22;
+    --color-on-accent: #000000;
     --color-indigo-900: #3a2410;
     --color-purple-600: #cf7a3a;
     --color-purple-700: #a85f28;
@@ -43,6 +44,7 @@
     --color-indigo-400: #e8a866;
     --color-indigo-500: #d9842f;
     --color-indigo-600: #b86a22;
+    --color-on-accent: #000000;
     --color-indigo-900: #1c1206;
     --color-purple-600: #cf7a3a;
     --color-purple-700: #a85f28;
@@ -66,6 +68,7 @@
     --color-indigo-400: #83a598;
     --color-indigo-500: #458588;
     --color-indigo-600: #fabd2f;
+    --color-on-accent: #000000;
     --color-indigo-900: #1d2021;
     --color-purple-600: #d3869b;
     --color-purple-700: #b16286;
@@ -83,6 +86,7 @@
     --color-indigo-400: #8ec07c;
     --color-indigo-500: #83a598;
     --color-indigo-600: #458588;
+    --color-on-accent: #000000;
     --color-indigo-900: #3c3836;
     --color-purple-600: #d3869b;
     --color-purple-700: #b16286;
@@ -100,6 +104,7 @@
     --color-indigo-400: #89b482;
     --color-indigo-500: #7daea3;
     --color-indigo-600: #d3869b;
+    --color-on-accent: #000000;
     --color-indigo-900: #1b1b1b;
     --color-purple-600: #d3869b;
     --color-purple-700: #b16286;
@@ -117,6 +122,7 @@
     --color-indigo-400: #caa7fc;
     --color-indigo-500: #bd93f9;
     --color-indigo-600: #bd93f9;
+    --color-on-accent: #000000;
     --color-indigo-900: #191a21;
     --color-purple-600: #ff79c6;
     --color-purple-700: #ff79c6;
@@ -134,6 +140,7 @@
     --color-indigo-400: #8fbcbb;
     --color-indigo-500: #88c0d0;
     --color-indigo-600: #5e81ac;
+    --color-on-accent: #000000;
     --color-indigo-900: #242933;
     --color-purple-600: #b48ead;
     --color-purple-700: #a3799d;
@@ -151,6 +158,7 @@
     --color-indigo-400: #89dceb;
     --color-indigo-500: #89b4fa;
     --color-indigo-600: #7287fd;
+    --color-on-accent: #000000;
     --color-indigo-900: #11111b;
     --color-purple-600: #cba6f7;
     --color-purple-700: #b4befe;
@@ -168,6 +176,7 @@
     --color-indigo-400: #6fafff;
     --color-indigo-500: #379cf6;
     --color-indigo-600: #6a88ff;
+    --color-on-accent: #000000;
     --color-indigo-900: #000810;
     --color-purple-600: #af8aff;
     --color-purple-700: #d570af;
@@ -185,6 +194,7 @@
     --color-indigo-400: #59c2ff;
     --color-indigo-500: #39bae6;
     --color-indigo-600: #59c2ff;
+    --color-on-accent: #000000;
     --color-indigo-900: #050810;
     --color-purple-600: #d2a6ff;
     --color-purple-700: #c7a1eb;
@@ -202,6 +212,7 @@
     --color-indigo-400: #73d0ff;
     --color-indigo-500: #5ccfe6;
     --color-indigo-600: #73d0ff;
+    --color-on-accent: #000000;
     --color-indigo-900: #171b24;
     --color-purple-600: #d4bfff;
     --color-purple-700: #c7a1eb;
@@ -219,6 +230,7 @@
     --color-indigo-400: #7e98e8;
     --color-indigo-500: #6e94b2;
     --color-indigo-600: #90a0b5;
+    --color-on-accent: #000000;
     --color-indigo-900: #0e0e0f;
     --color-purple-600: #bb9dbd;
     --color-purple-700: #aeaed1;
@@ -236,6 +248,7 @@
     --color-indigo-400: #61afef;
     --color-indigo-500: #61afef;
     --color-indigo-600: #528bcc;
+    --color-on-accent: #000000;
     --color-indigo-900: #1e2127;
     --color-purple-600: #c678dd;
     --color-purple-700: #b15fcf;
@@ -253,6 +266,7 @@
     --color-indigo-400: #9abfe8;
     --color-indigo-500: #b0a8eb;
     --color-indigo-600: #9abfe8;
+    --color-on-accent: #000000;
     --color-indigo-900: #0e0d16;
     --color-purple-600: #d9a1e8;
     --color-purple-700: #b0a8eb;
@@ -270,6 +284,7 @@
     --color-indigo-400: #8ba4b0;
     --color-indigo-500: #949fb5;
     --color-indigo-600: #8992a7;
+    --color-on-accent: #000000;
     --color-indigo-900: #0d0c0c;
     --color-purple-600: #a292a3;
     --color-purple-700: #8992a7;
@@ -287,6 +302,7 @@
     --color-indigo-400: #7fbbb3;
     --color-indigo-500: #7fbbb3;
     --color-indigo-600: #83c092;
+    --color-on-accent: #000000;
     --color-indigo-900: #1e2326;
     --color-purple-600: #d699b6;
     --color-purple-700: #c48da6;
@@ -304,6 +320,7 @@
     --color-indigo-400: #c4a7e7;
     --color-indigo-500: #31748f;
     --color-indigo-600: #c4a7e7;
+    --color-on-accent: #000000;
     --color-indigo-900: #110f1c;
     --color-purple-600: #c4a7e7;
     --color-purple-700: #31748f;
@@ -340,6 +357,7 @@
     --color-indigo-400: var(--color14);
     --color-indigo-500: var(--color6);
     --color-indigo-600: var(--color4);
+    --color-on-accent: #ffffff;
     --color-indigo-900: var(--color0);
     --color-purple-400: var(--color12);
     --color-purple-500: var(--color13);
@@ -507,8 +525,8 @@ select {
     padding: 0.45rem 2.25rem 0.45rem 0.75rem !important;
     border-radius: 0.5rem !important;
     cursor: pointer;
-    transition: border-color 140ms ease, background-color 140ms ease,
-        box-shadow 140ms ease;
+    transition: border-color 100ms ease, background-color 100ms ease,
+        box-shadow 100ms ease;
 }
 
 select:hover {
@@ -535,11 +553,46 @@ select:disabled {
     width: min(14rem, calc(100vw - 2rem));
 }
 
+/* A filled accent button. The label is the theme's `--color-on-accent`, picked
+   per theme for contrast against the fill; hover tints the fill with the label
+   instead of swapping to another accent shade, so the pair never drifts apart. */
+.accent-button {
+    background-color: var(--color-indigo-600, #b86a22);
+    color: var(--color-on-accent, #000000);
+    transition: background-color 100ms ease, box-shadow 100ms ease;
+}
+
+.accent-button:hover {
+    box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--color-on-accent, #000000) 12%, transparent);
+}
+
+.accent-button:active {
+    box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--color-on-accent, #000000) 20%, transparent);
+}
+
+.accent-button:disabled {
+    cursor: default;
+    opacity: 0.5;
+    box-shadow: none;
+}
+
 .settings-category-content {
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
     scroll-margin-top: 1rem;
     contain: layout;
     animation: settings-category-enter 220ms ease-out;
+}
+
+/* Changing a settings tab must not move the sticky navigation while the new
+   section settles. Keep the bar as the scroll anchor and reveal the section
+   below it without an animated layout shift. */
+.settings-layout-topbar .settings-category-content {
+    animation: none;
+    overflow-anchor: none;
+    scroll-margin-top: 3.5rem;
 }
 
 @keyframes settings-category-enter {
@@ -561,7 +614,7 @@ select:disabled {
 
 .settings-section-header {
     background: color-mix(in srgb, var(--color-black, #000000) 58%, transparent);
-    transition: background-color 140ms ease;
+    transition: background-color 100ms ease;
 }
 
 .settings-section-header:hover {
@@ -574,7 +627,7 @@ select:disabled {
 
 .settings-row {
     min-height: 3.25rem;
-    transition: background-color 120ms ease;
+    transition: background-color 100ms ease;
 }
 
 .settings-row:hover {
@@ -589,6 +642,21 @@ select:disabled {
     font-weight: 700;
     letter-spacing: 0.1em;
     text-transform: uppercase;
+}
+
+/* The title stays put while the page scrolls under it, the same as the
+   navigation beside or below it; 3.5rem tall so the top bar can stack under. */
+@media (min-width: 901px) and (min-height: 541px) {
+    .settings-page > h1 {
+        position: sticky;
+        z-index: 31;
+        top: 0;
+        display: flex;
+        height: 3.5rem;
+        align-items: center;
+        margin-bottom: 0;
+        background: color-mix(in srgb, var(--color-black, #000000) 92%, transparent);
+    }
 }
 
 @media (min-width: 901px) and (min-height: 541px) {
@@ -612,7 +680,7 @@ select:disabled {
     }
 
     .settings-page.settings-layout-cd > h1 {
-        margin-left: 1.5rem;
+        padding-inline: 1.5rem;
     }
 
     .settings-layout-cd .settings-fan {
@@ -711,7 +779,7 @@ select:disabled {
         transform: rotate(var(--fan-angle)) translateZ(0);
         transform-origin: center;
         backface-visibility: hidden;
-        transition: opacity 140ms ease, background 140ms ease;
+        transition: opacity 100ms ease, background 100ms ease;
     }
 
     .settings-layout-cd .settings-fan-item:hover {
@@ -765,7 +833,7 @@ select:disabled {
         text-rendering: optimizeSpeed;
         transform: translate(-50%, -50%) rotate(var(--label-tilt)) translateZ(0);
         backface-visibility: hidden;
-        transition: opacity 140ms ease, font-size 140ms ease;
+        transition: opacity 100ms ease, font-size 100ms ease;
     }
 
     .settings-layout-cd .settings-fan-label i {
@@ -812,7 +880,7 @@ select:disabled {
 
 .settings-section-header {
     background: color-mix(in srgb, var(--color-black, #000000) 58%, transparent);
-    transition: background-color 140ms ease;
+    transition: background-color 100ms ease;
 }
 
 .settings-section-header:hover {
@@ -825,7 +893,7 @@ select:disabled {
 
 .settings-row {
     min-height: 3.25rem;
-    transition: background-color 120ms ease;
+    transition: background-color 100ms ease;
 }
 
 .settings-row:hover {
@@ -851,7 +919,7 @@ select:disabled {
     .settings-layout-topbar .settings-fan {
         position: sticky;
         z-index: 30;
-        top: 0;
+        top: 3.5rem;
         display: flex;
         width: 100%;
         height: auto;
@@ -863,6 +931,8 @@ select:disabled {
         border-bottom: 1px solid color-mix(in srgb, var(--color-white, #ffffff) 9%, transparent);
         background: color-mix(in srgb, var(--color-black, #000000) 92%, transparent);
         scrollbar-width: none;
+        overflow-anchor: none;
+        scroll-behavior: smooth;
     }
 
     .settings-layout-topbar .settings-fan::-webkit-scrollbar {
@@ -1114,7 +1184,7 @@ select:disabled {
     border-top: 1px solid color-mix(in srgb, var(--color-white, #ffffff) 7%, transparent);
     color: var(--color-white, #ffffff);
     text-align: start;
-    transition: background-color 120ms ease;
+    transition: background-color 100ms ease;
 }
 
 .settings-index-row:active {
@@ -1171,7 +1241,6 @@ select:disabled {
     transform: scaleX(-1);
 }
 
-/* A contained or transformed ancestor would pin the fixed option sheet to it. */
 [data-platform="android"] .settings-category-content {
     contain: none;
     animation: none;
@@ -1184,11 +1253,6 @@ select:disabled {
     [dir="rtl"] .settings-page.settings-layout-cd {
         padding-right: 0 !important;
         padding-left: 1.5rem !important;
-    }
-
-    [dir="rtl"] .settings-page.settings-layout-cd > h1 {
-        margin-right: 1.5rem;
-        margin-left: 0;
     }
 
     [dir="rtl"] .settings-layout-cd .settings-fan-disc::before {
@@ -1253,8 +1317,8 @@ select:disabled {
     font-size: 0.875rem;
     text-align: left;
     cursor: pointer;
-    transition: border-color 140ms ease, background-color 140ms ease,
-        box-shadow 140ms ease;
+    transition: border-color 100ms ease, background-color 100ms ease,
+        box-shadow 100ms ease;
 }
 
 .app-select-trigger:hover,
@@ -1273,7 +1337,7 @@ select:disabled {
     height: 1rem;
     flex: none;
     color: var(--color-slate-400, #94a3b8);
-    transition: transform 140ms ease;
+    transition: transform 100ms ease;
 }
 
 .app-select-menu {
@@ -1362,7 +1426,6 @@ select:disabled {
     padding: 0.5rem 0.75rem;
 }
 
-/* Keep a drag on the sheet's backdrop from scrolling the page behind. */
 #main-scroll-area:has(.app-select-sheet) .overflow-y-auto {
     overflow: hidden;
 }
@@ -1409,6 +1472,7 @@ select:disabled {
     --color-indigo-400: #6366f1;
     --color-indigo-500: #4f46e5;
     --color-indigo-600: #4338ca;
+    --color-on-accent: #ffffff;
     --color-indigo-900: #e8eaf0;
     --color-purple-600: #7c3aed;
     --color-purple-700: #6d28d9;
@@ -1426,6 +1490,7 @@ select:disabled {
     --color-indigo-400: #209fb5;
     --color-indigo-500: #1e66f5;
     --color-indigo-600: #1e66f5;
+    --color-on-accent: #ffffff;
     --color-indigo-900: #dce0e8;
     --color-purple-600: #8839ef;
     --color-purple-700: #7c2ee0;
@@ -1443,6 +1508,7 @@ select:disabled {
     --color-indigo-400: #286983;
     --color-indigo-500: #286983;
     --color-indigo-600: #9076c4;
+    --color-on-accent: #000000;
     --color-indigo-900: #f2e9e1;
     --color-purple-600: #9076c4;
     --color-purple-700: #7c5ead;
@@ -1460,6 +1526,7 @@ select:disabled {
     --color-indigo-400: #35a77c;
     --color-indigo-500: #3a94c5;
     --color-indigo-600: #3a94c5;
+    --color-on-accent: #000000;
     --color-indigo-900: #f4f0d9;
     --color-purple-600: #df69ba;
     --color-purple-700: #c55ba4;
@@ -1477,6 +1544,7 @@ select:disabled {
     --color-indigo-400: #55b4d4;
     --color-indigo-500: #399ee6;
     --color-indigo-600: #399ee6;
+    --color-on-accent: #000000;
     --color-indigo-900: #f0f0f0;
     --color-purple-600: #a37acc;
     --color-purple-700: #9063b8;
@@ -1494,6 +1562,7 @@ select:disabled {
     --color-indigo-400: #0184bc;
     --color-indigo-500: #4078f2;
     --color-indigo-600: #4078f2;
+    --color-on-accent: #000000;
     --color-indigo-900: #ecedf0;
     --color-purple-600: #a626a4;
     --color-purple-700: #9118a1;
@@ -1511,6 +1580,7 @@ select:disabled {
     --color-indigo-400: #076678;
     --color-indigo-500: #458588;
     --color-indigo-600: #458588;
+    --color-on-accent: #000000;
     --color-indigo-900: #ebdbb2;
     --color-purple-600: #8f3f71;
     --color-purple-700: #b16286;

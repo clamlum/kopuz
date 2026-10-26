@@ -91,11 +91,10 @@ pub fn ShowcaseVaxry(props: ShowcaseProps) -> Element {
         }
     }
 
-    // A phone has no room for the title beside the cover, so it stacks under it.
     let phone = cfg!(target_os = "android");
     let cover_size = if phone { "w-32 h-32" } else { "w-44 h-44" };
     let cover_cursor = if props.on_cover_click.is_some() {
-        "cursor-pointer"
+        "cursor-pointer transition-[filter] hover:brightness-110 active:brightness-95"
     } else {
         ""
     };
@@ -301,7 +300,7 @@ pub fn ShowcaseVaxry(props: ShowcaseProps) -> Element {
                                         if has_multiple_discs && props.is_album && is_new_disc && sort_state.peek().is_none() {
                                             div { class: "flex-1 min-w-0",
                                                 div {
-                                                    class: "grid items-center p-2 rounded-lg hover:bg-white/5 group transition-colors relative select-none",
+                                                    class: "grid items-center p-2 rounded-lg hover:bg-white/10 hover:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] group transition-all relative select-none",
                                                     style: format!("grid-template-columns: {columns};"),
                                                     i { class: "fa-solid fa-compact-disc" }
                                                     p { {i18n::t_with("disc_heading", &[("number", track.disc_number.unwrap_or(1).into())])} }

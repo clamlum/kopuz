@@ -39,6 +39,9 @@ impl ProviderClient {
 
     pub async fn login(&self, username: &str, password: &str) -> Result<AuthSession, SourceError> {
         match self.service {
+            MusicService::AudioCd => {
+                Err(crate::source::SourceError::unsupported("audio CD sign-in"))
+            }
             MusicService::Jellyfin => {
                 let mut client = JellyfinClient::new(&self.server_url, None, &self.device_id, None);
                 let (access_token, user_id) = client.login(username, password).await?;
@@ -64,8 +67,6 @@ impl ProviderClient {
                 })
             }
             MusicService::Nextcloud => {
-                // The password is expected to be an app password (Settings,
-                // Security), which is revocable and survives 2FA.
                 let client =
                     crate::nextcloud::NextcloudClient::new(&self.server_url, username, password)
                         .map_err(SourceError::InvalidInput)?;

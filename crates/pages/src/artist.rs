@@ -36,11 +36,9 @@ pub fn Artist(
 ) -> Element {
     let source = use_active_source();
     let nav_ctrl = use_context::<components::NavigationController>();
-    // Capabilities, read off the resolved source — the single seam the page gates
-    // its divergent affordances on (no `is_server()` / `match service`).
+
     let caps = hooks::sources::use_capabilities();
-    // Diagnostic (debug): what source/caps this page is actually rendering, logged
-    // whenever they change — confirms the page follows the sidebar source toggle.
+
     use_effect(move || {
         tracing::debug!(target: "kopuz::source", source = %source().as_str(), caps = ?caps(), "artist page source");
     });
@@ -137,9 +135,6 @@ pub fn Artist(
     // resolved by the cover seam.
     let artists = use_memo(move || artists_res.read().clone().unwrap_or_default());
 
-    // Restore the grid's scroll position once, after the artist list first
-    // renders. Guarded so the incremental photo loads (which re-run the memo)
-    // don't keep yanking the view back to the saved offset.
     let mut scroll_restored = use_signal(|| false);
     use_effect(move || {
         if *scroll_restored.read() || artist.peek().is_some() {
@@ -186,14 +181,12 @@ pub fn Artist(
             .unwrap_or_default()
     });
 
-    // Every album here shares the artist, so that field would never break a tie.
     let album_sort_fields = use_memo(move || {
         let mut fields = hooks::sort::available_album_fields(&artist_albums.read());
         fields.retain(|f| *f != AlbumSortField::Artist);
         fields
     });
 
-    // A key the daemon refuses, or a read that failed, is said rather than drawn as an empty artist.
     let load_error = use_memo(move || {
         let detail = artist_res.read().clone().flatten().and_then(Result::err);
         let tracks = artist_tracks_res.read().clone().and_then(Result::err);
@@ -208,7 +201,7 @@ pub fn Artist(
     });
 
     let detail_open = open_artist.read().is_some();
-    // Blank until the daemon names the artist; the key carries no display name.
+
     let name = artist_res
         .read()
         .clone()
@@ -234,8 +227,6 @@ pub fn Artist(
         };
     }
 
-    // The refs (item ids / file paths) of the currently-selected tracks — derived
-    // from the in-hand `Track`s via the typed id, so it's source-uniform.
     let refs_for = move |paths: &HashSet<String>| -> Vec<String> {
         artist_tracks()
             .iter()
@@ -269,8 +260,7 @@ pub fn Artist(
                         class: "flex-1 min-h-0 overflow-y-auto pb-20",
                         onscroll: move |e| crate::scroll_persist::save("artists", e.scroll_top()),
                         div {
-                            // Same trick as the album grids: cards are static, only this
-                            // class flips, `.view-list` CSS restyles the `.vcard*` hooks.
+
                             class: if *artists_view_mode.read() == AlbumViewMode::List { "view-list" } else { "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-8" },
                             for artist in artists() {
                                 {
@@ -427,9 +417,9 @@ pub fn Artist(
                                             let id_for_menu = album.id.clone();
                                             let id_for_navigate = album.id.clone();
                                             let is_open = open_album_menu.read().as_deref() == Some(&album.id);
-                                            // Same size in both modes so toggling never refetches covers.
+
                                             let cover_url = hooks::artwork::for_album(&album, hooks::artwork::Size::Thumb);
-                                            // Whether every track of this album is downloaded (servers only).
+
                                             let downloaded = cap.downloads && {
                                                 let all = artist_tracks_res.read().clone().and_then(Result::ok).unwrap_or_default();
                                                 let aid = album.id.clone();
@@ -534,9 +524,7 @@ pub fn Artist(
                                 description: String::new(),
                                 cover_url: artist_cover(),
                                 tracks: artist_tracks(),
-                                // The picture is stored by the daemon, so the
-                                // bytes go across rather than a path only this
-                                // process could read.
+
                                 on_cover_click: move |_| {
                                     #[cfg(not(target_os = "android"))]
                                     {

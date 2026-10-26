@@ -83,6 +83,10 @@ pub fn use_tracks_window(filter: Memo<TrackFilter>, page: Memo<Page>) -> TracksW
         move || {
             let _ = gens.generation(Table::Tracks);
             let (api, f, p) = (api.clone(), filter(), page());
+            // A play reorders a most-played list, and plays announce Recents, not Tracks.
+            if f.sort == api::TrackSort::PlayCount {
+                let _ = gens.generation(Table::Recents);
+            }
             let span = tracing::info_span!(
                 "query.tracks_page",
                 filter = ?f,

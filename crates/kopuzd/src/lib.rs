@@ -50,20 +50,7 @@ impl ServeArgs {
     }
 }
 
-#[cfg(windows)]
-pub fn default_socket_path() -> Option<PathBuf> {
-    proto::pipe::default_name().ok().map(PathBuf::from)
-}
-
-#[cfg(not(windows))]
-pub fn default_socket_path() -> Option<PathBuf> {
-    let base = directories::BaseDirs::new()?;
-    let dir = base
-        .runtime_dir()
-        .map(|runtime| runtime.join("kopuz"))
-        .unwrap_or_else(|| base.cache_dir().join("kopuz"));
-    Some(dir.join("kopuzd.sock"))
-}
+pub use proto::default_socket_path;
 
 fn state(core: &Core) -> Arc<GrpcState> {
     Arc::new(GrpcState {
@@ -238,9 +225,7 @@ pub fn block_on_run(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "macos"))]
     {
         let result = runtime.block_on(run(args));
-        // Dropping the runtime waits for every blocking task, and the audio
-        // engine owns threads that never finish, so a daemon that has decided
-        // to exit would hang in teardown instead of exiting.
+
         runtime.shutdown_background();
         result
     }

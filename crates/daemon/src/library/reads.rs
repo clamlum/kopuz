@@ -159,14 +159,18 @@ impl LibraryService {
         }
         // The store applies the recency order and the cut, so it has to see the
         // whole window the caller is paging within, not just the page length.
-        let depth = page.offset.saturating_add(page.limit);
         let source = self.query_source();
-        let rows = self
+        let (total, items) = self
             .db
-            .albums_recently_added(&source, depth)
+            .albums_recently_added_page(
+                &source,
+                db::Page {
+                    offset: page.offset,
+                    limit: page.limit,
+                },
+            )
             .await
             .map_err(db_error)?;
-        let (total, items) = window(&rows, page);
         Ok(AlbumPage {
             albums: items.iter().map(album_info).collect(),
             total,
@@ -329,8 +333,7 @@ impl LibraryService {
     pub async fn recent_tracks(&self, page: Page) -> Result<TrackPage, ApiError> {
         let offline = self.offline();
         let source = self.query_source();
-        // Recents are a key list; the rows come back unordered, so they are
-        // put back into play order here.
+
         let keys = self
             .db
             .recently_played(&source, page.offset.saturating_add(page.limit))
@@ -373,9 +376,7 @@ impl LibraryService {
             .await
             .map_err(|error| ApiError::internal(format!("search failed: {error}")))?;
         crate::wire::listed_by(source.source(), &mut tracks);
-        // A remote hit may name a track the library has never stored, so
-        // remember it: the caller gets a key, and queueing or hearting that
-        // key has to resolve to something.
+
         self.register_transient(&tracks);
         Ok(SearchResults {
             tracks: tracks

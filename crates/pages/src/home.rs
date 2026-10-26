@@ -50,7 +50,7 @@ pub fn Home(
                             "{i18n::t(\"reset_home\")}"
                         }
                         button {
-                            class: "app-button-filled px-4 h-8 rounded-full bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-bold transition-colors",
+                            class: "app-button-filled accent-button px-4 h-8 rounded-full text-xs font-bold transition-colors",
                             onclick: move |_| edit_mode.set(false),
                             i { class: "fa-solid fa-check mr-1 text-[10px]" }
                             "{i18n::t(\"done_editing\")}"
