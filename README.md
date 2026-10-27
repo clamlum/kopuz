@@ -1,6 +1,6 @@
 <!--markdownlint-disable MD013 MD033 MD041 -->
 <div align="center">
-  <img src="crates/kopuz/assets/banner.png" alt="Kopuz Logo" height="300"/>
+  <img src="apps/legacy/kopuz/assets/banner.png" alt="Kopuz Logo" height="300"/>
   <h1>Kopuz</h1>
   <p>
     Kopuz is a modern, lightweight, music player application built with Rust
@@ -571,7 +571,7 @@ Regenerate it whenever UI classes change:
 ```bash
 npm ci
 npx @tailwindcss/cli -i ./tailwind.css \
-  -o ./crates/kopuz/assets/tailwind.css
+  -o ./apps/legacy/kopuz/assets/tailwind.css
 ```
 
 Dioxus also generates desktop installers and mobile projects:

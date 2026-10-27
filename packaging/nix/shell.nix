@@ -17,14 +17,32 @@
   libayatana-appindicator,
   mesa,
   gst_all_1,
+  wayland,
+  vulkan-loader,
+  vulkan-headers,
+  libxcb,
+  libxkbcommon,
+  libx11,
+  fontconfig,
+  freetype,
 }:
 let
   kopuzPkg = self.packages.${stdenv.hostPlatform.system}.kopuz;
-
+  # What the GPUI frontend links and dlopens.
+  gpuiLibs = [
+    wayland
+    vulkan-loader
+    libxcb
+    libxkbcommon
+    libx11
+    fontconfig
+    freetype
+  ];
 in
 mkShell {
   name = "kopuz-dev";
   inputsFrom = [ kopuzPkg ];
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux (gpuiLibs ++ [ vulkan-headers ]);
 
   nativeBuildInputs = [
     # Dev
@@ -57,7 +75,7 @@ mkShell {
         libcdio
         libcdio-paranoia
       ]
-    }:${lib.makeLibraryPath kopuzPkg.buildInputs}:${libayatana-appindicator}/lib:$LD_LIBRARY_PATH";
+    }:${lib.makeLibraryPath (kopuzPkg.buildInputs ++ gpuiLibs)}:${libayatana-appindicator}/lib:$LD_LIBRARY_PATH";
     WEBKIT_DISABLE_COMPOSITING_MODE = "1";
     RUSTFLAGS = "-C link-arg=-fuse-ld=lld";
   };
