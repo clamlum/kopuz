@@ -98,6 +98,22 @@ pub fn blurred_backdrop(source: ImageSource, radius: u8) -> ImageSource {
     })
 }
 
+/// The blurred backdrop as it stands this frame: `None` while it is still being read or blurred, `Some(None)` if it failed.
+pub fn resolve_backdrop(
+    source: ImageSource,
+    radius: u8,
+    window: &mut gpui_kit::Window,
+    cx: &mut App,
+) -> Option<Option<Arc<RenderImage>>> {
+    let image = match blurred_backdrop(source, radius) {
+        ImageSource::Resource(resource) => window.use_asset::<ImgResourceLoader>(&resource, cx),
+        ImageSource::Custom(load) => load(window, cx),
+        ImageSource::Render(image) => Some(Ok(image)),
+        ImageSource::Image(image) => image.use_render_image(window, cx).map(Ok),
+    }?;
+    Some(image.ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

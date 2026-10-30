@@ -6471,6 +6471,7 @@ dependencies = [
  "topbar",
  "tracing",
  "tracing-subscriber",
+ "winres",
 ]
 
 [[package]]
@@ -6648,8 +6649,10 @@ name = "kopuz-kopuzd"
 version = "0.68.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "directories",
  "futures-util",
+ "hex",
  "kopuz-api",
  "kopuz-client",
  "kopuz-config",
@@ -6662,6 +6665,10 @@ dependencies = [
  "kopuz-reader",
  "kopuz-utils",
  "libc",
+ "reqwest 0.13.4",
+ "semver 1.0.28",
+ "serde",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -6762,6 +6769,7 @@ dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
  "cpal",
+ "futures-util",
  "jni 0.21.1",
  "kopuz-config",
  "kopuz-utils",
@@ -6908,6 +6916,7 @@ dependencies = [
  "icu_locale_core",
  "image",
  "jni 0.21.1",
+ "kopuz-config",
  "ndk-context",
  "objc2-foundation 0.3.2",
  "percent-encoding",
@@ -7186,13 +7195,17 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "directories",
  "futures",
  "gpui-kit",
  "kopuz-api",
  "kopuz-client",
+ "kopuz-config",
+ "kopuz-utils",
+ "libc",
+ "semver 1.0.28",
  "tokio",
  "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -9859,9 +9872,13 @@ dependencies = [
 name = "profile"
 version = "0.1.0"
 dependencies = [
+ "directories",
+ "kopuz-config",
+ "kopuz-utils",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tracing",
+ "tracing-appender",
  "tracing-chrome",
  "tracing-subscriber",
 ]

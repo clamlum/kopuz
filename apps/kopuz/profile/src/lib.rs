@@ -12,42 +12,132 @@ mod heap;
 pub use counters::{Counters, Snapshot, artwork, elements, images, notifies, rebuilds};
 pub use heap::Heap;
 
-/// Kept alive for the process; dropping it is what flushes the trace file.
+/// Kept alive for the process; dropping it is what flushes the trace and the log file.
 pub struct Session {
     _chrome: Option<tracing_chrome::FlushGuard>,
+    _log: Option<tracing_appender::non_blocking::WorkerGuard>,
+    // Held for the process: whoever holds it owns `app-latest.log`.
+    _log_lock: Option<std::fs::File>,
 }
 
-/// Installs the log subscriber, and a Chrome trace layer when `KOPUZ_TRACE` names a file.
+/// The log file this process writes, which its crash report quotes.
+static LOG_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Installs the log subscriber, writing to stderr and `app-latest.log`, and a Chrome trace layer when `KOPUZ_TRACE` names a file.
 ///
 /// `KOPUZ_TRACE=trace.json kopuz` then opens in <https://ui.perfetto.dev>.
 pub fn init() -> Session {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let trace = std::env::var("KOPUZ_TRACE").ok();
-    match trace {
+    let (file, log_guard, log_lock) = match log_file() {
+        Some((writer, guard, lock)) => (
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(writer),
+            ),
+            Some(guard),
+            lock,
+        ),
+        None => (None, None, None),
+    };
+    let (chrome, chrome_guard) = match std::env::var("KOPUZ_TRACE").ok() {
         Some(path) => {
             let (chrome, guard) = tracing_chrome::ChromeLayerBuilder::new()
                 .file(&path)
                 .include_args(true)
                 .build();
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer())
-                .with(chrome)
-                .init();
-            tracing::info!(path, "writing a chrome trace; open it in ui.perfetto.dev");
-            Session {
-                _chrome: Some(guard),
-            }
+            (Some((chrome, path)), Some(guard))
         }
-        None => {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer())
-                .init();
-            Session { _chrome: None }
-        }
+        None => (None, None),
+    };
+    let (chrome, trace_path) = chrome.unzip();
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(file)
+        .with(chrome)
+        .init();
+    if let Some(path) = trace_path {
+        tracing::info!(path, "writing a chrome trace; open it in ui.perfetto.dev");
     }
+    install_crash_report();
+    Session {
+        _chrome: chrome_guard,
+        _log: log_guard,
+        _log_lock: log_lock,
+    }
+}
+
+/// `<cache>/kopuz/logs/app-latest.log`, the last session's archived first so a crashing run survives the restart.
+fn log_file() -> Option<(
+    tracing_appender::non_blocking::NonBlocking,
+    tracing_appender::non_blocking::WorkerGuard,
+    Option<std::fs::File>,
+)> {
+    let dir = directories::BaseDirs::new()?
+        .cache_dir()
+        .join(config::flavor::Flavor::current().name())
+        .join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    utils::logs::set_log_dir(dir.clone());
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join("app-latest.lock"))
+        .ok()
+        .filter(|lock| lock.try_lock().is_ok());
+    // A second window's process logs beside the first rather than archiving its log mid-write.
+    let name = match lock {
+        Some(_) => {
+            utils::logs::rotate_session_log_named(
+                &dir,
+                utils::logs::APP_LATEST,
+                utils::logs::APP_SESSION_PREFIX,
+            );
+            utils::logs::APP_LATEST.to_string()
+        }
+        None => format!(
+            "{}pid{}.log",
+            utils::logs::APP_SESSION_PREFIX,
+            std::process::id()
+        ),
+    };
+    let writer = tracing_appender::non_blocking(tracing_appender::rolling::never(&dir, &name));
+    let _ = LOG_NAME.set(name);
+    Some((writer.0, writer.1, lock))
+}
+
+/// A panic leaves a `crash-<time>.txt` beside the log, then unwinds as it would have.
+fn install_crash_report() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| text.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        let location = info
+            .location()
+            .map(|at| format!("{}:{}:{}", at.file(), at.line(), at.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        tracing::error!(panic = %message, %location, "panic");
+        if let Some(dir) = utils::logs::log_dir() {
+            utils::logs::write_crash_report_named(
+                &dir,
+                LOG_NAME
+                    .get()
+                    .map_or(utils::logs::APP_LATEST, String::as_str),
+                &message,
+                &location,
+                &backtrace,
+            );
+        }
+        default(info);
+    }));
 }
 
 /// How often the heartbeat reports, since a profiler nobody reads is worth nothing.

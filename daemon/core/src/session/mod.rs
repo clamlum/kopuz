@@ -1393,7 +1393,12 @@ impl Session {
                         }
                     });
                     let idx = candidate.jump_to(start.min(len - 1));
-                    self.start_immediate_load(candidate, idx)?;
+                    if self.radio_keeps_playing(&request.context, &candidate, idx) {
+                        self.model = candidate;
+                        self.prefetch_next();
+                    } else {
+                        self.start_immediate_load(candidate, idx)?;
+                    }
                     self.set_radio_feed(more);
                     self.origin = origin.clone();
                 } else {
@@ -1424,6 +1429,25 @@ impl Session {
             self.origin = origin;
         }
         Ok(self.publish(state_tx, true))
+    }
+
+    /// A radio seeded from the song already playing grows around it instead of starting it over.
+    fn radio_keeps_playing(
+        &self,
+        context: &QueueContext,
+        candidate: &QueueModel,
+        idx: usize,
+    ) -> bool {
+        matches!(
+            context,
+            QueueContext::TrackRadio { .. } | QueueContext::PlaylistRadio { .. }
+        ) && self.pending_transition.is_none()
+            && matches!(self.intent, PlaybackIntent::Committed { .. })
+            && self
+                .model
+                .current_track()
+                .zip(candidate.track_at(idx))
+                .is_some_and(|(playing, first)| playing.id.uid() == first.id.uid())
     }
 
     fn play_next(
@@ -1882,13 +1906,18 @@ impl Session {
             return;
         };
         external.device = report.device;
-        let changed = report.track.as_ref().map(|track| track.id.uid())
+        // The tab reports only what its SDK knows (no album id, sometimes no art); when it is the track kopuz queued, show the library's row.
+        let reported = report.track.map(|track| match self.model.current_track() {
+            Some(queued) if queued.id.uid() == track.id.uid() => queued.clone(),
+            _ => track,
+        });
+        let changed = reported.as_ref().map(|track| track.id.uid())
             != external.track.as_ref().map(|track| track.id.uid());
         let mut committed = None;
         if changed {
             external.completed_key = None;
             external.artwork = None;
-            external.track = report.track;
+            external.track = reported;
             self.last_recent_key = None;
             match self.external.as_ref().and_then(|it| it.track.clone()) {
                 Some(track) => {

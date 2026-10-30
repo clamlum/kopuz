@@ -28,6 +28,9 @@ const SESSION_PREFIX: &str = "kopuz-";
 /// file would make either side's history unreadable.
 pub const DAEMON_LATEST: &str = "daemon-latest.log";
 pub const DAEMON_SESSION_PREFIX: &str = "kopuzd-";
+/// The GPUI app's pair, apart from Kopuz Legacy's `latest.log` in the same directory.
+pub const APP_LATEST: &str = "app-latest.log";
+pub const APP_SESSION_PREFIX: &str = "app-";
 const SESSION_SUFFIX: &str = ".log";
 const CRASH_PREFIX: &str = "crash-";
 /// How many archived session logs to keep before pruning the oldest.
@@ -136,6 +139,17 @@ pub fn write_crash_report(
     location: &str,
     backtrace: &str,
 ) -> Option<PathBuf> {
+    write_crash_report_named(dir, LATEST, message, location, backtrace)
+}
+
+/// As [`write_crash_report`], quoting the tail of `latest` rather than Kopuz Legacy's log.
+pub fn write_crash_report_named(
+    dir: &Path,
+    latest: &str,
+    message: &str,
+    location: &str,
+    backtrace: &str,
+) -> Option<PathBuf> {
     let ts = timestamp();
     let path = dir.join(format!("{CRASH_PREFIX}{ts}.txt"));
     let mut f = std::fs::File::create(&path).ok()?;
@@ -151,8 +165,8 @@ pub fn write_crash_report(
     let _ = writeln!(f, "\npanic: {message}");
     let _ = writeln!(f, "location: {location}");
     let _ = writeln!(f, "\n--- backtrace ---\n{backtrace}");
-    if let Some(tail) = read_tail(&dir.join(LATEST)) {
-        let _ = writeln!(f, "\n--- recent log ({LATEST} tail) ---\n{tail}");
+    if let Some(tail) = read_tail(&dir.join(latest)) {
+        let _ = writeln!(f, "\n--- recent log ({latest} tail) ---\n{tail}");
     }
     Some(path)
 }

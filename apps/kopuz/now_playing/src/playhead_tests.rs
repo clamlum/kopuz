@@ -12,8 +12,12 @@ pub(crate) fn boot(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         i18n::init("en");
-        link::init(link::Address::Socket("/nonexistent/kopuz.sock".into()), cx)
-            .expect("a link that has not connected yet");
+        link::init(
+            link::Address::Socket("/nonexistent/kopuz.sock".into()),
+            false,
+            cx,
+        )
+        .expect("a link that has not connected yet");
         store::init(cx);
         theme::apply_named("default", None, cx);
     });

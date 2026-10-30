@@ -18,6 +18,7 @@ use crate::NowPlaying;
 const WIDTH: Pixels = px(380.);
 const HEIGHT: Pixels = px(148.);
 // How far the overlay sits from the corner it is anchored to.
+#[cfg(target_os = "linux")]
 const MARGIN: Pixels = px(24.);
 
 /// The handle to the second window, while there is one.
@@ -64,9 +65,9 @@ fn options(kind: WindowKind, bounds: Bounds<Pixels>) -> WindowOptions {
         window_background: WindowBackgroundAppearance::Opaque,
         window_decorations: Some(WindowDecorations::Client),
         window_min_size: Some(dimensions()),
-        app_id: Some("kopuz".into()),
+        app_id: Some(config::flavor::Flavor::current().name().into()),
         titlebar: Some(TitlebarOptions {
-            title: Some("Kopuz".into()),
+            title: Some(config::flavor::Flavor::current().display_name().into()),
             ..Default::default()
         }),
         is_resizable: false,
@@ -136,10 +137,13 @@ pub fn open_mini(cx: &mut App) {
 /// Put the full player back, whichever way the mini one was showing.
 pub fn close_mini(cx: &mut App) {
     if let Some(handle) = cx.try_global::<MiniHandle>().and_then(|handle| handle.0) {
-        handle
-            .update(cx, |_, window, _| window.remove_window())
-            .ok();
         cx.set_global(MiniHandle(None));
+        // The restore button runs inside the mini window's own update, where GPUI cannot reach that window.
+        cx.defer(move |cx| {
+            if let Err(error) = handle.update(cx, |_, window, _| window.remove_window()) {
+                tracing::warn!(%error, "could not close the mini player window");
+            }
+        });
     }
     Chrome::global(cx).update(cx, |chrome, cx| chrome.set_mini(false, cx));
 }

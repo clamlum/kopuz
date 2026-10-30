@@ -10,6 +10,7 @@ mod network;
 mod settings;
 mod startup;
 mod toasts;
+mod update;
 mod url_download;
 
 use components::format::t;
@@ -30,6 +31,7 @@ pub use network::NetworkBanner;
 pub use settings::register as register_settings;
 pub use startup::StartupError;
 pub use toasts::Toasts;
+pub use update::UpdateBanner;
 pub use url_download::register as register_url_download;
 
 /// Lucide names this crate needs that `components::icons` does not carry.
@@ -44,15 +46,6 @@ const POPOVER_WIDTH: Pixels = px(320.);
 /// A list inside a popover scrolls rather than growing past the window.
 pub(crate) const LIST_HEIGHT: Pixels = px(260.);
 const BADGE: Pixels = px(14.);
-
-/// Start `kopuzd` on the socket this app attaches to; the supervisor picks it up on its next probe.
-pub(crate) fn spawn_daemon(cx: &App) -> std::io::Result<()> {
-    let socket = match link::Link::global(cx).address() {
-        link::Address::Socket(path) => Some(path.clone()),
-        link::Address::Tcp(_) => None,
-    };
-    link::spawn_daemon(socket)
-}
 
 /// Which popover of the three is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

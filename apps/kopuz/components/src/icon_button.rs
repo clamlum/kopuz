@@ -56,6 +56,14 @@ impl IconTone {
             (false, false) => rest,
         };
         match self {
+            // A given accent fills it instead; the background reads on it as well as it reads on the background.
+            IconTone::Accent if accent.is_some() => (
+                accent
+                    .map(|accent| if hot { accent.opacity(0.85) } else { accent })
+                    .unwrap_or(cx.theme().primary),
+                cx.theme().background,
+                None,
+            ),
             IconTone::Accent => (
                 match hot {
                     true => cx.theme().primary_hover,
@@ -248,6 +256,7 @@ impl RenderOnce for FollowButton {
             .glyph(px(20.))
             .tone(IconTone::Scrim)
             .shadow(true)
+            .stop_propagation(true)
             .tooltip(crate::format::t("jump_to_current_song"));
         button.click = self.click;
         div().absolute().bottom_4().right_4().child(button)
@@ -369,8 +378,12 @@ mod tests {
         cx.update(|cx| {
             gpui_kit::init(cx);
             i18n::init("en");
-            link::init(link::Address::Socket("/nonexistent/kopuz.sock".into()), cx)
-                .expect("a link that has not connected yet");
+            link::init(
+                link::Address::Socket("/nonexistent/kopuz.sock".into()),
+                false,
+                cx,
+            )
+            .expect("a link that has not connected yet");
             store::init(cx);
             theme::apply_named("default", None, cx);
         });

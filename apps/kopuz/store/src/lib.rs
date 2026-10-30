@@ -31,12 +31,13 @@ mod setup;
 mod signin;
 mod sources;
 mod target;
+mod updates;
 
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
 pub use artwork::{Arrival, ArtworkBytes, ArtworkKey, Residents, artwork_source};
 pub use artwork_edit::{content_type_for, pick_and_upload, pick_image, remove_artwork};
-pub use backdrop::blurred_backdrop;
+pub use backdrop::{blurred_backdrop, resolve_backdrop};
 pub use catalog_cache::{Cached, CatalogCache};
 pub use chrome::{Chrome, SidePanel, register_mini_player, toggle_mini_player};
 pub use config::{ConfigModel, lock_cause};
@@ -69,6 +70,7 @@ pub use signin::{
 };
 pub use sources::{NetworkNotice, SourceStatus, SourcesModel, SwitchStarted};
 pub use target::{Kind, RowEdit, RowScope, Target, TrackActions};
+pub use updates::UpdateModel;
 
 /// `cx.notify()`, counted: a shared model's notify dirties every ancestor, so the profiler wants it.
 pub(crate) fn notify<T: 'static>(cx: &mut gpui_kit::Context<T>) {
@@ -149,4 +151,5 @@ pub fn init(cx: &mut App) {
     register(cx, Chrome::new);
     register(cx, SettingsFilter::new);
     register(cx, SetupModel::new);
+    register(cx, UpdateModel::new);
 }

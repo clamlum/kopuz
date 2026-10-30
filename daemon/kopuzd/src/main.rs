@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use config::flavor::Flavor;
 use kopuzd::ServeArgs;
 use kopuzd::identity::{AppIdentity, validate_app_id};
 
@@ -13,6 +14,8 @@ usage: kopuzd [options]
   --socket <path>        socket (named pipe on Windows) to serve on
   --listen <ip>:<port>   also serve on a TCP port
   --db-path <file>       library database to open
+  --exit-with-app        exit once no app has been connected for 15 seconds
+                         and nothing is playing; how an app starts its own
   --offline              start in offline mode: only downloads and cached
                          songs list and play, until a frontend leaves it
   --app-id <id>          the app this daemon plays for: the AppUserModelID
@@ -72,6 +75,7 @@ fn parse_args(
                 );
             }
             "--offline" => args.offline = true,
+            "--exit-with-app" => args.exit_with_app = true,
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -85,9 +89,18 @@ fn parse_args(
         None if app_name.is_some() || app_icon.is_some() => {
             return Err("--app-name and --app-icon need an app id".to_string());
         }
-        None => None,
+        None => flavor_identity(Flavor::current()),
     };
     Ok(args)
+}
+
+/// Kopuz Nightly names itself; the stable daemon keeps the identity it has always had.
+fn flavor_identity(flavor: Flavor) -> Option<AppIdentity> {
+    (flavor == Flavor::Nightly).then(|| AppIdentity {
+        id: flavor.app_id().to_string(),
+        name: Some(flavor.display_name().to_string()),
+        icon: None,
+    })
 }
 
 fn main() -> ExitCode {
@@ -121,9 +134,18 @@ mod tests {
     }
 
     #[test]
-    fn no_app_id_sets_none() {
-        assert_eq!(parse(&[], None).unwrap().identity, None);
-        assert_eq!(parse(&[], Some("")).unwrap().identity, None);
+    fn no_app_id_falls_back_to_the_flavour_identity() {
+        let own = flavor_identity(Flavor::current());
+        assert_eq!(parse(&[], None).unwrap().identity, own);
+        assert_eq!(parse(&[], Some("")).unwrap().identity, own);
+    }
+
+    #[test]
+    fn only_kopuz_nightly_names_itself_by_default() {
+        assert_eq!(flavor_identity(Flavor::Stable), None);
+        let nightly = flavor_identity(Flavor::Nightly).unwrap();
+        assert_eq!(nightly.id, "moe.kopuz.kopuz.nightly");
+        assert_eq!(nightly.name.as_deref(), Some("Kopuz Nightly"));
     }
 
     #[test]
@@ -172,6 +194,17 @@ mod tests {
         assert!(!parse(&[], None).unwrap().offline);
         assert!(parse(&["--offline"], None).unwrap().offline);
         assert!(parse(&["--help"], None).unwrap_err().contains("--offline"));
+    }
+
+    #[test]
+    fn only_an_app_started_daemon_exits_with_it() {
+        assert!(!parse(&[], None).unwrap().exit_with_app);
+        assert!(parse(&["--exit-with-app"], None).unwrap().exit_with_app);
+        assert!(
+            parse(&["--help"], None)
+                .unwrap_err()
+                .contains("--exit-with-app")
+        );
     }
 
     #[test]

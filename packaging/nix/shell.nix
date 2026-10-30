@@ -27,7 +27,7 @@
   freetype,
 }:
 let
-  kopuzPkg = self.packages.${stdenv.hostPlatform.system}.kopuz;
+  kopuzPkg = self.packages.${stdenv.hostPlatform.system}.kopuz-legacy;
   # What the GPUI frontend links and dlopens.
   gpuiLibs = [
     wayland

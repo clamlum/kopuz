@@ -2803,6 +2803,40 @@ async fn playback_moves_between_the_engine_and_an_integration() {
     );
 }
 
+/// The Spotify tab's report carries no album id and sometimes no art, so the
+/// track kopuz queued keeps its library row while the tab is playing it.
+#[tokio::test]
+async fn an_integration_playing_the_queued_track_shows_the_library_row() {
+    let harness = harness(|_| {});
+    let stub = Arc::new(StubExternal::default());
+    harness.api.session.set_external_sink(stub.clone());
+    harness
+        .api
+        .set_queue(replace(&["spotify:remote"]))
+        .await
+        .expect("queue replaced");
+    wait_state(&harness.api, "the integration took the track", |state| {
+        state.external.is_some()
+    })
+    .await;
+
+    harness.api.session.report_external(crate::ExternalReport {
+        track: Some(external_track("remote")),
+        position_ms: 1000,
+        playing: true,
+        ..Default::default()
+    });
+    let state = wait_state(&harness.api, "the report applied", |state| {
+        state.phase == ApiPhase::Playing && state.position.is_some_and(|p| p.ms == 1000)
+    })
+    .await;
+    assert_eq!(
+        state.track.map(|track| track.title),
+        Some("spotify:remote".to_string()),
+        "the queued row, not the tab's bare copy"
+    );
+}
+
 async fn play_order(api: &LocalApi) -> Vec<String> {
     api.queue_window(Page::default())
         .await
@@ -3610,6 +3644,37 @@ fn from_context(mode: QueueMode, context: QueueContext) -> SetQueueRequest {
 async fn queue_keys(api: &LocalApi) -> Vec<String> {
     let snapshot = api.queue_snapshot().await.expect("queue snapshot");
     snapshot.items.into_iter().map(|track| track.key).collect()
+}
+
+#[tokio::test]
+async fn a_radio_from_the_playing_song_keeps_playing_it() {
+    let harness = radio_harness(Arc::new(RadioLibrary::default()));
+    harness.api.set_queue(replace(&["seed"])).await.unwrap();
+    let before = wait_committed(&harness.api).await;
+
+    harness.api.set_queue(track_radio("seed")).await.unwrap();
+    let after = harness.api.player_state().await.expect("player state");
+    assert_eq!(after.intent, before.intent, "the song was not loaded again");
+    assert_eq!(after.queue.index, Some(0));
+    assert_eq!(after.queue.length, 6);
+    assert_eq!(
+        queue_keys(&harness.api).await,
+        ["seed", "r1", "r2", "r3", "r4", "r5"]
+    );
+}
+
+#[tokio::test]
+async fn a_radio_from_another_song_starts_its_seed() {
+    let harness = radio_harness(Arc::new(RadioLibrary::default()));
+    harness.api.set_queue(replace(&["other"])).await.unwrap();
+    let before = wait_committed(&harness.api).await;
+
+    harness.api.set_queue(track_radio("seed")).await.unwrap();
+    let after = wait_state(&harness.api, "the seed committed", |state| {
+        matches!(state.intent, Intent::Committed { .. }) && state.intent != before.intent
+    })
+    .await;
+    assert_eq!(after.track.map(|track| track.key).as_deref(), Some("seed"));
 }
 
 #[tokio::test]

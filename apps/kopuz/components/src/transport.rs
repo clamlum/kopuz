@@ -95,6 +95,7 @@ pub struct PlayPauseButton {
     click: Option<Click>,
     loading: bool,
     floating: bool,
+    filled: bool,
 }
 
 impl PlayPauseButton {
@@ -110,6 +111,7 @@ impl PlayPauseButton {
             click: None,
             loading: false,
             floating: false,
+            filled: false,
         }
     }
 
@@ -142,6 +144,12 @@ impl PlayPauseButton {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// A filled accent circle whatever the skin, for a surface where play is the one thing to find.
+    pub fn filled(mut self, filled: bool) -> Self {
+        self.filled = filled;
         self
     }
 
@@ -232,19 +240,26 @@ impl RenderOnce for PlayPauseButton {
                 .into_any_element();
         }
         // A skin that squares the play button fills it, as Material's filled icon button is.
-        let shape = style::chrome().play_shape;
+        let shape = style::chrome().play_shape.filter(|_| !self.filled);
+        let fill = self.filled || shape.is_some();
         IconButton::new(self.id, glyph)
             .when_some(swap, |button, shown| button.swap_from(was, shown))
             .size(self.size)
             .glyph(self.glyph)
-            .tone(match shape {
-                Some(_) => IconTone::Accent,
-                None => IconTone::Quiet,
+            .tone(match fill {
+                true => IconTone::Accent,
+                false => IconTone::Quiet,
             })
             .shape(shape)
-            .lit(shape.is_none())
-            .when(shape.is_none(), |button| {
-                button.accent(cx.theme().foreground)
+            .lit(!fill)
+            .when(!fill, |button| button.accent(cx.theme().foreground))
+            .when(self.filled, |button| {
+                button.accent(motion::accent(
+                    theme::Surface::Chrome,
+                    cx.theme().primary,
+                    window,
+                    cx,
+                ))
             })
             .disabled(self.disabled)
             .stop_propagation(self.stop)
@@ -339,6 +354,7 @@ pub struct Transport {
     metrics: TransportMetrics,
     sides: bool,
     balanced: bool,
+    filled: bool,
     playing: bool,
     loaded: bool,
     shuffle: Option<bool>,
@@ -357,6 +373,7 @@ impl Transport {
             metrics: TransportMetrics::COMPACT,
             sides: false,
             balanced: false,
+            filled: false,
             playing: false,
             loaded: false,
             shuffle: None,
@@ -388,6 +405,12 @@ impl Transport {
 
     pub fn playing(mut self, playing: bool) -> Self {
         self.playing = playing;
+        self
+    }
+
+    /// Draw play as a filled accent circle; see [`PlayPauseButton::filled`].
+    pub fn filled(mut self, filled: bool) -> Self {
+        self.filled = filled;
         self
     }
 
@@ -486,6 +509,7 @@ impl RenderOnce for Transport {
                 PlayPauseButton::new(key("play-pause"))
                     .playing(self.playing)
                     .size(metrics.play, metrics.play_glyph)
+                    .filled(self.filled)
                     .disabled(!self.loaded)
                     .on_click(press(self.toggle)),
             )

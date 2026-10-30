@@ -1,6 +1,11 @@
+// Release builds start from a launcher, so on Windows they open no console window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod args;
 mod backdrop;
 mod handover;
+#[cfg(target_os = "macos")]
+mod menus;
 mod router;
 mod shell;
 mod system_ease;
@@ -61,33 +66,41 @@ fn keymap(cx: &mut App) {
     ]);
 }
 
-/// Where the daemon is: `KOPUZ_DAEMON_ADDR` for a TCP daemon, `KOPUZ_SOCKET` for a socket elsewhere.
-fn daemon_address() -> anyhow::Result<link::Address> {
+/// Where the daemon is, and whether this app starts its own there: only on the default socket, never on `KOPUZ_DAEMON_ADDR` or `KOPUZ_SOCKET`.
+fn daemon_address() -> anyhow::Result<(link::Address, bool)> {
     if let Ok(host) = std::env::var("KOPUZ_DAEMON_ADDR") {
-        return Ok(link::Address::Tcp(host));
+        return Ok((link::Address::Tcp(host), false));
     }
-    let socket = std::env::var_os("KOPUZ_SOCKET")
-        .map(Into::into)
-        .or_else(link::default_socket_path)
+    if let Some(socket) = std::env::var_os("KOPUZ_SOCKET") {
+        return Ok((link::Address::Socket(socket.into()), false));
+    }
+    let socket = link::default_socket_path()
         .ok_or_else(|| anyhow::anyhow!("no runtime directory to find the daemon socket in"))?;
-    Ok(link::Address::Socket(socket))
+    Ok((link::Address::Socket(socket), true))
 }
 
 /// jemalloc, so the profiler can ask the allocator what is held instead of reading RSS.
+#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// Hand freed pages back to the OS on a timer, so releasing a cover shows up in RSS rather than
 /// leaving the process looking as large as it ever was.
+#[cfg(not(target_env = "msvc"))]
 #[unsafe(export_name = "malloc_conf")]
 pub static MALLOC_CONF: &[u8] = b"background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000\0";
 
 fn main() -> anyhow::Result<()> {
+    // Before logging starts: this process becomes kopuzd, which keeps its own log.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(code) = link::run_daemon_flag(&argv) {
+        std::process::exit(code);
+    }
     // Held until main returns: dropping it is what flushes the chrome trace.
     let _profile = profile::init();
     let started = std::time::Instant::now();
 
-    let address = daemon_address()?;
+    let (address, start_own) = daemon_address()?;
     let args = args::Args::parse(std::env::args_os().skip(1));
 
     gpui_kit::application()
@@ -96,15 +109,15 @@ fn main() -> anyhow::Result<()> {
             gpui_kit::init(cx);
             i18n::init("en");
             // Quitting here would look like the icon did nothing; say why instead.
-            if let Err(error) = link::init(address, cx) {
+            if let Err(error) = link::init(address, start_own, cx) {
                 tracing::error!(%error, "could not set up the daemon link");
                 theme::apply_named("default", None, cx);
                 let reason = error.to_string();
                 cx.open_window(
                     WindowOptions {
-                        app_id: Some("kopuz".into()),
+                        app_id: Some(config::flavor::Flavor::current().name().into()),
                         titlebar: Some(TitlebarOptions {
-                            title: Some("Kopuz".into()),
+                            title: Some(config::flavor::Flavor::current().display_name().into()),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -131,8 +144,16 @@ fn main() -> anyhow::Result<()> {
             page_home::register(cx);
             page_home::register_catalog(
                 |id, scroll, window, cx| {
-                    cx.new(|cx| discover::CatalogPage::embedded(id, scroll, window, cx))
-                        .into()
+                    let feed = cx.new(|cx| discover::CatalogPage::embedded(id, scroll, window, cx));
+                    let chips = cx.new(|cx| discover::CatalogChips::new(feed.clone(), cx));
+                    let page = feed.clone();
+                    page_home::CatalogViews {
+                        chips: chips.into(),
+                        feed: feed.into(),
+                        strapline_to_host: std::rc::Rc::new(move |on, cx| {
+                            page.update(cx, |page, cx| page.hand_strapline_to_host(on, cx));
+                        }),
+                    }
                 },
                 cx,
             );
@@ -147,6 +168,8 @@ fn main() -> anyhow::Result<()> {
             commands::init(cx);
             theme::apply_named("default", None, cx);
             keymap(cx);
+            #[cfg(target_os = "macos")]
+            menus::init(cx);
             let ready = store::LayoutModel::global(cx).update(cx, |layout, _| layout.take_ready());
             cx.spawn(async move |cx| {
                 let timer = cx.background_executor().timer(PREFS_WAIT);
@@ -172,9 +195,9 @@ fn open_main_window(started: std::time::Instant, cx: &mut App) {
         })),
         window_min_size: Some(MAIN_WINDOW_MIN_SIZE),
         window_background: gpui_kit::WindowBackgroundAppearance::Opaque,
-        app_id: Some("kopuz".into()),
+        app_id: Some(config::flavor::Flavor::current().name().into()),
         titlebar: Some(TitlebarOptions {
-            title: Some("Kopuz".into()),
+            title: Some(config::flavor::Flavor::current().display_name().into()),
             ..Default::default()
         }),
         ..Default::default()

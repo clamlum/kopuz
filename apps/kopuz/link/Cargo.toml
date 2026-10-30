@@ -10,11 +10,23 @@ publish = false
 workspace = true
 
 [dependencies]
+config = { workspace = true }
 api = { workspace = true }
 client = { workspace = true }
 gpui-kit = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "process"] }
 futures = { workspace = true }
-directories = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+utils = { workspace = true }
+semver = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }

@@ -2,8 +2,9 @@
 
 use std::time::{Duration, Instant};
 
+use gpui_kit::base::animation::Lerp;
 use gpui_kit::base::motion::{Easing, Transition, transition};
-use gpui_kit::{App, ElementId, Hsla, Pixels, Window};
+use gpui_kit::{App, ElementId, Hsla, Pixels, Rgba, Window};
 
 /// Tailwind's bare `transition-*`, which is what most Kopuz hovers carry.
 pub const FAST: Duration = Duration::from_millis(150);
@@ -35,13 +36,31 @@ pub fn color_over(
     let Some(duration) = span(duration, cx) else {
         return target;
     };
-    transition(
+    let mixed = transition(
         id.into(),
-        target,
+        Mixed(target.into()),
         Transition::new(duration).easing(Easing::EaseInOut),
         window,
         cx,
-    )
+    );
+    mixed.0.into()
+}
+
+/// A colour eased channel by channel in RGB; gpui's `Hsla` tween lerps hue, so red to orange sweeps the whole wheel.
+#[derive(Clone, Copy, PartialEq)]
+struct Mixed(Rgba);
+
+impl Lerp for Mixed {
+    fn lerp(&self, target: &Self, t: f32) -> Self {
+        let at = |from: f32, to: f32| from + (to - from) * t;
+        let (from, to) = (self.0, target.0);
+        Mixed(Rgba {
+            r: at(from.r, to.r),
+            g: at(from.g, to.g),
+            b: at(from.b, to.b),
+            a: at(from.a, to.a),
+        })
+    }
 }
 
 /// The accent `surface` wears, eased over a track change; `base` is what the theme would paint.
@@ -364,6 +383,19 @@ mod tests {
             let now = progress(MS(at), FAST);
             assert!(now >= last, "never backs up");
             last = now;
+        }
+    }
+
+    #[test]
+    fn a_colour_eases_the_short_way_rather_than_round_the_wheel() {
+        let red = Mixed(gpui_kit::hsla(350. / 360., 0.8, 0.5, 1.).into());
+        let orange = Mixed(gpui_kit::hsla(20. / 360., 0.8, 0.5, 1.).into());
+        for step in 1..10 {
+            let hue = Hsla::from(red.lerp(&orange, step as f32 / 10.).0).h * 360.;
+            assert!(
+                !(30.0..=340.0).contains(&hue),
+                "step {step} passed through hue {hue}"
+            );
         }
     }
 

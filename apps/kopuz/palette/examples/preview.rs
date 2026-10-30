@@ -51,7 +51,7 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             i18n::init("en");
-            link::init(link::Address::Socket(socket), cx).expect("the daemon link");
+            link::init(link::Address::Socket(socket), false, cx).expect("the daemon link");
             store::init(cx);
             settings_interface::init(cx);
             palette::register_settings(cx);

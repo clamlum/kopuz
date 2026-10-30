@@ -20,15 +20,46 @@ use tonic::{Request, Response, Status};
 
 use daemon::SessionHandle;
 
+/// How many apps hold an event subscription right now; `kopuzctl` calls never subscribe, so they never count.
+#[derive(Clone, Default)]
+pub struct Clients(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Clients {
+    pub fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn join(&self) -> ClientGuard {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ClientGuard(self.clone())
+    }
+}
+
+/// One subscriber, counted for as long as its stream is alive.
+struct ClientGuard(Clients);
+
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub struct GrpcState {
     pub api: Arc<dyn KopuzApi>,
     /// Entity-addressed artwork; `None` makes GetArtwork answer unsupported.
     pub artwork: Option<Arc<daemon::ArtworkService>>,
     pub session: SessionHandle,
     pub started: Instant,
+    pub clients: Clients,
+    /// `None` makes the update RPCs answer unsupported.
+    pub updater: Option<Arc<crate::updates::Updater>>,
 }
 
 pub struct KopuzGrpc(Arc<GrpcState>);
+
+fn no_updater() -> Status {
+    failed(ApiError::unsupported("updates"))
+}
 
 fn failed(error: ApiError) -> Status {
     proto::status::to_status(error)
@@ -49,6 +80,10 @@ fn resync_message() -> proto::EventEnvelope {
 }
 
 impl KopuzGrpc {
+    fn updater(&self) -> Option<&Arc<crate::updates::Updater>> {
+        self.0.updater.as_ref()
+    }
+
     async fn player_mutation(
         &self,
         command: api::PlayerCommand,
@@ -65,6 +100,7 @@ struct EventSubscription {
     /// Sent before anything else, so a subscriber knows the stream is live.
     greeting: Option<proto::EventEnvelope>,
     live: broadcast::Receiver<ApiEvent>,
+    _client: ClientGuard,
 }
 
 impl EventSubscription {
@@ -93,6 +129,7 @@ impl Kopuz for KopuzGrpc {
         let subscription = EventSubscription {
             greeting: Some(resync_message()),
             live,
+            _client: self.0.clients.join(),
         };
         let stream = futures_util::stream::unfold(subscription, |subscription| subscription.next());
         Ok(Response::new(Box::pin(stream)))
@@ -200,6 +237,38 @@ impl Kopuz for KopuzGrpc {
             uptime_secs: self.0.started.elapsed().as_secs(),
             proto_revision: proto::WIRE_REVISION,
         }))
+    }
+
+    async fn get_update_status(
+        &self,
+        _request: Request<proto::GetUpdateStatusRequest>,
+    ) -> Result<Response<proto::UpdateStatus>, Status> {
+        let status = self.updater().ok_or_else(no_updater)?.status();
+        Ok(Response::new(convert::update_status_to_proto(&status)))
+    }
+
+    async fn check_for_update(
+        &self,
+        _request: Request<proto::CheckForUpdateRequest>,
+    ) -> Result<Response<proto::UpdateStatus>, Status> {
+        let status = self
+            .updater()
+            .ok_or_else(no_updater)?
+            .check()
+            .await
+            .map_err(failed)?;
+        Ok(Response::new(convert::update_status_to_proto(&status)))
+    }
+
+    async fn install_update(
+        &self,
+        request: Request<proto::InstallUpdateRequest>,
+    ) -> Result<Response<proto::Unit>, Status> {
+        self.updater()
+            .ok_or_else(no_updater)?
+            .install(request.get_ref().app_pid)
+            .map_err(failed)?;
+        Ok(Response::new(proto::Unit {}))
     }
 
     async fn get_player_state(

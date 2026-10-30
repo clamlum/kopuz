@@ -26,6 +26,7 @@ use daemon::boot::{Core, CoreArgs};
 
 pub mod identity;
 pub mod service;
+pub mod updates;
 
 pub use service::{GrpcState, bind_socket, serve, serve_tcp};
 
@@ -39,6 +40,8 @@ pub struct ServeArgs {
     pub identity: Option<identity::AppIdentity>,
     /// Start in offline mode: listings and playback keep to downloads and cached songs until `SetOffline` leaves it.
     pub offline: bool,
+    /// Exit once no app has been connected for a while and nothing plays: the daemon an app starts for itself.
+    pub exit_with_app: bool,
 }
 
 impl ServeArgs {
@@ -52,12 +55,19 @@ impl ServeArgs {
 
 pub use proto::default_socket_path;
 
-fn state(core: &Core) -> Arc<GrpcState> {
+/// Only the kopuzd binary updates itself: a frontend that hosts the core ships its own updater.
+fn state(
+    core: &Core,
+    updater: Option<&Arc<updates::Updater>>,
+    clients: &service::Clients,
+) -> Arc<GrpcState> {
     Arc::new(GrpcState {
         api: core.api.clone(),
         artwork: Some(core.artwork.clone()),
         session: core.session.clone(),
+        updater: updater.cloned(),
         started: Instant::now(),
+        clients: clients.clone(),
     })
 }
 
@@ -70,7 +80,10 @@ pub fn listen(
 ) -> std::io::Result<impl std::future::Future<Output = std::io::Result<()>> + use<>> {
     let listener = bind_socket(socket)?;
     tracing::info!(path = %socket.display(), "kopuzd listening");
-    Ok(serve(listener, state(core)))
+    Ok(serve(
+        listener,
+        state(core, None, &service::Clients::default()),
+    ))
 }
 
 async fn bind_tcp(address: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
@@ -86,6 +99,47 @@ async fn serve_tcp_if(
     match tcp {
         Some(listener) => serve_tcp(listener, state).await,
         None => std::future::pending().await,
+    }
+}
+
+/// No app connected and nothing playing for this long ends a daemon started with `--exit-with-app`.
+const APP_GONE_AFTER: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Resolves once the apps a `--exit-with-app` daemon serves have all gone and nothing is playing; never otherwise.
+async fn apps_gone(exit_with_app: bool, core: &Core, clients: &service::Clients) {
+    use api::prelude::*;
+    if !exit_with_app {
+        return std::future::pending().await;
+    }
+    let playing_now = async || {
+        core.api
+            .player_state()
+            .await
+            .is_ok_and(|state| state.phase == api::Phase::Playing)
+    };
+    // The phase follows the session's events, so the once-a-second check only reads a counter.
+    let mut events = core.session.subscribe();
+    let mut playing = playing_now().await;
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut idle_since: Option<Instant> = None;
+    loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Ok(api::ApiEvent::PlayerState(state)) => playing = state.phase == api::Phase::Playing,
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => playing = playing_now().await,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return std::future::pending().await;
+                }
+            },
+            _ = tick.tick() => match clients.count() == 0 && !playing {
+                true if idle_since.get_or_insert_with(Instant::now).elapsed() >= APP_GONE_AFTER => {
+                    return;
+                }
+                true => {}
+                false => idle_since = None,
+            },
+        }
     }
 }
 
@@ -117,17 +171,28 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let listener = bind_socket(&socket)?;
+    let clients = service::Clients::default();
+    let updater = updates::Updater::new(core.session.clone());
+    updater.spawn_checks(core.config_service.clone());
     tracing::info!(path = %socket.display(), "kopuzd listening");
     let tcp = match args.listen {
         Some(address) => Some(bind_tcp(address).await?),
         None => None,
     };
     let result = tokio::select! {
-        served = serve(listener, state(&core)) => served.map_err(Into::into),
-        served = serve_tcp_if(tcp, state(&core)) => served.map_err(Into::into),
+        served = serve(listener, state(&core, Some(&updater), &clients)) => served.map_err(Into::into),
+        served = serve_tcp_if(tcp, state(&core, Some(&updater), &clients)) => served.map_err(Into::into),
         signal = tokio::signal::ctrl_c() => {
             signal?;
             tracing::info!("shutting down");
+            Ok(())
+        }
+        () = apps_gone(args.exit_with_app, &core, &clients) => {
+            tracing::info!("no app left and nothing playing; shutting down");
+            Ok(())
+        }
+        () = updater.exit_requested() => {
+            tracing::info!("shutting down to apply an update");
             Ok(())
         }
         () = terminate_signal() => {
@@ -187,7 +252,12 @@ pub fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
 }
 
 fn log_dir() -> Option<PathBuf> {
-    Some(directories::BaseDirs::new()?.cache_dir().join("kopuz/logs"))
+    Some(
+        directories::BaseDirs::new()?
+            .cache_dir()
+            .join(config::flavor::Flavor::current().name())
+            .join("logs"),
+    )
 }
 
 /// Build a runtime and run the daemon to completion.

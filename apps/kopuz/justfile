@@ -19,12 +19,13 @@ run profile="debug" *args: (build profile)
     #!/usr/bin/env bash
     set -euo pipefail
     export KOPUZ_SOCKET={{ socket }}
+    export TMPDIR={{ runtime_dir }}
     rm -f "$KOPUZ_SOCKET"
 
     # One process group, so a kill reaches the whole tree rather than the wrapper
     # `nix develop` leaves in front of each binary.
     set -m
-    {{ nix }} {{ target }}/{{ profile }}/kopuzd --socket "$KOPUZ_SOCKET" &
+    {{ nix }} env TMPDIR={{ runtime_dir }} {{ target }}/{{ profile }}/kopuzd --socket "$KOPUZ_SOCKET" &
     daemon=$!
 
     # The socket is the daemon saying it is ready; starting the app before it exists
@@ -35,7 +36,7 @@ run profile="debug" *args: (build profile)
         sleep 0.2
     done
 
-    {{ nix }} {{ target }}/{{ profile }}/kopuz {{ args }} &
+    {{ nix }} env TMPDIR={{ runtime_dir }} {{ target }}/{{ profile }}/kopuz {{ args }} &
     app=$!
 
     # Whichever goes first takes the other with it: a frontend with no daemon can only
@@ -51,9 +52,10 @@ watch profile="debug" *args: (build profile)
     #!/usr/bin/env bash
     set -euo pipefail
     export KOPUZ_SOCKET={{ socket }}
+    export TMPDIR={{ runtime_dir }}
     rm -f "$KOPUZ_SOCKET"
     set -m
-    {{ nix }} {{ target }}/{{ profile }}/kopuzd --socket "$KOPUZ_SOCKET" &
+    {{ nix }} env TMPDIR={{ runtime_dir }} {{ target }}/{{ profile }}/kopuzd --socket "$KOPUZ_SOCKET" &
     daemon=$!
     trap 'kill -- -$daemon 2>/dev/null || true' EXIT INT TERM
     for _ in $(seq 1 100); do
@@ -64,7 +66,7 @@ watch profile="debug" *args: (build profile)
     # A crash loop is worth seeing rather than hiding, so a fast second death stops here.
     while kill -0 $daemon 2>/dev/null; do
         started=$SECONDS
-        {{ nix }} {{ target }}/{{ profile }}/kopuz {{ args }} || true
+        {{ nix }} env TMPDIR={{ runtime_dir }} {{ target }}/{{ profile }}/kopuz {{ args }} || true
         kill -0 $daemon 2>/dev/null || break
         if [ $(( SECONDS - started )) -lt 5 ]; then
             echo "the frontend died within five seconds; not restarting it again"
@@ -77,19 +79,21 @@ watch profile="debug" *args: (build profile)
 daemon profile="debug":
     #!/usr/bin/env bash
     set -euo pipefail
+    export TMPDIR={{ runtime_dir }}
     {{ nix }} cargo build -p kopuz-kopuzd {{ if profile == "release" { "--release" } else { "" } }}
     # kopuzd reclaims a stale socket itself and refuses a live one, so nothing is removed here.
-    exec {{ nix }} {{ target }}/{{ profile }}/kopuzd --socket "{{ shared_socket }}"
+    exec {{ nix }} env TMPDIR={{ runtime_dir }} {{ target }}/{{ profile }}/kopuzd --socket "{{ shared_socket }}"
 
 # The frontend on its own, against a daemon already listening: `just gpui daemon`, `just daemon`, or a service.
 app profile="debug" *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    export TMPDIR={{ runtime_dir }}
     {{ nix }} cargo build -p kopuz {{ if profile == "release" { "--release" } else { "" } }}
     export KOPUZ_SOCKET={{ shared_socket }}
     # Uncoupled on purpose, so this only ever reports a daemon it did not start rather than starting one.
     [ -S "$KOPUZ_SOCKET" ] || { echo "nothing listening on $KOPUZ_SOCKET; start one with 'just gpui daemon'"; exit 1; }
-    exec {{ nix }} {{ target }}/{{ profile }}/kopuz {{ args }}
+    exec {{ nix }} env TMPDIR={{ runtime_dir }} {{ target }}/{{ profile }}/kopuz {{ args }}
 
 # Everything CI checks, in the order that fails fastest.
 check:
